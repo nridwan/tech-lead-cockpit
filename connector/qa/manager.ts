@@ -18,7 +18,8 @@ import { DATA_DIR } from '../paths.ts';
 
 export const QA_KEYCHAIN_SERVICE = 'tech-lead-cockpit.qa';
 const KEEP_RUNS = 30;
-const GENERATE_TIMEOUT_MS = 10 * 60_000;
+/** Reading the codebase makes generation slower. */
+const GENERATE_TIMEOUT_MS = 20 * 60_000;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export class QaInputError extends Error {}
@@ -29,11 +30,15 @@ export interface QaDeps {
   readSecret: (key: string) => Promise<string | null>;
   writeSecret: (key: string, value: string) => Promise<boolean>;
   deleteSecret: (key: string) => Promise<boolean>;
-  runAi: (ai: AiSelection, prompt: string, opts: { cwd: string; timeoutMs: number; systemPrompt: string; onProgress: (text: string) => void }) => {
+  runAi: (ai: AiSelection, prompt: string, opts: { cwd: string; timeoutMs: number; systemPrompt: string; readOnlyDirs?: string[]; onProgress: (text: string) => void }) => {
     done: Promise<{ reply: string; error?: string }>;
     cancel: () => void;
   };
   fetch?: typeof fetch;
+  /** The Services codebase the AI may read (read-only) while generating. */
+  resolveServicesRoot?: (input: string) => Promise<string>;
+  /** Snapshot of the repos' working trees; the returned function lists repos changed since. */
+  watchRepos?: (root: string) => Promise<() => Promise<string[]>>;
   /** Read-only database access (PostgreSQL); tests inject a fake. */
   db?: {
     query: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
@@ -417,12 +422,30 @@ export class QaManager {
     }
     // Empty working folder: the AI gets the TAD in the prompt and has nothing else to read.
     const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
+    // The codebase (read-only): routes, payloads and responses are checked against the code.
+    let codebase: { root: string; folders: string[] } | undefined;
+    // Only the CLI agents can read files; API providers generate from the TAD alone.
+    const canRead = req.ai.provider === 'claude' || req.ai.provider === 'antigravity';
+    if (req.useCodebase !== false && canRead && this.deps.resolveServicesRoot) {
+      try {
+        const root = await this.deps.resolveServicesRoot(req.servicesRoot ?? '');
+        const all = await readdir(root, { withFileTypes: true }).catch(() => []);
+        const names = all.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name);
+        const folders = [...new Set(req.tasks.map((t) => names.find((n) => n.toLowerCase() === (t.service ?? '').toLowerCase())).filter((n): n is string => Boolean(n)))];
+        codebase = { root, folders };
+        req.codebase = codebase;
+      } catch {
+        // No codebase folder: generate from the TAD alone.
+      }
+    }
+    const changed = codebase && this.deps.watchRepos ? await this.deps.watchRepos(codebase.root).catch(() => undefined) : undefined;
     // Shown until the AI streams its own progress (a big prompt can take a few minutes).
     job.progress = `AI menyusun skenario${req.databases?.length ? ` dengan skema ${req.databases.length} database` : ''}… biasanya beberapa menit.`;
     const run = this.deps.runAi(req.ai, buildQaPrompt(req), {
       cwd,
       timeoutMs: GENERATE_TIMEOUT_MS,
       systemPrompt: QA_SYSTEM_PROMPT,
+      readOnlyDirs: codebase ? [codebase.root] : [],
       onProgress: (text) => (job.progress = text.slice(0, 200)),
     });
     job.cancel = run.cancel;
@@ -437,7 +460,11 @@ export class QaManager {
           job.rawReply = outcome.reply.slice(0, 50_000);
           throw e;
         }
-        const { flows, notes } = parsed;
+        const { flows } = parsed;
+        let notes = parsed.notes;
+        // The codebase is read-only: report any change found in a repo's working tree.
+        const touched = changed ? await changed().catch(() => []) : [];
+        if (touched.length) notes = `${notes ? `${notes}\n\n` : ''}PERINGATAN: working tree berubah selama generate di ${touched.join(', ')}. Periksa repo tersebut.`;
         const now = new Date().toISOString();
         const suite: QASuite = {
           projectId,

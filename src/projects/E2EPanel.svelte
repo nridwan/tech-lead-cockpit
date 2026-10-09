@@ -14,6 +14,7 @@
   import E2ELogViewer from './E2ELogViewer.svelte';
   import FlowEditor from './FlowEditor.svelte';
   import { projectDrafts, projectTasks, prdContext } from './project-tasks';
+  import { loadServicesRoot } from '../tad/generator-client';
 
   /** E2E flows and runs belong to the project, so a flow can span the project's TADs. */
   let { project, drafts }: { project: Pick<EstimateProject, 'id' | 'name' | 'draftIds'>; drafts: Draft[] } = $props();
@@ -38,6 +39,10 @@
   let instructions = $state('');
   let ai = $state<AiSelection>(loadAiSelection('generator'));
   let append = $state(false);
+  /** Check routes, payloads and responses against the Services code (read-only). */
+  let useCodebase = $state(true);
+  const servicesRoot = loadServicesRoot();
+  const canReadCode = $derived(ai.provider === 'claude' || ai.provider === 'antigravity');
   let job = $state<QAGenerateJob | null>(null);
 
   // Editing
@@ -184,6 +189,8 @@
         existing: append ? $state.snapshot(suite?.flows ?? []) : undefined,
         // Its databases (if any) let the AI use real data and data checks.
         environmentId: envId || undefined,
+        useCodebase: useCodebase && canReadCode,
+        servicesRoot,
       });
       void pollJob(job.id);
     } catch (e) {
@@ -391,13 +398,20 @@
             <label class="check small"><input type="checkbox" bind:checked={append} /> Tambahkan ke {suite.flows.length} flow yang ada</label>
           {/if}
           <button class="btn btn-primary" onclick={generate} disabled={!selectedTasks.size}><Icon name="sparkles" size={14} /> Generate skenario E2E</button>
+          <label class="check small codebase-opt" class:off={!canReadCode}>
+            <input type="checkbox" bind:checked={useCodebase} disabled={!canReadCode} />
+            <span>
+              <strong>Cek ke codebase</strong> (hanya baca): AI mencocokkan path, method, field request, response, dan health check dengan router/handler di <code>{servicesRoot}</code>.
+              {#if !canReadCode}<em>Butuh Claude CLI atau Antigravity; provider API tidak bisa membaca file.</em>{/if}
+            </span>
+          </label>
           {#if environments.find((e) => e.id === envId)?.databases?.length}
             {@const dbs = environments.find((e) => e.id === envId)?.databases ?? []}
             <p class="db-note small"><Icon name="check" size={12} /> Database environment ini ({dbs.map((d) => d.name).join(', ')}) ikut dipakai: AI membaca skema tabelnya untuk mengambil data nyata sebagai variabel dan memeriksa data setelah request. Hanya SELECT, read-only.</p>
           {:else}
             <p class="muted small">Tambahkan database di environment (tombol pengaturan environment) agar test memakai data nyata dari DB.</p>
           {/if}
-          <p class="muted small">AI hanya menerima teks Detail Task, PRD, dan skema tabel (nama tabel/kolom, tanpa isi data). Token dan password tidak pernah dikirim ke AI.</p>
+          <p class="muted small">AI menerima Detail Task, PRD, skema tabel (tanpa isi data), dan bila dicentang membaca kode service tanpa mengubahnya. Token dan password tidak pernah dikirim ke AI.</p>
         </div>
       </div>
     </section>
@@ -597,6 +611,22 @@
 <E2EEnvironmentModal bind:open={envModalOpen} bind:environments bind:selectedId={envId} {services} />
 
 <style>
+  .codebase-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+  }
+  .codebase-opt.off {
+    opacity: 0.7;
+  }
+  .codebase-opt em {
+    display: block;
+    color: var(--warn);
+    font-style: normal;
+  }
   .db-note {
     display: flex;
     align-items: flex-start;

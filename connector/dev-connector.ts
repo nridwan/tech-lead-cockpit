@@ -940,11 +940,20 @@ function qaManager(): QaManager {
     readSecret: (key) => readKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
     writeSecret: (key, value) => writeKeychain(QA_KEYCHAIN_SERVICE, value, `env:${key}`),
     deleteSecret: (key) => deleteKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
+    // With a codebase the AI needs file tools (Services stays read-only and is checked); otherwise plain text.
+    resolveServicesRoot: (input) => resolveServicesRoot(input || undefined),
+    watchRepos: async (root) => {
+      const before = await snapshotRepos(root);
+      return async () => diffSnapshots(before, await snapshotRepos(root)).map((c) => c.repo);
+    },
     runAi: (ai, prompt, opts) => {
-      const run = startProviderRun(ai, 'text', prompt, {
+      const edit = Boolean(opts.readOnlyDirs?.length);
+      // Edit mode has no system prompt of its own: it goes first in the prompt.
+      const run = startProviderRun(ai, edit ? 'edit' : 'text', edit ? `${opts.systemPrompt}\n\n---\n\n${prompt}` : prompt, {
         cwd: opts.cwd,
         timeoutMs: opts.timeoutMs,
         systemPrompt: opts.systemPrompt,
+        readOnlyDirs: opts.readOnlyDirs,
         onEvent: (e) => {
           if (e.kind !== 'text' && e.text) opts.onProgress(e.text);
           else if (e.kind === 'text') opts.onProgress('AI sedang menulis skenario…');

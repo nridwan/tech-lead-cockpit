@@ -207,6 +207,11 @@ export interface QAGenerateRequest {
   existing?: QAFlow[];
   /** Environment whose databases the AI may use for real data and data checks. */
   environmentId?: string;
+  /** Let the AI read the Services codebase (read-only) to check routes, payloads and responses (default true). */
+  useCodebase?: boolean;
+  servicesRoot?: string;
+  /** Filled by the connector: the codebase root and the selected tasks' service folders. */
+  codebase?: { root: string; folders: string[] };
   /** Filled by the connector from that environment: schema per database (never passwords). */
   databases?: { name: string; service?: string; schema: string; error?: string }[];
 }
