@@ -3,10 +3,12 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
 import { listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
+import { buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
+import { verifyEvidence } from '../trace/verify.ts';
 import { runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
 
@@ -20,6 +22,10 @@ export const QA_KEYCHAIN_SERVICE = 'tech-lead-cockpit.qa';
 const KEEP_RUNS = 30;
 /** Reading the codebase makes generation slower. */
 const GENERATE_TIMEOUT_MS = 20 * 60_000;
+/** Pipeline agents running at once (writers, repairers); the CLI's usage limits are shared. */
+const DEFAULT_CONCURRENCY = 3;
+const MAX_CONCURRENCY = 5;
+const MAX_REPAIRS = 15;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export class QaInputError extends Error {}
@@ -39,6 +45,8 @@ export interface QaDeps {
   resolveServicesRoot?: (input: string) => Promise<string>;
   /** Snapshot of the repos' working trees; the returned function lists repos changed since. */
   watchRepos?: (root: string) => Promise<() => Promise<string[]>>;
+  /** Mirrors a pipeline agent into Agent Tasks; returns the task id it is listed under. */
+  agentSink?: (job: QAAgentJob, projectName: string) => Promise<string | undefined>;
   /** Read-only database access (PostgreSQL); tests inject a fake. */
   db?: {
     query: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
@@ -147,6 +155,10 @@ export class QaManager {
   private readonly dir: string;
   private readonly jobs = new Map<string, QAGenerateJob & { cancel?: () => void }>();
   private readonly runs = new Map<string, { run: QARun; cancelled: boolean }>();
+  private readonly pipelines = new Map<string, QAPipeline>();
+  /** Cancel functions of running pipeline agents, and agents asked to stop. */
+  private readonly agentCancels = new Map<string, () => void>();
+  private readonly agentStopped = new Set<string>();
 
   constructor(private readonly deps: QaDeps) {
     this.dir = deps.dir ?? join(DATA_DIR, 'qa');
@@ -174,7 +186,11 @@ export class QaManager {
 
   /** A generation or run is in progress (only in this process's memory). */
   isBusy(): boolean {
-    return [...this.jobs.values()].some((j) => j.status === 'running') || [...this.runs.values()].some((r) => r.run.status === 'running');
+    return (
+      [...this.jobs.values()].some((j) => j.status === 'running') ||
+      [...this.runs.values()].some((r) => r.run.status === 'running') ||
+      [...this.pipelines.values()].some((p) => p.agents.some((a) => a.status === 'running' || a.status === 'queued'))
+    );
   }
 
   private envFile = () => join(this.dir, 'environments.json');
@@ -389,15 +405,11 @@ export class QaManager {
 
   // Generation -----------------------------------------------------------------------------
 
-  async generate(req: QAGenerateRequest): Promise<QAGenerateJob> {
-    const projectId = this.projectId(req.projectId);
-    if (!req.tasks?.length) throw new QaInputError('Pilih minimal satu task.');
-    if (!req.ai?.provider) throw new QaInputError('Pilih provider AI.');
-    const busy = [...this.jobs.values()].find((j) => j.projectId === projectId && j.status === 'running');
-    if (busy) return busy;
-
-    const job: QAGenerateJob & { cancel?: () => void } = { id: randomUUID(), projectId, status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan prompt…' };
-    this.jobs.set(job.id, job);
+  /**
+   * What the AI may use besides the TAD: the schemas of the tasks' services' databases (read-only,
+   * never passwords) and the Services codebase (read-only, CLI agents only).
+   */
+  private async prepareContext(req: QAGenerateRequest, progress: (text: string) => void): Promise<{ req: QAGenerateRequest; codebase?: { root: string; folders: string[] } }> {
     // The environment's databases: their schema lets the AI write real-data queries (never passwords).
     req = { ...req, databases: undefined };
     const env = req.environmentId ? (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId) : undefined;
@@ -408,7 +420,7 @@ export class QaManager {
       if (!picked.length && env.databases.length <= 3) picked = env.databases;
       picked = picked.slice(0, MAX_SCHEMA_DBS);
       if (picked.length) {
-        job.progress = `Membaca skema ${picked.length} database…`;
+        progress(`Membaca skema ${picked.length} database…`);
         req.databases = await Promise.all(
           picked.map(async (d) => {
             try {
@@ -420,8 +432,6 @@ export class QaManager {
         );
       }
     }
-    // Empty working folder: the AI gets the TAD in the prompt and has nothing else to read.
-    const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
     // The codebase (read-only): routes, payloads and responses are checked against the code.
     let codebase: { root: string; folders: string[] } | undefined;
     // Only the CLI agents can read files; API providers generate from the TAD alone.
@@ -438,6 +448,23 @@ export class QaManager {
         // No codebase folder: generate from the TAD alone.
       }
     }
+    return { req, codebase };
+  }
+
+  async generate(req: QAGenerateRequest): Promise<QAGenerateJob> {
+    const projectId = this.projectId(req.projectId);
+    if (!req.tasks?.length) throw new QaInputError('Pilih minimal satu task.');
+    if (!req.ai?.provider) throw new QaInputError('Pilih provider AI.');
+    const busy = [...this.jobs.values()].find((j) => j.projectId === projectId && j.status === 'running');
+    if (busy) return busy;
+
+    const job: QAGenerateJob & { cancel?: () => void } = { id: randomUUID(), projectId, status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan prompt…' };
+    this.jobs.set(job.id, job);
+    const ctx = await this.prepareContext(req, (t) => (job.progress = t));
+    req = ctx.req;
+    const codebase = ctx.codebase;
+    // Empty working folder: the AI gets the TAD in the prompt and reads the codebase only if allowed.
+    const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
     const changed = codebase && this.deps.watchRepos ? await this.deps.watchRepos(codebase.root).catch(() => undefined) : undefined;
     // Shown until the AI streams its own progress (a big prompt can take a few minutes).
     job.progress = `AI menyusun skenario${req.databases?.length ? ` dengan skema ${req.databases.length} database` : ''}… biasanya beberapa menit.`;
@@ -516,6 +543,308 @@ export class QaManager {
       job.cancel?.();
     }
     return job && this.publicJob(job);
+  }
+
+  // Pipeline: planner → review → writers per stage (parallel) → check → run → repair ------------
+
+  private planFile = (projectId: string) => join(this.dir, 'plans', `${this.projectId(projectId)}.json`);
+
+  private pipeline(projectId: string): QAPipeline {
+    let p = this.pipelines.get(projectId);
+    if (!p) {
+      p = { projectId, phase: 'idle', concurrency: DEFAULT_CONCURRENCY, agents: [], updatedAt: new Date().toISOString() };
+      this.pipelines.set(projectId, p);
+    }
+    return p;
+  }
+
+  async getPlan(projectId: string): Promise<QAPlan | null> {
+    return (await this.read<QAPlan>(this.planFile(projectId))) ?? null;
+  }
+
+  /** The plan and the pipeline's agents (live), for the UI. */
+  async getPipeline(projectId: string): Promise<{ plan: QAPlan | null; pipeline: QAPipeline }> {
+    const p = this.pipeline(this.projectId(projectId));
+    return { plan: await this.getPlan(projectId), pipeline: { ...p, agents: p.agents.map((a) => ({ ...a })) } };
+  }
+
+  /** The user's edits to the plan (reorder, rename, drop stages or endpoints). */
+  async savePlan(plan: QAPlan): Promise<QAPlan> {
+    const saved: QAPlan = { ...plan, projectId: this.projectId(plan.projectId), updatedAt: new Date().toISOString() };
+    if (!saved.stages?.length) throw new QaInputError('Rencana butuh minimal satu tahap.');
+    await this.write(this.planFile(saved.projectId), saved);
+    return saved;
+  }
+
+  private busyAgents(p: QAPipeline) {
+    return p.agents.filter((a) => a.status === 'running' || a.status === 'queued');
+  }
+
+  private async syncAgent(job: QAAgentJob, projectName: string) {
+    const id = await this.deps.agentSink?.(job, projectName).catch(() => undefined);
+    if (id) job.agentTaskId = id;
+  }
+
+  /** Runs one agent to its reply (or throws); progress and status mirror into Agent Tasks. */
+  private async runAgent(job: QAAgentJob, projectName: string, ai: AiSelection, prompt: string, systemPrompt: string, readOnlyDirs: string[]): Promise<string> {
+    if (this.agentStopped.has(job.id)) throw new Error('Dibatalkan.');
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    await this.syncAgent(job, projectName);
+    const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
+    let lastSync = 0;
+    try {
+      const run = this.deps.runAi(ai, prompt, {
+        cwd,
+        timeoutMs: GENERATE_TIMEOUT_MS,
+        systemPrompt,
+        readOnlyDirs,
+        onProgress: (text) => {
+          job.progress = text.slice(0, 200);
+          if (Date.now() - lastSync > 5_000) (lastSync = Date.now()), void this.syncAgent(job, projectName);
+        },
+      });
+      this.agentCancels.set(job.id, run.cancel);
+      const outcome = await run.done;
+      if (this.agentStopped.has(job.id)) throw new Error('Dibatalkan.');
+      if (outcome.error) throw new Error(outcome.error);
+      return outcome.reply;
+    } finally {
+      this.agentCancels.delete(job.id);
+      void rm(cwd, { recursive: true, force: true });
+    }
+  }
+
+  private async finishAgent(job: QAAgentJob, projectName: string, outcome: { result?: string; error?: unknown; rawReply?: string }) {
+    job.finishedAt = new Date().toISOString();
+    job.progress = undefined;
+    if (outcome.error) {
+      job.status = this.agentStopped.has(job.id) ? 'cancelled' : 'error';
+      job.error = (outcome.error as Error).message;
+      if (outcome.rawReply) job.rawReply = outcome.rawReply.slice(0, 50_000);
+    } else {
+      job.status = 'done';
+      job.result = outcome.result;
+    }
+    await this.syncAgent(job, projectName);
+  }
+
+  /** Runs `fn` over `items`, at most `limit` at a time. */
+  private async pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
+    const queue = [...items];
+    await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, async () => {
+      for (let item = queue.shift(); item !== undefined; item = queue.shift()) await fn(item);
+    }));
+  }
+
+  private newAgent(projectId: string, role: QAAgentJob['role'], label: string, ai: AiSelection, extra: Partial<QAAgentJob> = {}): QAAgentJob {
+    return { id: randomUUID(), projectId, role, label, ai, status: 'queued', ...extra };
+  }
+
+  /** Step 1: the planner agent maps the journey (stages, endpoints with file:line, variable contract). */
+  async startPlan(req: QAGenerateRequest): Promise<QAPipeline> {
+    const projectId = this.projectId(req.projectId);
+    if (!req.tasks?.length) throw new QaInputError('Pilih minimal satu task.');
+    const p = this.pipeline(projectId);
+    if (this.busyAgents(p).length) throw new QaInputError('Masih ada agent E2E yang berjalan untuk proyek ini.');
+    const job = this.newAgent(projectId, 'plan', 'Rencana journey E2E', req.ai);
+    p.agents = [job];
+    p.phase = 'planning';
+    p.updatedAt = new Date().toISOString();
+    void (async () => {
+      try {
+        job.progress = 'Menyiapkan konteks…';
+        const { req: full, codebase } = await this.prepareContext({ ...req, focus: undefined }, (t) => (job.progress = t));
+        const changed = codebase && this.deps.watchRepos ? await this.deps.watchRepos(codebase.root).catch(() => undefined) : undefined;
+        job.progress = 'AI memetakan journey dari TAD dan kode…';
+        const reply = await this.runAgent(job, req.projectName, req.ai, buildPlanPrompt(full), PLAN_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+        let plan: QAPlan;
+        try {
+          plan = parsePlan(reply, { projectId, projectName: req.projectName, ai: req.ai, request: { ...req, databases: undefined, codebase: undefined, focus: undefined } });
+        } catch (e) {
+          await this.finishAgent(job, req.projectName, { error: e, rawReply: reply });
+          return;
+        }
+        // Each endpoint's evidence is checked against the real router file: the line exists and
+        // the code around it names the path.
+        if (codebase) {
+          const endpoints = plan.stages.flatMap((st) => st.endpoints);
+          const cite = (e: (typeof endpoints)[number]) => /^(.+):(\d+)$/.exec(e.evidence ?? '');
+          const checked = await verifyEvidence(codebase.root, endpoints.map((e) => ({ file: cite(e)?.[1] ?? '', line: Number(cite(e)?.[2]), note: '', verified: false })));
+          endpoints.forEach((e, i) => (e.verified = Boolean(cite(e)) && checked[i].verified && evidenceMentions(e.path, checked[i].snippet)));
+        }
+        const touched = changed ? await changed().catch(() => []) : [];
+        if (touched.length) plan.notes = `${plan.notes ? `${plan.notes}\n\n` : ''}PERINGATAN: working tree berubah selama perencanaan di ${touched.join(', ')}.`;
+        await this.savePlan(plan);
+        await this.finishAgent(job, req.projectName, { result: `${plan.stages.length} tahap` });
+      } catch (e) {
+        await this.finishAgent(job, req.projectName, { error: e });
+      } finally {
+        p.phase = job.status === 'done' ? 'review' : 'idle';
+        p.updatedAt = new Date().toISOString();
+      }
+    })();
+    return p;
+  }
+
+  /**
+   * Step 2: writer agents, one per stage (all, or `stageIds` to redo some), at most `concurrency`
+   * at a time. Each stage's flows replace that stage's flows as soon as they are ready.
+   */
+  async writeFromPlan(projectId: string, opts: { concurrency?: number; stageIds?: string[]; ai?: AiSelection } = {}): Promise<QAPipeline> {
+    projectId = this.projectId(projectId);
+    const plan = await this.getPlan(projectId);
+    if (!plan) throw new QaInputError('Buat rencana journey dulu.');
+    const p = this.pipeline(projectId);
+    if (this.busyAgents(p).length) throw new QaInputError('Masih ada agent E2E yang berjalan untuk proyek ini.');
+    const stages = plan.stages.filter((st) => !opts.stageIds?.length || opts.stageIds.includes(st.id));
+    if (!stages.length) throw new QaInputError('Tahap tidak ditemukan di rencana.');
+    p.concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.round(opts.concurrency ?? p.concurrency)));
+    const ai = opts.ai ?? plan.ai;
+    const jobs = stages.map((st) => this.newAgent(projectId, 'write', `Tulis test case: ${st.title}`, ai, { stageId: st.id }));
+    p.agents = jobs;
+    p.phase = 'writing';
+    p.updatedAt = new Date().toISOString();
+    for (const j of jobs) void this.syncAgent(j, plan.projectName);
+    const written = new Map<string, QAFlow[]>();
+
+    // Existing flows of the stages being rewritten are replaced as each stage finishes.
+    const merge = async () => {
+      const current = (await this.getSuite(projectId))?.flows ?? [];
+      const finished = new Set(plan.stages.filter((st) => written.has(st.id)).map((st) => st.title));
+      const byStage = new Map<string, QAFlow[]>();
+      const others: QAFlow[] = [];
+      for (const f of current) {
+        if (f.stage && finished.has(f.stage)) continue;
+        if (f.stage && plan.stages.some((st) => st.title === f.stage)) byStage.set(f.stage, [...(byStage.get(f.stage) ?? []), f]);
+        else others.push(f);
+      }
+      const ordered = plan.stages.flatMap((st) => written.get(st.id) ?? byStage.get(st.title) ?? []);
+      const now = new Date().toISOString();
+      const prev = await this.getSuite(projectId);
+      await this.saveSuite({ ...(prev ?? {}), projectId, projectName: plan.projectName, flows: checkFlowsAgainstPlan([...ordered, ...others], plan), generatedAt: now, ai, updatedAt: now });
+    };
+
+    void (async () => {
+      await this.pool(jobs, p.concurrency, async (job) => {
+        const stage = plan.stages.find((st) => st.id === job.stageId)!;
+        try {
+          const tasks = plan.request.tasks.filter((t) => !stage.taskTitles.length || stage.taskTitles.includes(t.title));
+          const services = new Set(stage.endpoints.map((e) => e.service?.toLowerCase()).filter(Boolean));
+          const scoped = { ...plan.request, ai, tasks: tasks.length ? tasks : plan.request.tasks, focus: { stage, stages: plan.stages.map((x) => ({ id: x.id, title: x.title })), variables: plan.variables } };
+          // The codebase folders of the stage's services too (not only the tasks').
+          const { req: full, codebase } = await this.prepareContext(
+            { ...scoped, tasks: [...scoped.tasks, ...[...services].filter((sv) => !scoped.tasks.some((t) => t.service?.toLowerCase() === sv)).map((sv) => ({ title: '', service: sv, spec: '' }))] },
+            (t) => (job.progress = t),
+          );
+          full.tasks = scoped.tasks;
+          const reply = await this.runAgent(job, plan.projectName, ai, buildQaPrompt(full), QA_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          let flows: QAFlow[];
+          try {
+            flows = parseQaReply(reply, stage.taskTitles).flows.map((f) => ({ ...f, stage: stage.title }));
+          } catch (e) {
+            await this.finishAgent(job, plan.projectName, { error: e, rawReply: reply });
+            return;
+          }
+          written.set(stage.id, flows);
+          await merge();
+          await this.finishAgent(job, plan.projectName, { result: `${flows.length} test case` });
+        } catch (e) {
+          await this.finishAgent(job, plan.projectName, { error: e });
+        }
+      });
+      p.phase = 'idle';
+      p.updatedAt = new Date().toISOString();
+    })();
+    return p;
+  }
+
+  /**
+   * Step 3: after a run, one repair agent per failed flow: a wrong test is fixed in the suite, a
+   * service bug is listed as a suspect (for Bug Tracing).
+   */
+  async repairRun(projectId: string, runId: string, opts: { concurrency?: number; ai?: AiSelection } = {}): Promise<QAPipeline> {
+    projectId = this.projectId(projectId);
+    const run = await this.getRun(projectId, runId);
+    if (!run || run.status === 'running') throw new QaInputError('Run tidak ditemukan atau masih berjalan.');
+    const suite = await this.getSuite(projectId);
+    if (!suite) throw new QaInputError('Belum ada test case.');
+    const failed = run.flows.filter((f) => f.status === 'failed' || f.status === 'error').filter((f) => suite.flows.some((x) => x.id === f.flowId)).slice(0, MAX_REPAIRS);
+    if (!failed.length) throw new QaInputError('Tidak ada test case yang gagal di run ini.');
+    const p = this.pipeline(projectId);
+    if (this.busyAgents(p).length) throw new QaInputError('Masih ada agent E2E yang berjalan untuk proyek ini.');
+    const plan = await this.getPlan(projectId);
+    const ai = opts.ai ?? plan?.ai ?? suite.ai;
+    if (!ai) throw new QaInputError('Pilih AI untuk agent perbaikan.');
+    p.concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.round(opts.concurrency ?? p.concurrency)));
+    const jobs = failed.map((f) => this.newAgent(projectId, 'repair', `Perbaiki: ${f.name}`, ai, { flowId: f.flowId }));
+    p.agents = jobs;
+    p.phase = 'repairing';
+    p.updatedAt = new Date().toISOString();
+    for (const j of jobs) void this.syncAgent(j, suite.projectName);
+    // One write at a time: agents finish in any order.
+    let chain: Promise<unknown> = Promise.resolve();
+    const update = (fn: (s: QASuite) => QASuite) => (chain = chain.then(async () => {
+      const cur = await this.getSuite(projectId);
+      if (cur) await this.saveSuite(fn(cur));
+    }));
+
+    void (async () => {
+      await this.pool(jobs, p.concurrency, async (job) => {
+        const result = failed.find((f) => f.flowId === job.flowId)!;
+        const flow = suite.flows.find((f) => f.id === job.flowId)!;
+        try {
+          const services = [...new Set(flow.steps.map((st) => st.service).filter((x): x is string => Boolean(x)))];
+          const { codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: undefined }, (t) => (job.progress = t));
+          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          let verdict: ReturnType<typeof parseRepair>;
+          try {
+            verdict = parseRepair(reply, flow);
+          } catch (e) {
+            await this.finishAgent(job, suite.projectName, { error: e, rawReply: reply });
+            return;
+          }
+          if (verdict.flow && verdict.verdict !== 'service-bug') {
+            const fixed = { ...verdict.flow, repairNote: `${verdict.verdict === 'environment' ? 'Lingkungan' : 'Test diperbaiki'}: ${verdict.reason}` };
+            await update((s) => ({ ...s, flows: plan ? checkFlowsAgainstPlan(s.flows.map((f) => (f.id === flow.id ? fixed : f)), plan) : s.flows.map((f) => (f.id === flow.id ? fixed : f)) }));
+          }
+          if (verdict.verdict === 'service-bug') {
+            const suspect: QASuspect = { flowId: flow.id, flowName: flow.name, title: verdict.bug?.title ?? flow.name, detail: verdict.bug?.detail ?? verdict.reason, ...(verdict.bug?.service ? { service: verdict.bug.service } : {}), runId, at: new Date().toISOString() };
+            await update((s) => ({ ...s, suspects: [...(s.suspects ?? []).filter((x) => x.flowId !== flow.id), suspect] }));
+          }
+          await chain;
+          const label = verdict.verdict === 'fix-test' ? 'test diperbaiki' : verdict.verdict === 'service-bug' ? 'dugaan bug service' : 'masalah lingkungan';
+          await this.finishAgent(job, suite.projectName, { result: `${label}: ${verdict.reason.slice(0, 160)}` });
+        } catch (e) {
+          await this.finishAgent(job, suite.projectName, { error: e });
+        }
+      });
+      p.phase = 'idle';
+      p.updatedAt = new Date().toISOString();
+    })();
+    return p;
+  }
+
+  /** Stops one agent (or every agent of the project's pipeline). */
+  cancelAgent(jobId: string): QAAgentJob | undefined {
+    for (const p of this.pipelines.values()) {
+      const job = p.agents.find((a) => a.id === jobId);
+      if (!job) continue;
+      this.agentStopped.add(job.id);
+      this.agentCancels.get(job.id)?.();
+      if (job.status === 'queued') {
+        job.status = 'cancelled';
+        job.finishedAt = new Date().toISOString();
+      }
+      return job;
+    }
+    return undefined;
+  }
+
+  cancelPipeline(projectId: string): QAPipeline {
+    const p = this.pipeline(this.projectId(projectId));
+    for (const a of this.busyAgents(p)) this.cancelAgent(a.id);
+    return p;
   }
 
   // Runs -----------------------------------------------------------------------------------

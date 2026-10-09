@@ -30,7 +30,7 @@
 
   // Every run of Cockpit's local coding agents: TAD tasks from the Task Board and fixes from Bug Tracing.
   const groups = $derived(groupByStatus(tasks));
-  const KIND_LABEL: Record<string, string> = { general: 'Umum', review: 'Review MR', implement: 'Implement task', trace: 'Trace kode' };
+  const KIND_LABEL: Record<string, string> = { general: 'Umum', review: 'Review MR', implement: 'Implement task', trace: 'Trace kode', e2e: 'E2E test' };
 
   // Code trace: one question box; the answer is traced in the background and listed below.
   let question = $state('');
@@ -294,7 +294,16 @@
             {/if}
             {#if t.error}<p class="err small">{t.error}</p>{/if}
 
-            {#if t.kind === 'trace'}
+            {#if t.kind === 'e2e'}
+            <div class="actions">
+              {#if t.links?.qaProjectId}
+                <a class="btn btn-sm btn-primary" href="#/projects/{t.links.qaProjectId}?tab=e2e"><Icon name="eye" size={14} /> Buka tab E2E proyek</a>
+              {/if}
+              {#if t.status === 'queued' || t.status === 'running'}
+                <button class="btn btn-sm btn-danger" disabled={busy[t.id]} onclick={() => cancel(t)}><Icon name="x" size={14} /> Batalkan</button>
+              {/if}
+            </div>
+            {:else if t.kind === 'trace'}
             <div class="actions">
               {#if t.links?.traceId}
                 <button class="btn btn-sm btn-primary" onclick={() => (openTrace = openTrace === t.id ? null : t.id)}>

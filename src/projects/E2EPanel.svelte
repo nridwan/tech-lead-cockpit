@@ -7,12 +7,14 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { qa, runReport } from '../lib/qa/client';
-  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAGenerateJob, type QARun, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
+  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
   import E2ELogViewer from './E2ELogViewer.svelte';
   import FlowEditor from './FlowEditor.svelte';
+  import E2EPipeline from './E2EPipeline.svelte';
+  import { bugs } from '../lib/bugs/client';
   import { projectDrafts, projectTasks, prdContext } from './project-tasks';
   import { loadServicesRoot } from '../tad/generator-client';
 
@@ -44,6 +46,10 @@
   const servicesRoot = loadServicesRoot();
   const canReadCode = $derived(ai.provider === 'claude' || ai.provider === 'antigravity');
   let job = $state<QAGenerateJob | null>(null);
+  // Multi-agent pipeline: journey plan, writer agents per stage, repair agents after a run.
+  let plan = $state<QAPlan | null>(null);
+  let pipeline = $state<QAPipeline | null>(null);
+  const pipelineBusy = $derived((pipeline?.agents ?? []).some((a) => a.status === 'running' || a.status === 'queued'));
 
   // Editing
   let openFlows = $state(new Set<string>());
@@ -111,11 +117,15 @@
     activeRun = null;
     runs = [];
     job = null;
+    plan = null;
+    pipeline = null;
     editingId = null;
     selectedTasks = new Set(tasks.filter((t) => t.spec && /\[BACKEND\]/i.test(t.title)).map((t) => t.id));
     try {
-      const [s, envs, rs, j] = await Promise.all([qa.suite(id, { projectName: project.name, draftIds: [...project.draftIds] }), qa.environments(), qa.runs(id), qa.latestJob(id)]);
+      const [s, envs, rs, j, pl] = await Promise.all([qa.suite(id, { projectName: project.name, draftIds: [...project.draftIds] }), qa.environments(), qa.runs(id), qa.latestJob(id), qa.pipeline(id).catch(() => null)]);
       if (project.id !== id) return;
+      plan = pl?.plan ?? null;
+      pipeline = pl?.pipeline ?? null;
       suite = s;
       environments = envs;
       if (!envs.some((e) => e.id === envId)) envId = envs[0]?.id ?? '';
@@ -126,7 +136,7 @@
         void pollJob(j.id);
       }
       if (activeRun?.status === 'running') void pollRun(activeRun.id);
-      showGenerate = !s?.flows.length;
+      showGenerate = !s?.flows.length && !plan;
     } catch (e) {
       toasts.show(`E2E: ${(e as Error).message}`, 'err');
     }
@@ -170,28 +180,97 @@
     }
   }
 
-  async function generate() {
+  function request(): QAGenerateRequest | null {
     const picked = tasks.filter((t) => selectedTasks.has(t.id) && t.spec);
-    if (!picked.length) return toasts.show('Pilih minimal satu task yang punya Detail Task.', 'err');
+    if (!picked.length) {
+      toasts.show('Pilih minimal satu task yang punya Detail Task.', 'err');
+      return null;
+    }
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      ai,
+      tasks: picked.map((t) => ({ title: t.title, tadTitle: t.tadTitle, service: t.service, jiraKey: t.jiraKeys[0], spec: t.spec })),
+      prdMarkdown: prdContext(projectDrafts(project, drafts)),
+      categories: [...categories],
+      instructions,
+      // Its databases (if any) let the AI use real data and data checks.
+      environmentId: envId || undefined,
+      useCodebase: useCodebase && canReadCode,
+      servicesRoot,
+    };
+  }
+
+  /** Step 1 of the pipeline: the planner agent maps the journey; writers run after the review. */
+  async function startPlan() {
+    const req = request();
+    if (!req) return;
+    if (plan) {
+      const ok = await confirmDialog({ title: 'Buat ulang rencana?', message: 'Rencana journey yang ada (termasuk editanmu) diganti hasil agent perencana baru. Test case tidak berubah sampai agent penulis dijalankan.', confirmText: 'Buat ulang' });
+      if (!ok) return;
+    }
+    try {
+      pipeline = await qa.startPlan(req);
+      showGenerate = false;
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  async function reloadSuite() {
+    const id = project.id;
+    const s = await qa.suite(id).catch(() => null);
+    if (s && project.id === id) suite = s;
+  }
+
+  /** After a run: one repair agent per failed flow (fix the test, or flag a service bug). */
+  async function repair(r: QARun) {
+    const failed = r.flows.filter((f) => f.status === 'failed' || f.status === 'error').length;
+    const ok = await confirmDialog({
+      title: 'Perbaiki otomatis?',
+      message: `${failed} test case gagal dianalisa agent perbaikan (membaca kode service, hanya baca). Test yang keliru diganti versi perbaikan; dugaan bug service masuk daftar "Dugaan bug". Jalankan ulang setelahnya untuk memastikan.`,
+      confirmText: 'Mulai',
+    });
+    if (!ok) return;
+    try {
+      pipeline = await qa.repairRun(project.id, r.id);
+      toasts.show('Agent perbaikan berjalan di background (juga di Agent Tasks).', 'ok');
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  /** A suspect from a repair agent becomes a Bug Tracing case (with the failing request). */
+  async function suspectToBug(sp: QASuspect) {
+    if (!suite) return;
+    const r = runs.find((x) => x.id === sp.runId);
+    const flow = r?.flows.find((f) => f.flowId === sp.flowId);
+    const bad = flow?.steps.find((st) => st.status === 'failed' || st.status === 'error');
+    const evidence = bad
+      ? `\n\nStep gagal: ${bad.name}${bad.request ? `\n${bad.request.method} ${bad.request.url}` : ''}${bad.response ? `\nHTTP ${bad.response.status}\n${(bad.response.body ?? '').slice(0, 2000)}` : ''}${bad.assertions.filter((a) => !a.passed).map((a) => `\n✗ ${a.message}`).join('')}${bad.curl ? `\n\n${bad.curl}` : ''}`
+      : '';
+    try {
+      const c = await bugs.create({ title: sp.title.slice(0, 200), description: `Dari E2E "${sp.flowName}"${sp.service ? ` (${sp.service})` : ''}:\n${sp.detail}${evidence}` });
+      await persist({ ...suite, suspects: (suite.suspects ?? []).map((x) => (x.flowId === sp.flowId && x.runId === sp.runId ? { ...x, bugCaseId: c.id } : x)) });
+      location.hash = `#/bugs/${c.id}`;
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  async function dismissSuspect(sp: QASuspect) {
+    if (suite) await persist({ ...suite, suspects: (suite.suspects ?? []).filter((x) => x !== sp) });
+  }
+
+  async function generate() {
+    const req = request();
+    if (!req) return;
     if (!append && suite?.flows.length) {
       const ok = await confirmDialog({ title: 'Ganti skenario?', message: `${suite.flows.length} flow yang ada akan diganti hasil generate baru. Pilih "Tambahkan ke flow yang ada" untuk menyimpannya.`, confirmText: 'Ganti' });
       if (!ok) return;
     }
     try {
-      job = await qa.generate({
-        projectId: project.id,
-        projectName: project.name,
-        ai,
-        tasks: picked.map((t) => ({ title: t.title, tadTitle: t.tadTitle, service: t.service, jiraKey: t.jiraKeys[0], spec: t.spec })),
-        prdMarkdown: prdContext(projectDrafts(project, drafts)),
-        categories: [...categories],
-        instructions,
-        existing: append ? $state.snapshot(suite?.flows ?? []) : undefined,
-        // Its databases (if any) let the AI use real data and data checks.
-        environmentId: envId || undefined,
-        useCodebase: useCodebase && canReadCode,
-        servicesRoot,
-      });
+      job = await qa.generate({ ...req, existing: append ? $state.snapshot(suite?.flows ?? []) : undefined });
       void pollJob(job.id);
     } catch (e) {
       toasts.show((e as Error).message, 'err');
@@ -361,7 +440,7 @@
         {/each}
       </select>
       <button class="btn btn-sm" onclick={() => (envModalOpen = true)}><Icon name="plug" size={13} /> Environment</button>
-      <button class="btn btn-sm" class:btn-primary={showGenerate} onclick={() => (showGenerate = !showGenerate)} disabled={generating}><Icon name="sparkles" size={13} /> Generate</button>
+      <button class="btn btn-sm" class:btn-primary={showGenerate} onclick={() => (showGenerate = !showGenerate)} disabled={generating || pipelineBusy}><Icon name="sparkles" size={13} /> Generate</button>
       <button class="btn btn-primary btn-sm" onclick={() => run()} disabled={running || starting || !enabledFlows.length}>
         <Icon name="play" size={13} /> {running ? 'Berjalan…' : `Jalankan ${enabledFlows.length} flow`}
       </button>
@@ -408,7 +487,10 @@
           {#if suite?.flows.length}
             <label class="check small"><input type="checkbox" bind:checked={append} /> Tambahkan ke {suite.flows.length} flow yang ada</label>
           {/if}
-          <button class="btn btn-primary" onclick={generate} disabled={!selectedTasks.size}><Icon name="sparkles" size={14} /> Generate skenario E2E</button>
+          <button class="btn btn-primary" onclick={startPlan} disabled={!selectedTasks.size || pipelineBusy} title="Agent perencana memetakan journey (tahap, endpoint dengan bukti file:line, variabel). Kamu review, lalu agent penulis menulis test case per tahap secara paralel.">
+            <Icon name="sparkles" size={14} /> {plan ? 'Buat ulang rencana journey' : 'Buat rencana journey'} (multi-agent)
+          </button>
+          <button class="btn btn-sm" onclick={generate} disabled={!selectedTasks.size || pipelineBusy} title="Satu agent menulis semua test case sekaligus (lebih cepat, kurang teliti untuk TAD besar)">Generate sekaligus (1 agent)</button>
           <label class="check small codebase-opt" class:off={!canReadCode}>
             <input type="checkbox" bind:checked={useCodebase} disabled={!canReadCode} />
             <span>
@@ -427,6 +509,8 @@
       </div>
     </section>
   {/if}
+
+  <E2EPipeline projectId={project.id} bind:plan bind:pipeline existingFlows={suite?.flows.length ?? 0} onsuite={reloadSuite} />
 
   <div class="tabs">
     <button class:active={tab === 'flows'} onclick={() => (tab = 'flows')}>Skenario ({suite?.flows.length ?? 0})</button>
@@ -482,6 +566,12 @@
               {#if lastStatus[flow.id]}
                 <span class="badge {STATUS[lastStatus[flow.id]].cls}">{STATUS[lastStatus[flow.id]].label}</span>
               {/if}
+              {#if flow.warnings?.length}
+                <span class="badge st-warn" title={flow.warnings.join('\n')}><Icon name="alert" size={11} /> {flow.warnings.length} endpoint di luar rencana</span>
+              {/if}
+              {#if flow.repairNote}
+                <span class="badge st-run" title={flow.repairNote}><Icon name="edit" size={11} /> diperbaiki agent</span>
+              {/if}
               <span class="grow"></span>
               <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, -1)} disabled={suite.flows[0]?.id === flow.id} title="Naikkan (urutan journey)" aria-label="Naikkan">↑</button>
               <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={suite.flows.at(-1)?.id === flow.id} title="Turunkan (urutan journey)" aria-label="Turunkan">↓</button>
@@ -491,6 +581,10 @@
             </div>
             {#if openFlows.has(flow.id)}
               {#if flow.description}<p class="desc">{flow.description}</p>{/if}
+              {#if flow.warnings?.length}
+                <ul class="flow-warn small">{#each flow.warnings as w (w)}<li>⚠ {w}</li>{/each}</ul>
+              {/if}
+              {#if flow.repairNote}<p class="repair-note small"><Icon name="edit" size={11} /> {flow.repairNote}</p>{/if}
               {#if flow.taskTitles.length}<p class="muted small mono">Task: {flow.taskTitles.join(' · ')}</p>{/if}
               {#if editingId === flow.id}
                 <FlowEditor
@@ -563,9 +657,35 @@
             <button class="btn btn-sm" onclick={() => activeRun && qa.cancelRun(activeRun.id)}>Batalkan</button>
           {:else}
             <button class="btn btn-sm" onclick={() => activeRun && copy(runReport(activeRun), 'Laporan')}><Icon name="copy" size={13} /> Salin laporan</button>
+            {#if activeRun.flows.some((f) => f.status === 'failed' || f.status === 'error')}
+              <button class="btn btn-sm" onclick={() => activeRun && repair(activeRun)} disabled={pipelineBusy || !canReadCode} title={canReadCode ? 'Agent perbaikan menganalisa tiap test yang gagal: test keliru diperbaiki, bug service ditandai' : 'Butuh Claude CLI atau Antigravity (membaca kode)'}>
+                <Icon name="sparkles" size={13} /> Perbaiki otomatis
+              </button>
+            {/if}
           {/if}
           <button class="btn btn-sm btn-primary" onclick={() => openLog()} title="Riwayat semua request dan response run ini, layar penuh"><Icon name="list" size={13} /> Log request</button>
         </div>
+        {#if suite?.suspects?.length}
+          <section class="card suspects">
+            <h3><Icon name="bug" size={14} /> Dugaan bug service · {suite.suspects.length}</h3>
+            <p class="muted small">Dari agent perbaikan: test-nya sudah sesuai kode/TAD, tapi service merespon salah.</p>
+            {#each suite.suspects as sp (sp.flowId + sp.runId)}
+              <div class="suspect">
+                <div class="grow">
+                  <strong>{sp.title}</strong>{#if sp.service}<span class="chip">{sp.service}</span>{/if}
+                  <p class="small">{sp.detail}</p>
+                  <span class="muted small">Test case: {sp.flowName}</span>
+                </div>
+                {#if sp.bugCaseId}
+                  <a class="btn btn-sm" href="#/bugs/{sp.bugCaseId}"><Icon name="eye" size={13} /> Buka bug</a>
+                {:else}
+                  <button class="btn btn-sm btn-primary" onclick={() => suspectToBug(sp)}><Icon name="bug" size={13} /> Jadikan bug</button>
+                {/if}
+                <button class="btn btn-ghost btn-sm" onclick={() => dismissSuspect(sp)} title="Abaikan"><Icon name="x" size={13} /></button>
+              </div>
+            {/each}
+          </section>
+        {/if}
         {#each activeRun.flows as flow (flow.flowId)}
           <article class="card flow">
             <div class="flow-head">
@@ -652,6 +772,50 @@
     border-radius: 8px;
     background: var(--ok-soft);
     color: var(--ok);
+  }
+  .flow-warn {
+    margin: 0 0 6px;
+    padding: 6px 10px 6px 24px;
+    border-radius: 8px;
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .repair-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0 0 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+  }
+  .suspects {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-left: 3px solid var(--err);
+  }
+  .suspects h3 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 13.5px;
+  }
+  .suspects > p {
+    margin: 0;
+  }
+  .suspect {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--surface-2);
+  }
+  .suspect p {
+    margin: 4px 0;
   }
   .stage-head {
     margin: 14px 0 6px;

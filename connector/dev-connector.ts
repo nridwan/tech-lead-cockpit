@@ -31,18 +31,20 @@ import { deleteDoc, listDocs, saveDoc, unlockDoc } from './workspace-docs.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { normalizeEditedFlow } from './qa/generator.ts';
+import { checkFlowsAgainstPlan } from './qa/plan.ts';
 import { ReportInputError, ReportVps, type ReportSettings } from './report/vps.ts';
 import { ManualMrError, ManualMrs } from './gitlab-manual.ts';
 import { JiraLoadError, jiraCandidates, jiraLoads } from './estimate/jira-load.ts';
 import { BugInputError, BugManager } from './bugs/manager.ts';
 import { TraceInputError, TraceManager } from './trace/manager.ts';
 import { syncTraceTurn } from './trace/agent-sync.ts';
+import { syncQaAgent } from './qa/agent-sync.ts';
 import { TaskPeakStore } from './task-peaks.ts';
 import { bugFixSpec } from './bugs/analysis.ts';
 import { bugDraftId, type BugAnalyzeRequest, type BugCaseInput, type BugTicketRequest } from '../src/lib/bugs/types.ts';
 
 const manualMrs = new ManualMrs();
-import type { QAEnvironment, QAGenerateRequest, QARunRequest, QASuite } from '../src/lib/qa/types.ts';
+import type { QAEnvironment, QAGenerateRequest, QAPlan, QARunRequest, QASuite } from '../src/lib/qa/types.ts';
 import { isAiSelection } from '../src/lib/ai/types.ts';
 import { isValidDraftId } from './generator-runner.ts';
 import { DraftFileError, DraftFiles } from './drafts-store.ts';
@@ -961,6 +963,7 @@ function qaManager(): QaManager {
       });
       return { done: run.done, cancel: () => (run.child ? terminateProviderProcess(run.child) : run.abort?.()) };
     },
+    agentSink: (job, projectName) => syncQaAgent(agentRuntime().store, job, projectName),
   });
   return qaGlobal.__tlcQa;
 }
@@ -1004,7 +1007,10 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
           throw new QaInputError(`Flow #${i + 1}: ${(e as Error).message}`);
         }
       });
-      return send(res, 200, { suite: await qa.saveSuite({ ...suite, flows, projectName: String(suite.projectName ?? '').slice(0, 300) }) });
+      // Warnings are recomputed against the journey plan (an edit may have fixed the path).
+      const plan = await qa.getPlan(String(suite.projectId ?? '')).catch(() => null);
+      const suspects = Array.isArray(suite.suspects) ? suite.suspects.slice(0, 50) : undefined;
+      return send(res, 200, { suite: await qa.saveSuite({ ...suite, suspects, flows: plan ? checkFlowsAgainstPlan(flows, plan) : flows, projectName: String(suite.projectName ?? '').slice(0, 300) }) });
     }
     if (route === 'POST /qa/generate') {
       const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);
@@ -1052,6 +1058,38 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       const run = await qa.getRun(url.searchParams.get('projectId') ?? '', url.searchParams.get('id') ?? '');
       if (!run) return fail(res, 404, { error: 'Run tidak ditemukan.', code: 'not-found' });
       return send(res, 200, run);
+    }
+    if (route === 'GET /qa/pipeline') return send(res, 200, await qa.getPipeline(url.searchParams.get('projectId') ?? ''));
+    if (route === 'POST /qa/plan') {
+      const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);
+      if (!isAiSelection(body.ai)) throw new QaInputError('Pilihan AI tidak valid.');
+      const tasks = (Array.isArray(body.tasks) ? body.tasks : []).slice(0, 50).map((t) => ({
+        title: String(t.title ?? '').slice(0, 300),
+        tadTitle: t.tadTitle ? String(t.tadTitle).slice(0, 300) : undefined,
+        service: t.service ? String(t.service).slice(0, 100) : undefined,
+        jiraKey: t.jiraKey ? String(t.jiraKey).slice(0, 30) : undefined,
+        spec: String(t.spec ?? ''),
+      }));
+      return send(res, 202, await qa.startPlan({ ...body, tasks, existing: undefined, categories: Array.isArray(body.categories) ? body.categories : [] }));
+    }
+    if (route === 'POST /qa/plan/save') {
+      const body = await readJson<{ plan: QAPlan }>(req, 4 * 1024 * 1024);
+      if (!body.plan || !Array.isArray(body.plan.stages)) throw new QaInputError('Rencana tidak valid.');
+      return send(res, 200, { plan: await qa.savePlan(body.plan) });
+    }
+    if (route === 'POST /qa/plan/write') {
+      const body = await readJson<{ projectId?: string; concurrency?: number; stageIds?: string[] }>(req, 64 * 1024);
+      const stageIds = Array.isArray(body.stageIds) ? body.stageIds.map(String) : undefined;
+      return send(res, 202, await qa.writeFromPlan(String(body.projectId ?? ''), { concurrency: Number(body.concurrency) || undefined, stageIds }));
+    }
+    if (route === 'POST /qa/repair') {
+      const body = await readJson<{ projectId?: string; runId?: string; concurrency?: number }>(req, 64 * 1024);
+      return send(res, 202, await qa.repairRun(String(body.projectId ?? ''), String(body.runId ?? ''), { concurrency: Number(body.concurrency) || undefined }));
+    }
+    if (route === 'POST /qa/pipeline/cancel') {
+      const body = await readJson<{ projectId?: string; agentId?: string }>(req, 16 * 1024);
+      if (body.agentId) return send(res, 200, { agent: qa.cancelAgent(String(body.agentId)) ?? null });
+      return send(res, 200, { pipeline: qa.cancelPipeline(String(body.projectId ?? '')) });
     }
     if (route === 'POST /qa/runs/cancel') {
       const body = await readJson<{ id?: string }>(req, 16 * 1024);
@@ -1547,6 +1585,7 @@ async function handleAgents(route: string, url: URL, req: IncomingMessage, res: 
 
     const current = await requireTask();
     if (current.kind === 'trace') return await traceTaskAction(res, req, rt, current, method, action, deps);
+    if (current.kind === 'e2e') return await e2eTaskAction(res, req, rt, current, method, action, deps);
 
     // Local coding tasks are driven by coder-runs.
     const coder = coderRuns(env, deps);
@@ -1588,6 +1627,27 @@ async function handleAgents(route: string, url: URL, req: IncomingMessage, res: 
     }
   } catch (e) {
     throw agentError(e);
+  }
+}
+
+/** Agent Tasks actions on an E2E pipeline agent: cancel or mark done (results live in the project's E2E tab). */
+async function e2eTaskAction(res: ServerResponse, req: IncomingMessage, rt: AgentRuntime, task: AgentTask, method: string, action: string | undefined, deps: ConnectorDeps) {
+  const qa = (deps.qa ?? qaManager)();
+  if (method === 'GET') return send(res, 200, { task, events: [] });
+  const body = await readAgentBody(req);
+  switch (action) {
+    case 'cancel':
+    case 'stop':
+      if (!qa.cancelAgent(task.links?.qaJobId ?? '')) await rt.store.update(task.id, { status: 'cancelled', progress: { message: 'Dibatalkan.' } });
+      return send(res, 200, { task: (await rt.store.get(task.id)) ?? task });
+    case 'complete':
+    case 'resolve': {
+      const reason = typeof body.message === 'string' && body.message.trim() ? body.message.trim() : 'Ditandai selesai oleh user.';
+      await rt.store.update(task.id, { status: 'completed', progress: { message: reason } });
+      return send(res, 200, { task: (await rt.store.get(task.id)) ?? task });
+    }
+    default:
+      throw new ConfluenceError('Agent E2E dikelola dari tab E2E di halaman proyek.', 409, 'conflict');
   }
 }
 

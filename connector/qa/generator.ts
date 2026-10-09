@@ -89,6 +89,25 @@ const DB_SCHEMA_EXAMPLE = `Tambahan bila ada database (lihat bagian Database):
   ]
 }`;
 
+function focusSection(f: NonNullable<QAGenerateRequest['focus']>): string {
+  const st = f.stage;
+  const vars = new Map(f.variables.map((v) => [v.name, v]));
+  const describe = (n: string) => `{{${n}}}${vars.get(n)?.description ? ` (${vars.get(n)!.description})` : ''}`;
+  return [
+    '',
+    `## FOKUS AGENT INI: tahap "${st.title}"`,
+    `Seluruh journey: ${f.stages.map((x) => x.title).join(' → ')}. Tahap lain ditulis agent lain.`,
+    `- Tulis HANYA flow untuk tahap ini (happy path dulu, lalu negatif/edge case sesuai kategori), lebih detail dan teliti. Isi "stage" setiap flow PERSIS: "${st.title}".`,
+    st.goal ? `- Tujuan tahap: ${st.goal}` : '',
+    st.endpoints.length ? `- Endpoint tahap ini (sudah dicek ke router):\n${st.endpoints.map((e) => `  - ${e.method} ${e.path}${e.service ? ` [${e.service}]` : ''}${e.evidence ? ` — ${e.evidence}` : ''}`).join('\n')}` : '',
+    st.rules.length ? `- Aturan bisnis yang wajib diuji (satu atau lebih flow/assertion per aturan):\n${st.rules.map((r) => `  - ${r}`).join('\n')}` : '',
+    st.consumes.length ? `- Data dari tahap sebelumnya, pakai PERSIS nama ini: ${st.consumes.map(describe).join(', ')}. Sertakan "dataQueries" untuk variabel ini sebagai cadangan bila flow dijalankan sendiri (bila database tersedia).` : '',
+    st.produces.length ? `- Flow happy path tahap ini WAJIB meng-"extract" variabel ini untuk tahap berikutnya: ${st.produces.map(describe).join(', ')}.` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 function codebaseSection(c: NonNullable<QAGenerateRequest['codebase']>): string {
   return [
     '',
@@ -159,6 +178,7 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     SCHEMA,
     req.databases?.length ? `\n${DB_SCHEMA_EXAMPLE}` : '',
     req.codebase ? codebaseSection(req.codebase) : '',
+    req.focus ? focusSection(req.focus) : '',
     databaseSection(req.databases ?? []),
     existing,
     '',
@@ -330,6 +350,7 @@ export function normalizeEditedFlow(raw: unknown): QAFlow {
   const r = raw as Record<string, unknown>;
   if (typeof r.id === 'string' && /^[\w-]{1,64}$/.test(r.id)) flow.id = r.id;
   if (r.enabled === false) flow.enabled = false;
+  if (typeof r.repairNote === 'string' && r.repairNote.trim()) flow.repairNote = r.repairNote.trim().slice(0, 2_000);
   const rawSteps = Array.isArray(r.steps) ? r.steps : [];
   flow.steps.forEach((s, i) => {
     const id = (rawSteps[i] as { id?: unknown } | undefined)?.id;

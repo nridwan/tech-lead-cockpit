@@ -176,9 +176,100 @@ export interface QAFlow {
   dataQueries?: QADataQuery[];
   steps: QAStep[];
   enabled: boolean;
+  /** Found by the static check against the journey plan (e.g. an endpoint not in the router). */
+  warnings?: string[];
+  /** What the repair agent changed, after a failed run. */
+  repairNote?: string;
+}
+
+/** A request the plan found in the code, with where it is registered. */
+export interface QAPlanEndpoint {
+  method: string;
+  path: string;
+  service?: string;
+  /** file:line in the Services root, e.g. core-promo-ultimate/router/router.go:34. */
+  evidence?: string;
+  /** Set after checking the evidence against the real file. */
+  verified?: boolean;
+}
+
+/** One stage of the business journey (create data → approve → transact → after). */
+export interface QAPlanStage {
+  id: string;
+  title: string;
+  goal: string;
+  taskTitles: string[];
+  endpoints: QAPlanEndpoint[];
+  /** Variables this stage extracts for later stages. */
+  produces: string[];
+  /** Variables it needs from earlier stages. */
+  consumes: string[];
+  /** Business rules / validations / error codes to test. */
+  rules: string[];
+}
+
+/** The journey map the planner agent makes; reviewed by the user before test cases are written. */
+export interface QAPlan {
+  projectId: string;
+  projectName: string;
+  createdAt: string;
+  updatedAt: string;
+  ai: AiSelection;
+  /** What the test cases are generated from (tasks, categories, environment, codebase). */
+  request: QAGenerateRequest;
+  stages: QAPlanStage[];
+  /** Variable contract shared by all stages. */
+  variables: { name: string; description: string; producedBy?: string }[];
+  notes?: string;
+}
+
+export type QAAgentRole = 'plan' | 'write' | 'repair';
+
+/** One background agent of the E2E pipeline (also listed in Agent Tasks). */
+export interface QAAgentJob {
+  id: string;
+  projectId: string;
+  role: QAAgentRole;
+  label: string;
+  /** The AI the agent runs on. */
+  ai: AiSelection;
+  stageId?: string;
+  flowId?: string;
+  status: 'queued' | QAJobStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  progress?: string;
+  error?: string;
+  rawReply?: string;
+  /** Flows written (writer) or the verdict (repair). */
+  result?: string;
+  agentTaskId?: string;
+}
+
+export interface QAPipeline {
+  projectId: string;
+  phase: 'idle' | 'planning' | 'review' | 'writing' | 'repairing';
+  concurrency: number;
+  agents: QAAgentJob[];
+  updatedAt: string;
+}
+
+/** A failed test the repair agent thinks is a service bug, not a wrong test. */
+export interface QASuspect {
+  flowId: string;
+  flowName: string;
+  title: string;
+  detail: string;
+  service?: string;
+  runId: string;
+  at: string;
+  /** Bug Tracing case made from it. */
+  bugCaseId?: string;
 }
 
 export interface QASuite {
+  /** Failed tests that look like service bugs (from the repair agents). */
+  suspects?: QASuspect[];
   projectId: string;
   projectName: string;
   flows: QAFlow[];
@@ -216,6 +307,8 @@ export interface QAGenerateRequest {
   servicesRoot?: string;
   /** Filled by the connector: the codebase root and the selected tasks' service folders. */
   codebase?: { root: string; folders: string[] };
+  /** Writer agents: the one journey stage to write, with the plan for context. */
+  focus?: { stage: QAPlanStage; stages: { id: string; title: string }[]; variables: QAPlan['variables'] };
   /** Filled by the connector from that environment: schema per database (never passwords). */
   databases?: { name: string; service?: string; schema: string; error?: string }[];
 }

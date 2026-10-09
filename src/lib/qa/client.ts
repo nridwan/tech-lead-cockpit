@@ -1,5 +1,5 @@
 import { api, connectorDownMessage } from '../api-base';
-import type { QAEnvironment, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from './types';
+import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QARun, QARunRequest, QASuite } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
@@ -40,6 +40,14 @@ export const qa = {
   runs: (projectId: string) => call<QARun[]>(`/runs${q({ projectId })}`),
   run: (projectId: string, id: string) => call<QARun>(`/runs/one${q({ projectId, id })}`),
   cancelRun: (id: string) => post<{ run: QARun | null }>('/runs/cancel', { id }).then((r) => r.run),
+  // Multi-agent pipeline: planner → review → writers per stage → repair after a run.
+  pipeline: (projectId: string) => call<{ plan: QAPlan | null; pipeline: QAPipeline }>(`/pipeline${q({ projectId })}`),
+  startPlan: (req: QAGenerateRequest) => post<QAPipeline>('/plan', req),
+  savePlan: (plan: QAPlan) => post<{ plan: QAPlan }>('/plan/save', { plan }).then((r) => r.plan),
+  writeFromPlan: (projectId: string, concurrency: number, stageIds?: string[]) => post<QAPipeline>('/plan/write', { projectId, concurrency, stageIds }),
+  repairRun: (projectId: string, runId: string, concurrency?: number) => post<QAPipeline>('/repair', { projectId, runId, concurrency }),
+  cancelPipeline: (projectId: string) => post<{ pipeline: QAPipeline }>('/pipeline/cancel', { projectId }),
+  cancelAgent: (agentId: string) => post<{ agent: QAAgentJob | null }>('/pipeline/cancel', { agentId }),
 };
 
 /** Markdown report of a run: summary plus every failing step with its reproduction. */

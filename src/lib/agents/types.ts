@@ -30,7 +30,7 @@ export interface AgentTask {
   startedAt?: string;
   finishedAt?: string;
   /** general (prompt), review (MR review), implement (TAD task → code) or trace (code question). Absent = general. */
-  kind?: 'general' | 'review' | 'implement' | 'trace';
+  kind?: 'general' | 'review' | 'implement' | 'trace' | 'e2e';
   /** Always `local` in the list (Cockpit's coding agents). */
   runner?: 'local';
   links?: {
@@ -43,6 +43,8 @@ export interface AgentTask {
     mrUrl?: string;
     coderRunId?: string;
     traceId?: string;
+    qaJobId?: string;
+    qaProjectId?: string;
   };
 }
 
