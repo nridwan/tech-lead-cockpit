@@ -12,6 +12,7 @@
   import type { Draft } from '../tad/drafts.svelte';
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
   import E2ELogViewer from './E2ELogViewer.svelte';
+  import FlowEditor from './FlowEditor.svelte';
   import { projectDrafts, projectTasks, prdContext } from './project-tasks';
 
   /** E2E flows and runs belong to the project, so a flow can span the project's TADs. */
@@ -42,8 +43,6 @@
   // Editing
   let openFlows = $state(new Set<string>());
   let editingId = $state<string | null>(null);
-  let editText = $state('');
-  let editError = $state('');
 
   // Runs
   let runs = $state<QARun[]>([]);
@@ -221,8 +220,6 @@
 
   function startEdit(flow: QAFlow) {
     editingId = flow.id;
-    editText = JSON.stringify($state.snapshot(flow), null, 2);
-    editError = '';
     openFlows = new Set([...openFlows, flow.id]);
   }
 
@@ -242,24 +239,19 @@
     startEdit(flow);
   }
 
-  async function saveEdit() {
-    if (!suite || !editingId) return;
-    let parsed: QAFlow;
-    try {
-      parsed = JSON.parse(editText);
-    } catch (e) {
-      editError = `JSON tidak valid: ${(e as Error).message}`;
-      return;
-    }
-    parsed.id = editingId;
-    const flows = suite.flows.map((f) => (f.id === editingId ? parsed : f));
+  /** Saves a flow from the form editor; returns an error message to show in the editor. */
+  async function saveFlow(flow: QAFlow): Promise<string | void> {
+    if (!suite) return;
+    const flows = suite.flows.map((f) => (f.id === flow.id ? flow : f));
     try {
       suite = await qa.saveSuite({ ...($state.snapshot(suite) as QASuite), flows });
       editingId = null;
+      toasts.show('Test case tersimpan.', 'ok', 1500);
     } catch (e) {
-      editError = (e as Error).message;
+      return (e as Error).message;
     }
   }
+  const selectedEnv = $derived(environments.find((e) => e.id === envId));
 
   async function cancelEdit() {
     editingId = null;
@@ -471,13 +463,15 @@
               {#if flow.description}<p class="desc">{flow.description}</p>{/if}
               {#if flow.taskTitles.length}<p class="muted small mono">Task: {flow.taskTitles.join(' · ')}</p>{/if}
               {#if editingId === flow.id}
-                <textarea class="input mono editor" rows="18" bind:value={editText} spellcheck="false"></textarea>
-                {#if editError}<p class="err small">{editError}</p>{/if}
-                <div class="edit-actions">
-                  <span class="muted small">Field: name, description, category, taskTitles, variables, steps[] (service, request, extract, assertions, useEnvAuth)</span>
-                  <button class="btn btn-sm" onclick={cancelEdit}>Batal</button>
-                  <button class="btn btn-primary btn-sm" onclick={saveEdit}>Simpan</button>
-                </div>
+                <FlowEditor
+                  {flow}
+                  {services}
+                  serviceUrls={selectedEnv?.services ?? {}}
+                  taskTitles={tasks.map((t) => t.title)}
+                  databases={(selectedEnv?.databases ?? []).map((d) => d.name)}
+                  onsave={saveFlow}
+                  oncancel={cancelEdit}
+                />
               {:else}
                 {#if flow.variables && Object.keys(flow.variables).length}
                   <p class="vars small" title="Nilai contoh dari AI; variabel environment dengan nama yang sama menimpanya">Variabel contoh: {#each Object.entries(flow.variables) as [k, v] (k)}<code>{k}={v}</code> {/each}</p>
@@ -963,23 +957,9 @@
     color: var(--err);
     margin: 3px 0 0;
   }
-  .editor {
-    width: 100%;
-    margin-top: 8px;
-    font-size: 12px;
-    box-sizing: border-box;
-    resize: vertical;
-  }
-  .edit-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    justify-content: flex-end;
-    margin-top: 6px;
-  }
-  .edit-actions .muted {
-    flex: 1;
-  }
+
+
+
   .detail {
     margin-top: 6px;
     display: flex;
