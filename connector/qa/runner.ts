@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { firstValue } from './db.ts';
 import type {
   QAAssertion,
   QAAssertionResult,
@@ -9,6 +10,8 @@ import type {
   QAStep,
   QAStepResult,
   QAStepStatus,
+  QADbQueryLog,
+  QADbResult,
 } from '../../src/lib/qa/types.ts';
 
 /**
@@ -32,6 +35,8 @@ export interface RunContext {
   /** Checked between steps; true stops the run. */
   cancelled?: () => boolean;
   onStep?: (flowIndex: number, result: QAStepResult) => void;
+  /** Read-only query on one of the environment's databases (data setup and data checks). */
+  query?: (db: string, sql: string) => Promise<QADbResult>;
 }
 
 const BUILTINS: Record<string, () => string> = {
@@ -138,9 +143,37 @@ export function checkAssertion(a: QAAssertion, res: { status: number; headers: R
     const passed = compare(a.op, actual, key !== undefined, a.expected);
     return { assertion: a, passed, actual, message: `Header ${a.name} ${a.op}${a.expected !== undefined ? ` ${show(a.expected)}` : ''}: ${passed ? 'OK' : `aktual ${show(actual)}`}` };
   }
+  if (a.type === 'db') return { assertion: a, passed: false, message: 'Cek data dijalankan setelah request.' };
   const { found, value } = jsonPath(res.json, a.path);
   const passed = compare(a.op, value, found, a.expected);
   return { assertion: a, passed, actual: value, message: `${a.path} ${a.op}${a.expected !== undefined ? ` ${show(a.expected)}` : ''}: ${passed ? 'OK' : `aktual ${show(value)}`}` };
+}
+
+/** A data check against a query result: row count for exists/not_exists, else a column of the first row. */
+export function checkDbAssertion(a: Extract<QAAssertion, { type: 'db' }>, r: QADbResult): QAAssertionResult {
+  const label = `DB ${a.db}${a.column ? `.${a.column}` : ''}`;
+  if (a.op === 'exists' || a.op === 'not_exists') {
+    const passed = a.op === 'exists' ? r.rowCount > 0 : r.rowCount === 0;
+    return { assertion: a, passed, actual: r.rowCount, message: `${label} ${a.op === 'exists' ? 'ada data' : 'tidak ada data'}: ${passed ? 'OK' : `${r.rowCount} baris`}` };
+  }
+  const value = firstValue(r, a.column);
+  const passed = compare(a.op, value, value !== undefined, a.expected);
+  return { assertion: a, passed, actual: value, message: `${label} ${a.op}${a.expected !== undefined ? ` ${show(a.expected)}` : ''}: ${passed ? 'OK' : `aktual ${show(value)}`}` };
+}
+
+/** Runs one query for a flow and logs it (never throws). */
+async function logQuery(ctx: RunContext, kind: QADbQueryLog['kind'], label: string, db: string, sql: string, vars: Record<string, string>): Promise<QADbQueryLog> {
+  const at = new Date().toISOString();
+  const missing = new Set<string>();
+  const text = interpolate(sql, vars, missing);
+  if (missing.size) return { kind, label, db, sql: text, at, ok: false, error: `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}` };
+  if (!ctx.query) return { kind, label, db, sql: text, at, ok: false, error: 'Environment ini belum punya koneksi database.' };
+  try {
+    const result = await ctx.query(db, text);
+    return { kind, label, db, sql: result.sql, at, ok: true, result };
+  } catch (e) {
+    return { kind, label, db, sql: text, at, ok: false, error: (e as Error).message };
+  }
 }
 
 function joinUrl(base: string, path: string, query: Record<string, string>): string {
@@ -268,12 +301,20 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
   for (const [name, value] of Object.entries(values)) if (isTokenName(name)) secrets.push(value);
 
   // Expected values may reference earlier results, e.g. $.data.orderId equals "{{orderId}}".
-  const assertions = step.assertions.map((a) =>
+  const assertions = step.assertions.filter((a) => a.type !== 'db').map((a) =>
     checkAssertion('expected' in a && typeof a.expected === 'string' ? ({ ...a, expected: interpolate(a.expected, vars) } as QAAssertion) : a, { status: res.status, headers: resHeaders, json, durationMs }),
   );
   for (const name of notExtracted) {
     assertions.push({ assertion: { type: 'json', path: step.extract![name], op: 'exists' }, passed: false, message: `Tidak bisa mengambil {{${name}}} dari ${step.extract![name]}` });
+  }  // Data checks run after the request, with the values it returned ({{orderId}} etc.).
+  const dbChecks: QADbQueryLog[] = [];
+  for (const a of step.assertions) {
+    if (a.type !== 'db') continue;
+    const log = await logQuery(ctx, 'check', `${a.db}: ${a.op}${a.column ? ` ${a.column}` : ''}`, a.db, a.sql, { ...vars, ...values });
+    dbChecks.push(log);
+    assertions.push(log.result ? checkDbAssertion({ ...a, expected: typeof a.expected === 'string' ? interpolate(a.expected, { ...vars, ...values }) : a.expected }, log.result) : { assertion: a, passed: false, message: `DB ${a.db}: ${log.error}` });
   }
+
   // Assertions on a token (e.g. "$.data.accessToken exists") must not echo it back.
   for (const a of assertions) {
     const raw = typeof a.actual === 'string' ? a.actual : a.actual === undefined ? '' : JSON.stringify(a.actual);
@@ -292,6 +333,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
       assertions,
       extracted: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, isTokenName(k) ? MASK : v])),
       curl,
+      ...(dbChecks.length ? { dbChecks } : {}),
     },
     extracted: values,
   };
@@ -308,6 +350,20 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
   Object.assign(vars, secretVars);
   const steps: QAStepResult[] = [];
   let stopped: string | undefined;
+
+  // Real test data from the databases, before the first request; a missing value stops the flow.
+  const dataQueries: QADbQueryLog[] = [];
+  for (const q of flow.dataQueries ?? []) {
+    const log = await logQuery(ctx, 'data', `{{${q.name}}}`, q.db, q.sql, vars);
+    const value = log.result ? firstValue(log.result, q.column) : undefined;
+    if (log.ok && value === undefined) Object.assign(log, { ok: false, error: log.result?.rowCount ? `Kolom ${q.column ?? '(pertama)'} kosong.` : 'Query tidak mengembalikan data.' });
+    if (value !== undefined) {
+      vars[q.name] = value;
+      log.value = value;
+    }
+    dataQueries.push(log);
+    if (!log.ok) stopped ??= `Data uji {{${q.name}}} tidak tersedia: ${log.error}`;
+  }
   for (const step of flow.steps) {
     if (stopped || ctx.cancelled?.()) {
       const r: QAStepResult = { stepId: step.id, name: step.name, status: 'skipped', assertions: [], error: stopped ?? 'Run dibatalkan.' };
@@ -330,7 +386,8 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
         : steps.every((s) => s.status === 'passed')
           ? 'passed'
           : 'skipped';
-  return { flowId: flow.id, name: flow.name, category: flow.category, taskTitles: flow.taskTitles, status, steps };
+  const blockedByData = dataQueries.some((q) => !q.ok);
+  return { flowId: flow.id, name: flow.name, category: flow.category, taskTitles: flow.taskTitles, status: blockedByData && status === 'skipped' ? 'error' : status, ...(dataQueries.length ? { dataQueries } : {}), steps };
 }
 
 export function summarize(flows: QAFlowResult[]): QARunSummary {

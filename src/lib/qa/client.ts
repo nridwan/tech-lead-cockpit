@@ -21,8 +21,10 @@ const q = (params: Record<string, string>) => `?${new URLSearchParams(params)}`;
 export const qa = {
   environments: () => call<QAEnvironment[]>('/environments'),
   /** `secret`: undefined keeps the stored token, '' removes it. `secretVariables`: undefined keeps them. */
-  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>) =>
-    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables }),
+  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>) =>
+    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables, dbPasswords }),
+  /** Connects to a saved database of the environment (read-only) and returns the server version. */
+  testDatabase: (environmentId: string, name: string) => post<{ version: string }>('/db/test', { environmentId, name }).then((r) => r.version),
   deleteEnvironment: (id: string) => post<QAEnvironment[]>('/environments/delete', { id }),
   /** `draftIds`/`projectName` let a project adopt the per-TAD suites stored before projects existed. */
   suite: (projectId: string, adopt?: { projectName: string; draftIds: string[] }) =>

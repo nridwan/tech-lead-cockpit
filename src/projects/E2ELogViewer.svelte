@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../components/Icon.svelte';
   import { toasts } from '../components/toast.svelte';
-  import type { QARun, QAStepResult, QAStepStatus } from '../lib/qa/types';
+  import type { QADbQueryLog, QARun, QAStepResult, QAStepStatus } from '../lib/qa/types';
 
   /**
    * Full-screen request log of an E2E run: every request in the order it was sent, and for the
@@ -10,15 +10,20 @@
    */
   let { open = $bindable(false), runs, runId = $bindable() }: { open: boolean; runs: QARun[]; runId?: string } = $props();
 
+  /** A row of the log: an HTTP request (step) or a database query (real test data). */
   interface Entry {
     key: string;
     index: number;
     flow: string;
     step: QAStepResult;
+    query?: QADbQueryLog;
   }
 
+  /** A database query shown like a step, so it sits in the same timeline. */
+  const queryStep = (q: QADbQueryLog): QAStepResult => ({ stepId: `q-${q.at}`, name: `Data ${q.label}`, status: q.ok ? 'passed' : 'error', startedAt: q.at, durationMs: q.result?.durationMs, assertions: [], error: q.error });
+
   type Filter = 'all' | 'failed' | 'passed';
-  type Tab = 'request' | 'response' | 'assertions' | 'curl';
+  type Tab = 'request' | 'response' | 'assertions' | 'db' | 'curl';
   let filter = $state<Filter>('all');
   let method = $state('');
   let query = $state('');
@@ -27,18 +32,23 @@
 
   const run = $derived(runs.find((r) => r.id === runId) ?? runs[0]);
   const entries = $derived<Entry[]>(
-    (run?.flows ?? []).flatMap((f) => f.steps.map((s) => ({ flow: f.name, step: s, key: `${f.flowId}:${s.stepId}` }))).map((e, index) => ({ ...e, index: index + 1 })),
+    (run?.flows ?? [])
+      .flatMap((f) => [
+        ...(f.dataQueries ?? []).map((q, i) => ({ flow: f.name, step: queryStep(q), query: q, key: `${f.flowId}:q${i}` })),
+        ...f.steps.map((s) => ({ flow: f.name, step: s, key: `${f.flowId}:${s.stepId}` })),
+      ])
+      .map((e, index) => ({ ...e, index: index + 1 })),
   );
   const isFailure = (s: QAStepStatus) => s === 'failed' || s === 'error' || s === 'blocked';
-  const methods = $derived([...new Set(entries.map((e) => e.step.request?.method).filter((m): m is string => Boolean(m)))]);
+  const methods = $derived([...new Set(entries.map((e) => (e.query ? 'SQL' : e.step.request?.method)).filter((m): m is string => Boolean(m)))]);
   const visible = $derived.by(() => {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     return entries.filter((e) => {
       if (filter === 'failed' && !isFailure(e.step.status)) return false;
       if (filter === 'passed' && e.step.status !== 'passed') return false;
-      if (method && e.step.request?.method !== method) return false;
+      if (method && (e.query ? method !== 'SQL' : e.step.request?.method !== method)) return false;
       if (!terms.length) return true;
-      const hay = [e.flow, e.step.name, e.step.request?.url, e.step.request?.body, e.step.response?.body, String(e.step.response?.status ?? ''), e.step.error].filter(Boolean).join(' ').toLowerCase();
+      const hay = [e.flow, e.step.name, e.step.request?.url, e.step.request?.body, e.step.response?.body, String(e.step.response?.status ?? ''), e.step.error, e.query?.sql, ...(e.step.dbChecks ?? []).map((c) => c.sql)].filter(Boolean).join(' ').toLowerCase();
       return terms.every((t) => hay.includes(t));
     });
   });
@@ -107,6 +117,28 @@
 
 <svelte:window onkeydown={onKey} />
 
+{#snippet dbQuery(q: QADbQueryLog)}
+  <div class="body-head"><h4>SQL</h4><button class="btn btn-xs" onclick={() => copy(q.sql, 'SQL')}><Icon name="copy" size={11} /> Salin</button></div>
+  <pre class="code-block">{q.sql}</pre>
+  {#if q.error}
+    <p class="err">{q.error}</p>
+  {:else if q.result}
+    <h4>Hasil ({q.result.rowCount} baris{q.result.truncated ? ', dipotong' : ''})</h4>
+    {#if q.result.rowCount}
+      <div class="grid-wrap">
+        <table class="grid">
+          <thead><tr>{#each q.result.columns as c (c)}<th>{c}</th>{/each}</tr></thead>
+          <tbody>
+            {#each q.result.rows as row, i (i)}
+              <tr>{#each row as v, j (j)}<td class="mono" class:null={v === null}>{v ?? 'NULL'}</td>{/each}</tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else}<p class="muted small">Tidak ada baris.</p>{/if}
+  {/if}
+{/snippet}
+
 {#if open}
   <div class="log" role="dialog" aria-modal="true" aria-label="Log request E2E">
     <header class="top">
@@ -157,12 +189,21 @@
             <button id="log-{e.key}" class="row" class:sel={selected?.key === e.key} class:fail={isFailure(e.step.status)} role="option" aria-selected={selected?.key === e.key} onclick={() => (selectedKey = e.key)}>
               <span class="num">{e.index}</span>
               <span class="mono small">{time(e.step.startedAt)}</span>
-              <span class="method m-{(e.step.request?.method ?? 'none').toLowerCase()}">{e.step.request?.method ?? '—'}</span>
-              <span class="req">
-                <span class="path mono">{pathOf(e.step.request?.url)}</span>
-                <span class="muted small">{e.flow} › {e.step.name}</span>
-              </span>
-              <span class="code {statusClass(e.step.response?.status)}">{e.step.response?.status ?? LABEL[e.step.status]}</span>
+              {#if e.query}
+                <span class="method m-sql">SQL</span>
+                <span class="req">
+                  <span class="path mono">{e.query.sql}</span>
+                  <span class="muted small">{e.flow} › {e.query.label} · DB {e.query.db}</span>
+                </span>
+                <span class="code {e.query.ok ? 'code-ok' : 'code-server'}">{e.query.ok ? `${e.query.result?.rowCount ?? 0} baris` : 'Error'}</span>
+              {:else}
+                <span class="method m-{(e.step.request?.method ?? 'none').toLowerCase()}">{e.step.request?.method ?? '—'}</span>
+                <span class="req">
+                  <span class="path mono">{pathOf(e.step.request?.url)}</span>
+                  <span class="muted small">{e.flow} › {e.step.name}{e.step.dbChecks?.length ? ` · ${e.step.dbChecks.length} cek DB` : ''}</span>
+                </span>
+                <span class="code {statusClass(e.step.response?.status)}">{e.step.response?.status ?? LABEL[e.step.status]}</span>
+              {/if}
               <span class="mono small dur">{e.step.durationMs !== undefined ? `${e.step.durationMs} ms` : '—'}</span>
             </button>
           {:else}
@@ -171,7 +212,26 @@
         </div>
 
         <section class="detail">
-          {#if selected}
+          {#if selected?.query}
+            {@const q = selected.query}
+            <div class="summary">
+              <div class="line">
+                <span class="method m-sql">SQL</span>
+                <span class="mono url">DB {q.db} · data {q.label}</span>
+                <button class="icon-btn" onclick={() => copy(q.sql, 'SQL')} title="Salin SQL" aria-label="Salin SQL"><Icon name="copy" size={12} /></button>
+              </div>
+              <div class="facts">
+                <span class="badge st-{q.ok ? 'passed' : 'error'}">{q.ok ? 'Berhasil' : 'Gagal'}</span>
+                {#if q.result}<span class="muted small">{q.result.rowCount} baris{q.result.truncated ? '+' : ''} · {q.result.durationMs} ms</span>{/if}
+                <span class="muted small">{time(q.at)}</span>
+                {#if q.value !== undefined}<span class="small">nilai: <code>{q.value}</code></span>{/if}
+              </div>
+              {#if q.error}<p class="err">{q.error}</p>{/if}
+            </div>
+            <div class="pane">
+              {@render dbQuery(q)}
+            </div>
+          {:else if selected}
             {@const s = selected.step}
             <div class="summary">
               <div class="line">
@@ -196,6 +256,11 @@
               <button role="tab" class:active={tab === 'assertions'} onclick={() => (tab = 'assertions')}>
                 Assertions {#if s.assertions.length}<span class="count {s.assertions.some((a) => !a.passed) ? 'bad' : ''}">{s.assertions.filter((a) => a.passed).length}/{s.assertions.length}</span>{/if}
               </button>
+              {#if s.dbChecks?.length}
+                <button role="tab" class:active={tab === 'db'} onclick={() => (tab = 'db')}>
+                  Cek DB <span class="count {s.dbChecks.some((c) => !c.ok) ? 'bad' : ''}">{s.dbChecks.length}</span>
+                </button>
+              {/if}
               <button role="tab" class:active={tab === 'curl'} onclick={() => (tab = 'curl')}>cURL</button>
             </div>
 
@@ -245,6 +310,15 @@
                     {/each}
                   </ul>
                 {/if}
+              {:else if tab === 'db'}
+                {#each s.dbChecks ?? [] as c, i (i)}
+                  <div class="check-block">
+                    <div class="body-head"><h4>{c.label}</h4><span class="badge st-{c.ok ? 'passed' : 'error'}">{c.ok ? 'Berhasil' : 'Gagal'}</span></div>
+                    {@render dbQuery(c)}
+                  </div>
+                {:else}
+                  <p class="muted small">Tidak ada cek DB.</p>
+                {/each}
               {:else}
                 {#if s.curl}
                   <div class="body-head"><h4>Reproduksi</h4><button class="btn btn-xs" onclick={() => copy(s.curl ?? '', 'cURL')}><Icon name="copy" size={11} /> Salin</button></div>
@@ -472,6 +546,46 @@
   .m-delete {
     background: var(--err-soft);
     color: var(--err);
+  }
+  .m-sql {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .grid-wrap {
+    overflow: auto;
+    max-height: 360px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .grid {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .grid th {
+    position: sticky;
+    top: 0;
+    padding: 5px 8px;
+    background: var(--surface-2);
+    text-align: left;
+    white-space: nowrap;
+  }
+  .grid td {
+    padding: 4px 8px;
+    border-top: 1px solid var(--border);
+    white-space: nowrap;
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .grid td.null {
+    color: var(--text-3);
+    font-style: italic;
+  }
+  .check-block + .check-block {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
   }
   .code {
     font-family: var(--font-mono);

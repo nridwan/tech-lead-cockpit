@@ -29,6 +29,34 @@
   let clearSecret = $state(false);
   let saving = $state(false);
   let error = $state('');
+  /** New database passwords typed in this form (by database name); empty = keep the stored one. */
+  let dbPasswords = $state<Record<string, string>>({});
+  let dbStatus = $state<Record<string, { ok: boolean; text: string } | 'testing'>>({});
+
+  function addDatabase() {
+    if (!editing) return;
+    editing.databases = [...(editing.databases ?? []), { name: editing.databases?.length ? `db${editing.databases.length + 1}` : 'main', host: '', port: 5432, database: '', user: '' }];
+  }
+  function removeDatabase(i: number) {
+    if (!editing?.databases) return;
+    editing.databases = editing.databases.filter((_, j) => j !== i);
+  }
+  /** Saves the form (keeping it open), then connects to the database read-only. */
+  async function testDatabase(name: string) {
+    if (!editing) return;
+    dbStatus[name] = 'testing';
+    const ok = await save(true);
+    const id = ok ? editing?.id || selectedId : '';
+    if (!ok || !id) {
+      dbStatus[name] = { ok: false, text: error || 'Simpan environment gagal.' };
+      return;
+    }
+    try {
+      dbStatus[name] = { ok: true, text: `Terhubung · ${await qa.testDatabase(id, name)}` };
+    } catch (e) {
+      dbStatus[name] = { ok: false, text: (e as Error).message };
+    }
+  }
 
   const toLines = (r: Record<string, string>, sep: string) =>
     Object.entries(r)
@@ -62,10 +90,13 @@
     secret = '';
     clearSecret = false;
     error = '';
+    e.databases ??= [];
+    dbPasswords = {};
+    dbStatus = {};
   }
 
-  async function save() {
-    if (!editing) return;
+  async function save(keepOpen = false): Promise<boolean> {
+    if (!editing) return false;
     error = '';
     let env: QAEnvironment;
     let secretVariables: Record<string, string> | undefined;
@@ -79,19 +110,28 @@
       };
     } catch (e) {
       error = (e as Error).message;
-      return;
+      return false;
     }
     saving = true;
     try {
       const before = new Set(environments.map((e) => e.id));
-      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables);
+      const passwords = Object.fromEntries(Object.entries($state.snapshot(dbPasswords)).filter(([, v]) => v));
+      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables, Object.keys(passwords).length ? passwords : undefined);
       const saved = env.id ? env.id : environments.find((e) => !before.has(e.id))?.id;
       if (saved) selectedId = saved;
       secret = '';
-      editing = null;
-      toasts.show('Environment tersimpan.', 'ok', 2000);
+      dbPasswords = {};
+      if (keepOpen) {
+        const fresh = environments.find((e) => e.id === saved);
+        if (fresh && editing) Object.assign(editing, { id: fresh.id, hasSecret: fresh.hasSecret, dbPasswords: fresh.dbPasswords });
+      } else {
+        editing = null;
+        toasts.show('Environment tersimpan.', 'ok', 2000);
+      }
+      return true;
     } catch (e) {
       error = (e as Error).message;
+      return false;
     } finally {
       saving = false;
     }
@@ -211,6 +251,45 @@
         </label>
       </div>
 
+      <section class="dbs">
+        <div class="dbs-head">
+          <strong>Database (hanya baca)</strong>
+          <span class="muted small">PostgreSQL. Dipakai untuk mengambil data nyata sebagai variabel uji dan memeriksa data setelah request. Hanya SELECT, dijalankan di transaksi read-only, sehingga data tidak bisa diubah atau dihapus.</span>
+          <span class="grow"></span>
+          <button class="btn btn-sm" type="button" onclick={addDatabase}><Icon name="plus" size={12} /> Database</button>
+        </div>
+        {#each editing.databases ?? [] as d, i (i)}
+          <div class="db">
+            <div class="db-grid">
+              <label class="field"><span>Nama <em class="muted">(dipakai di test)</em></span><input class="input mono" bind:value={d.name} placeholder="promo" /></label>
+              <label class="field"><span>Host</span><input class="input mono" bind:value={d.host} placeholder="172.31.135.20" /></label>
+              <label class="field"><span>Port</span><input class="input mono" type="number" bind:value={d.port} placeholder="5432" /></label>
+              <label class="field"><span>Nama database</span><input class="input mono" bind:value={d.database} placeholder="promo_db" /></label>
+              <label class="field"><span>User</span><input class="input mono" bind:value={d.user} autocomplete="off" placeholder="readonly_user" /></label>
+              <label class="field">
+                <span>Password {editing.dbPasswords?.[d.name] ? '(tersimpan)' : ''}</span>
+                <input class="input" type="password" bind:value={dbPasswords[d.name]} autocomplete="off" placeholder={editing.dbPasswords?.[d.name] ? 'Kosongkan untuk tetap memakai yang lama' : 'Password database'} />
+              </label>
+            </div>
+            <div class="db-actions">
+              <label class="check small"><input type="checkbox" bind:checked={d.ssl} /> SSL</label>
+              <span class="grow"></span>
+              {#if dbStatus[d.name] === 'testing'}
+                <span class="muted small">Menghubungkan…</span>
+              {:else if dbStatus[d.name]}
+                {@const st = dbStatus[d.name] as { ok: boolean; text: string }}
+                <span class="small {st.ok ? 'ok' : 'err'}">{st.text}</span>
+              {/if}
+              <button class="btn btn-sm" type="button" onclick={() => testDatabase(d.name)} disabled={saving || !d.host || !d.database || !d.user}>Simpan & tes koneksi</button>
+              <button class="btn btn-ghost btn-sm" type="button" onclick={() => removeDatabase(i)} aria-label="Hapus database {d.name}"><Icon name="trash" size={12} /></button>
+            </div>
+          </div>
+        {:else}
+          <p class="muted small">Belum ada database. Tanpa database, test memakai contoh nilai dari AI dan variabel environment.</p>
+        {/each}
+        <p class="muted small">Saran: pakai user database yang hanya punya izin SELECT.</p>
+      </section>
+
       <p class="muted small">Token, password, dan variabel rahasia disimpan di macOS Keychain, tidak pernah dikirim ke AI, dan disamarkan (<code>***</code>) di hasil run maupun perintah curl. Variabel biasa tersimpan sebagai teks di <code>~/.tech-lead-cockpit/qa</code>.</p>
       {#if error}<p class="err small">{error}</p>{/if}
       <div class="form-actions">
@@ -312,5 +391,45 @@
     .grid3 {
       grid-template-columns: 1fr;
     }
+  }
+  .dbs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-2);
+  }
+  .dbs-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .db {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .db-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .db-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .grow {
+    flex: 1;
+  }
+  .ok {
+    color: var(--ok);
   }
 </style>

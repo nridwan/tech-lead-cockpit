@@ -23,6 +23,6 @@ export default defineConfig({
     target: 'node',
     // Bundle every dependency; only Baileys' optional media helpers stay external (never used here).
     noExternal: true,
-    external: ['sharp', 'jimp', 'link-preview-js', 'audio-decode', 'qrcode-terminal'],
+    external: ['sharp', 'jimp', 'link-preview-js', 'audio-decode', 'qrcode-terminal', 'pg-native'],
   },
 });

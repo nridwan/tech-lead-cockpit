@@ -960,9 +960,13 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
   try {
     if (route === 'GET /qa/environments') return send(res, 200, await qa.listEnvironments());
     if (route === 'POST /qa/environments') {
-      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string> }>(req, 256 * 1024);
+      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string> }>(req, 256 * 1024);
       if (body.secret !== undefined && typeof body.secret !== 'string') throw new QaInputError('Token harus berupa teks.');
-      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables));
+      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables, body.dbPasswords));
+    }
+    if (route === 'POST /qa/db/test') {
+      const body = await readJson<{ environmentId?: string; name?: string }>(req, 16 * 1024);
+      return send(res, 200, { version: await qa.testDatabase(String(body.environmentId ?? ''), String(body.name ?? '')) });
     }
     if (route === 'POST /qa/environments/delete') {
       const body = await readJson<{ id?: string }>(req, 16 * 1024);

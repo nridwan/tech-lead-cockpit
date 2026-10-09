@@ -183,6 +183,8 @@
         categories: [...categories],
         instructions,
         existing: append ? $state.snapshot(suite?.flows ?? []) : undefined,
+        // Its databases (if any) let the AI use real data and data checks.
+        environmentId: envId || undefined,
       });
       void pollJob(job.id);
     } catch (e) {
@@ -397,7 +399,13 @@
             <label class="check small"><input type="checkbox" bind:checked={append} /> Tambahkan ke {suite.flows.length} flow yang ada</label>
           {/if}
           <button class="btn btn-primary" onclick={generate} disabled={!selectedTasks.size}><Icon name="sparkles" size={14} /> Generate skenario E2E</button>
-          <p class="muted small">AI hanya menerima teks Detail Task & PRD (tanpa akses file/jaringan). Token environment tidak pernah dikirim ke AI.</p>
+          {#if environments.find((e) => e.id === envId)?.databases?.length}
+            {@const dbs = environments.find((e) => e.id === envId)?.databases ?? []}
+            <p class="db-note small"><Icon name="check" size={12} /> Database environment ini ({dbs.map((d) => d.name).join(', ')}) ikut dipakai: AI membaca skema tabelnya untuk mengambil data nyata sebagai variabel dan memeriksa data setelah request. Hanya SELECT, read-only.</p>
+          {:else}
+            <p class="muted small">Tambahkan database di environment (tombol pengaturan environment) agar test memakai data nyata dari DB.</p>
+          {/if}
+          <p class="muted small">AI hanya menerima teks Detail Task, PRD, dan skema tabel (nama tabel/kolom, tanpa isi data). Token dan password tidak pernah dikirim ke AI.</p>
         </div>
       </div>
     </section>
@@ -474,6 +482,14 @@
                 {#if flow.variables && Object.keys(flow.variables).length}
                   <p class="vars small" title="Nilai contoh dari AI; variabel environment dengan nama yang sama menimpanya">Variabel contoh: {#each Object.entries(flow.variables) as [k, v] (k)}<code>{k}={v}</code> {/each}</p>
                 {/if}
+                {#if flow.dataQueries?.length}
+                  <div class="data-queries small">
+                    <span class="muted">Data nyata dari database (diambil sebelum request pertama):</span>
+                    {#each flow.dataQueries as q (q.name)}
+                      <div class="dq"><code>{`{{${q.name}}}`}</code> ← <span class="muted">{q.db}{q.column ? `.${q.column}` : ''}</span> <code class="sql">{q.sql}</code></div>
+                    {/each}
+                  </div>
+                {/if}
                 <ol class="steps">
                   {#each flow.steps as step (step.id)}
                     <li>
@@ -486,7 +502,11 @@
                       <div class="muted small">{step.name}</div>
                       <div class="asserts small">
                         {#each step.assertions as a, i (i)}
-                          <code>{a.type === 'status' ? `status ${Array.isArray(a.expected) ? a.expected.join('/') : a.expected}` : a.type === 'latency' ? `< ${a.expected}ms` : `${a.type === 'header' ? a.name : a.path} ${a.op}${a.expected !== undefined ? ` ${JSON.stringify(a.expected)}` : ''}`}</code>
+                          {#if a.type === 'db'}
+                            <code class="dbq" title={a.sql}>DB {a.db}{a.column ? `.${a.column}` : ''} {a.op}{a.expected !== undefined ? ` ${JSON.stringify(a.expected)}` : ''}</code>
+                          {:else}
+                            <code>{a.type === 'status' ? `status ${Array.isArray(a.expected) ? a.expected.join('/') : a.expected}` : a.type === 'latency' ? `< ${a.expected}ms` : `${a.type === 'header' ? a.name : a.path} ${a.op}${a.expected !== undefined ? ` ${JSON.stringify(a.expected)}` : ''}`}</code>
+                          {/if}
                         {/each}
                         {#each Object.entries(step.extract ?? {}) as [k, v] (k)}
                           <code class="extract">{`{{${k}}}`} ← {v}</code>
@@ -583,6 +603,40 @@
 <E2EEnvironmentModal bind:open={envModalOpen} bind:environments bind:selectedId={envId} {services} />
 
 <style>
+  .db-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--ok-soft);
+    color: var(--ok);
+  }
+  .data-queries {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 4px 0 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+  }
+  .dq {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .dq .sql {
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .dbq {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
   .flow-search {
     display: flex;
     align-items: center;

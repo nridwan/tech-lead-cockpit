@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertReadOnlySql } from './db.ts';
 import {
   QA_CATEGORIES,
   QA_CATEGORY_LABELS,
@@ -6,6 +7,7 @@ import {
   QA_VALUE_OPS,
   type QAAssertion,
   type QACategory,
+  type QADataQuery,
   type QAFlow,
   type QAGenerateRequest,
   type QAStep,
@@ -70,6 +72,35 @@ const SCHEMA = `{
   ]
 }`;
 
+const DB_SCHEMA_EXAMPLE = `Tambahan bila ada database (lihat bagian Database):
+{
+  "dataQueries": [
+    { "name": "promoId", "db": "promo", "sql": "SELECT id FROM promos WHERE status = 'ACTIVE' AND end_date > now() ORDER BY created_at DESC LIMIT 1" }
+  ],
+  "steps": [
+    {
+      "assertions": [
+        { "type": "db", "db": "promo", "sql": "SELECT status FROM promo_reservations WHERE id = '{{reservationId}}'", "column": "status", "op": "equals", "expected": "RESERVED" },
+        { "type": "db", "db": "promo", "sql": "SELECT 1 FROM promo_reservations WHERE id = '{{reservationId}}'", "op": "exists" }
+      ]
+    }
+  ]
+}`;
+
+function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>): string {
+  if (!dbs.length) return '';
+  return [
+    '',
+    '## Database (HANYA BACA)',
+    'Kamu bisa memakai data nyata dari database berikut agar variabel uji valid:',
+    '- "dataQueries" di flow: query SELECT yang mengisi variabel {{name}} SEBELUM request pertama (baris pertama, kolom "column" atau kolom pertama). Pakai untuk id/nomor/kode yang harus ada di database (mis. promo aktif, merchant terdaftar, user dengan saldo cukup). Tulis kondisi yang memastikan datanya cocok untuk skenario, dan selalu LIMIT 1.',
+    '- Assertion "db" di step: query SELECT SETELAH request untuk memeriksa data tersimpan/berubah benar (op: equals/exists/not_exists/contains/gt/lt; "column" = kolom yang dibandingkan). Boleh memakai {{variabel}} hasil extract.',
+    '- WAJIB hanya SELECT. DILARANG INSERT/UPDATE/DELETE/DDL; query lain ditolak dan transaksi dijalankan read-only.',
+    '- Pakai nama tabel & kolom PERSIS dari skema di bawah; "db" diisi nama database (bukan nama host).',
+    ...dbs.map((d) => `\n### Database "${d.name}"${d.error ? ` (skema tidak terbaca: ${d.error})` : ''}\n${d.schema || '(skema tidak tersedia)'}`),
+  ].join('\n');
+}
+
 export function buildQaPrompt(req: QAGenerateRequest): string {
   const categories = (req.categories.length ? req.categories : QA_CATEGORIES).map((c) => `${c} (${QA_CATEGORY_LABELS[c]})`).join(', ');
   let budget = MAX_SPEC_CHARS;
@@ -104,6 +135,8 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     '',
     'Format jawaban (JSON):',
     SCHEMA,
+    req.databases?.length ? `\n${DB_SCHEMA_EXAMPLE}` : '',
+    databaseSection(req.databases ?? []),
     existing,
     '',
     '## Detail Task',
@@ -171,7 +204,37 @@ function normalizeAssertion(raw: unknown): QAAssertion | undefined {
     const path = str(a.path, 300);
     return path ? { type: 'json', path: path.startsWith('$') ? path : `$.${path}`, op, expected: a.expected } : undefined;
   }
+  if (a.type === 'db') {
+    const db = str(a.db, 60);
+    const sql = readOnlySql(a.sql);
+    if (!db || !sql) return undefined;
+    const column = str(a.column, 100);
+    return { type: 'db', db, sql, op, ...(column ? { column } : {}), ...(a.expected !== undefined ? { expected: a.expected } : {}) };
+  }
   return undefined;
+}
+
+/** A SELECT that passes the read-only check, or undefined (anything else is dropped). */
+function readOnlySql(v: unknown): string | undefined {
+  try {
+    return assertReadOnlySql(str(v, 10_000));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeDataQueries(raw: unknown): QADataQuery[] {
+  const out: QADataQuery[] = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, 20) : []) {
+    const q = (item ?? {}) as Record<string, unknown>;
+    const name = str(q.name, 60).replace(/^\{\{|\}\}$/g, '');
+    const db = str(q.db, 60);
+    const sql = readOnlySql(q.sql);
+    if (!/^[A-Za-z_][\w.]*$/.test(name) || !db || !sql) continue;
+    const column = str(q.column, 100);
+    out.push({ name, db, sql, ...(column ? { column } : {}) });
+  }
+  return out;
 }
 
 function normalizeStep(raw: unknown, i: number): QAStep | undefined {
@@ -227,6 +290,7 @@ export function normalizeFlows(raw: unknown, taskTitles: string[]): QAFlow[] {
       category,
       taskTitles: titles.length ? titles : taskTitles.slice(0, 1),
       variables: strRecord(f.variables),
+      ...(normalizeDataQueries(f.dataQueries).length ? { dataQueries: normalizeDataQueries(f.dataQueries) } : {}),
       steps,
       enabled: true,
     });

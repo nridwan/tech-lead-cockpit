@@ -20,6 +20,54 @@ export type QAMethod = (typeof QA_METHODS)[number];
 
 export type QAAuthType = 'none' | 'bearer' | 'basic' | 'header';
 
+/** A PostgreSQL database of the environment, queried read-only (SELECT only); password in the Keychain. */
+export interface QADatabase {
+  /** Short name used by flows, e.g. "promo". */
+  name: string;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  ssl?: boolean;
+}
+
+/** Result of one read-only query (values as strings, capped rows). */
+export interface QADbResult {
+  db: string;
+  sql: string;
+  columns: string[];
+  rows: (string | null)[][];
+  rowCount: number;
+  truncated?: boolean;
+  durationMs: number;
+}
+
+/** Real data for a flow variable, read before the flow's first request. */
+export interface QADataQuery {
+  /** Variable name, used as {{name}} in steps. */
+  name: string;
+  /** Database name from the environment. */
+  db: string;
+  /** One SELECT; {{variables}} allowed. The first row is used. */
+  sql: string;
+  /** Column to take (default: the first). */
+  column?: string;
+}
+
+/** A query run for a flow: data setup (variable) or a data check (assertion). */
+export interface QADbQueryLog {
+  kind: 'data' | 'check';
+  /** Variable filled (data) or what was checked (check). */
+  label: string;
+  db: string;
+  sql: string;
+  at: string;
+  ok: boolean;
+  result?: QADbResult;
+  value?: string;
+  error?: string;
+}
+
 export interface QAEnvironment {
   id: string;
   name: string;
@@ -39,6 +87,10 @@ export interface QAEnvironment {
   };
   /** Only GET requests are sent; other steps are blocked. */
   readOnly: boolean;
+  /** Databases for real test data and data checks (read-only). */
+  databases?: QADatabase[];
+  /** Set by the connector: which databases have a password in the Keychain. */
+  dbPasswords?: Record<string, boolean>;
   timeoutMs: number;
   /** Set by the connector: a token/password is stored in the Keychain. */
   hasSecret?: boolean;
@@ -50,7 +102,9 @@ export type QAAssertion =
   | { type: 'status'; op: 'equals' | 'in'; expected: number | number[] }
   | { type: 'json'; path: string; op: QAValueOp; expected?: unknown }
   | { type: 'header'; name: string; op: QAValueOp; expected?: unknown }
-  | { type: 'latency'; op: 'lt'; expected: number };
+  | { type: 'latency'; op: 'lt'; expected: number }
+  /** Checks data after the request: one SELECT (read-only); `column` of the first row, or the row count for exists/not_exists. */
+  | { type: 'db'; db: string; sql: string; op: QAValueOp; column?: string; expected?: unknown };
 
 export const QA_VALUE_OPS = ['equals', 'not_equals', 'contains', 'exists', 'not_exists', 'matches', 'type', 'gt', 'lt'] as const;
 export type QAValueOp = (typeof QA_VALUE_OPS)[number];
@@ -86,6 +140,8 @@ export interface QAFlow {
   taskTitles: string[];
   /** Sample values for {{name}}; environment variables with the same name override them. */
   variables?: Record<string, string>;
+  /** Real data from the environment's databases (read-only), loaded before the first step; overrides sample values. */
+  dataQueries?: QADataQuery[];
   steps: QAStep[];
   enabled: boolean;
 }
@@ -121,6 +177,10 @@ export interface QAGenerateRequest {
   instructions?: string;
   /** Flows to keep (the AI adds to them instead of starting over). */
   existing?: QAFlow[];
+  /** Environment whose databases the AI may use for real data and data checks. */
+  environmentId?: string;
+  /** Filled by the connector from that environment: schema per database (never passwords). */
+  databases?: { name: string; schema: string; error?: string }[];
 }
 
 export type QAJobStatus = 'running' | 'done' | 'error' | 'cancelled';
@@ -161,6 +221,8 @@ export interface QAStepResult {
   extracted?: Record<string, string>;
   /** Copy-pasteable reproduction, secrets masked. */
   curl?: string;
+  /** Data checks (db assertions) run after this request. */
+  dbChecks?: QADbQueryLog[];
   error?: string;
 }
 
@@ -170,6 +232,8 @@ export interface QAFlowResult {
   category: QACategory;
   taskTitles: string[];
   status: QAStepStatus;
+  /** Data queries run before the first step (real test data). */
+  dataQueries?: QADbQueryLog[];
   steps: QAStepResult[];
 }
 

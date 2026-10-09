@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QAEnvironment, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import type { QADatabase, QADbResult, QAEnvironment, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import { QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { buildQaPrompt, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
 import { runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
@@ -32,6 +33,36 @@ export interface QaDeps {
     cancel: () => void;
   };
   fetch?: typeof fetch;
+  /** Read-only database access (PostgreSQL); tests inject a fake. */
+  db?: {
+    query: (db: QADatabase, password: string | undefined, sql: string) => Promise<QADbResult>;
+    schema: (db: QADatabase, password: string | undefined) => Promise<string>;
+    test: (db: QADatabase, password: string | undefined) => Promise<string>;
+  };
+}
+
+const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection };
+const DB_NAME = /^[A-Za-z][\w-]{0,39}$/;
+const dbSecretKey = (envId: string, name: string) => `${envId}:db:${name}`;
+
+function cleanDatabases(raw: unknown): QADatabase[] {
+  const out: QADatabase[] = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, 10) : []) {
+    const d = (item ?? {}) as Partial<QADatabase>;
+    const name = String(d.name ?? '').trim();
+    const host = String(d.host ?? '').trim();
+    const database = String(d.database ?? '').trim();
+    const user = String(d.user ?? '').trim();
+    if (!name && !host && !database) continue;
+    if (!DB_NAME.test(name)) throw new QaInputError(`Nama database "${name}" tidak valid (huruf, angka, - atau _).`);
+    if (out.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw new QaInputError(`Nama database "${name}" dipakai dua kali.`);
+    if (!/^[\w.-]{1,253}$/.test(host)) throw new QaInputError(`Host database "${name}" tidak valid.`);
+    if (!database || !user) throw new QaInputError(`Database "${name}": nama database dan user wajib diisi.`);
+    const port = Number(d.port) || 5432;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new QaInputError(`Port database "${name}" tidak valid.`);
+    out.push({ name, host, port, database: database.slice(0, 100), user: user.slice(0, 100), ...(d.ssl ? { ssl: true } : {}) });
+  }
+  return out;
 }
 
 const httpUrl = (v: string) => /^https?:\/\/[^\s/]+/i.test(v);
@@ -74,6 +105,7 @@ export function validateEnvironment(raw: Partial<QAEnvironment>): QAEnvironment 
     variables: cleanRecord(raw.variables, 'Variabel'),
     auth: { type: authType, ...(authType === 'header' ? { headerName } : {}), ...(authType === 'basic' ? { username: String(raw.auth?.username ?? '').trim() } : {}) },
     readOnly: raw.readOnly === true,
+    databases: cleanDatabases(raw.databases),
     timeoutMs: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : 30_000,
   };
 }
@@ -122,7 +154,12 @@ export class QaManager {
   async listEnvironments(): Promise<QAEnvironment[]> {
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
     return Promise.all(
-      envs.map(async (e) => ({ ...e, hasSecret: Boolean(await this.deps.readSecret(e.id)), secretVariableNames: Object.keys(await this.secretVariables(e.id)) })),
+      envs.map(async (e) => ({
+        ...e,
+        hasSecret: Boolean(await this.deps.readSecret(e.id)),
+        secretVariableNames: Object.keys(await this.secretVariables(e.id)),
+        dbPasswords: Object.fromEntries(await Promise.all((e.databases ?? []).map(async (d) => [d.name, Boolean(await this.deps.readSecret(dbSecretKey(e.id, d.name)))] as const))),
+      })),
     );
   }
 
@@ -139,11 +176,20 @@ export class QaManager {
    * `secret`: undefined keeps the stored one, '' removes it. `secretVariables`: undefined keeps
    * them; an object replaces them, where an empty value keeps that variable's stored value.
    */
-  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>): Promise<QAEnvironment[]> {
+  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>): Promise<QAEnvironment[]> {
     const env = validateEnvironment(raw);
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
     const index = env.id ? envs.findIndex((e) => e.id === env.id) : -1;
     if (index < 0) env.id = slug(env.name);
+    // Database passwords: '' removes, a value sets, absent keeps; removed databases lose theirs.
+    for (const [name, value] of Object.entries(dbPasswords ?? {})) {
+      if (!env.databases?.some((d) => d.name === name) || typeof value !== 'string') continue;
+      if (value === '') await this.deps.deleteSecret(dbSecretKey(env.id, name));
+      else if (!(await this.deps.writeSecret(dbSecretKey(env.id, name), value))) throw new QaInputError('Gagal menyimpan password database ke Keychain.');
+    }
+    for (const old of index >= 0 ? (envs[index].databases ?? []) : []) {
+      if (!env.databases?.some((d) => d.name === old.name)) await this.deps.deleteSecret(dbSecretKey(env.id, old.name));
+    }
     if (secret !== undefined) {
       if (secret === '') await this.deps.deleteSecret(env.id);
       else if (!(await this.deps.writeSecret(env.id, secret))) throw new QaInputError('Gagal menyimpan token ke Keychain.');
@@ -162,8 +208,32 @@ export class QaManager {
     return this.listEnvironments();
   }
 
+  /** Read-only query on one of the environment's databases (by name, case-insensitive). */
+  private dbQuery(env: QAEnvironment): (name: string, sql: string) => Promise<QADbResult> {
+    return async (name, sql) => {
+      const db = env.databases?.find((d) => d.name.toLowerCase() === name.toLowerCase());
+      if (!db) throw new QaDbError(`Database "${name}" tidak ada di environment ${env.name}.`);
+      const password = (await this.deps.readSecret(dbSecretKey(env.id, db.name))) ?? undefined;
+      return (this.deps.db ?? REAL_DB).query(db, password, sql);
+    };
+  }
+
+  /** "Tes koneksi" for a saved database of an environment. */
+  async testDatabase(envId: string, name: string): Promise<string> {
+    const env = (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === envId);
+    const db = env?.databases?.find((d) => d.name === name);
+    if (!env || !db) throw new QaInputError('Database tidak ditemukan; simpan environment dulu.');
+    const password = (await this.deps.readSecret(dbSecretKey(env.id, db.name))) ?? undefined;
+    try {
+      return await (this.deps.db ?? REAL_DB).test(db, password);
+    } catch (e) {
+      throw new QaInputError((e as Error).message);
+    }
+  }
+
   async deleteEnvironment(id: string): Promise<QAEnvironment[]> {
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
+    for (const d of envs.find((e) => e.id === id)?.databases ?? []) await this.deps.deleteSecret(dbSecretKey(id, d.name));
     await this.write(
       this.envFile(),
       envs.filter((e) => e.id !== id),
@@ -229,6 +299,22 @@ export class QaManager {
 
     const job: QAGenerateJob & { cancel?: () => void } = { id: randomUUID(), projectId, status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan prompt…' };
     this.jobs.set(job.id, job);
+    // The environment's databases: their schema lets the AI write real-data queries (never passwords).
+    req = { ...req, databases: undefined };
+    const env = req.environmentId ? (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId) : undefined;
+    if (env?.databases?.length) {
+      job.progress = 'Membaca skema database…';
+      req.databases = await Promise.all(
+        env.databases.map(async (d) => {
+          const password = (await this.deps.readSecret(dbSecretKey(env.id, d.name))) ?? undefined;
+          try {
+            return { name: d.name, schema: await (this.deps.db ?? REAL_DB).schema(d, password) };
+          } catch (e) {
+            return { name: d.name, schema: '', error: (e as Error).message };
+          }
+        }),
+      );
+    }
     // Empty working folder: the AI gets the TAD in the prompt and has nothing else to read.
     const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
     const run = this.deps.runAi(req.ai, buildQaPrompt(req), {
@@ -345,6 +431,7 @@ export class QaManager {
           secret,
           secretVariables,
           fetch: this.deps.fetch,
+          query: env.databases?.length ? this.dbQuery(env) : undefined,
           cancelled: () => state.cancelled,
           onStep: (fi, step) => {
             run.flows[fi].steps.push(step);
