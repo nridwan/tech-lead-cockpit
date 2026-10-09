@@ -152,6 +152,8 @@ export interface QAStepResult {
   stepId: string;
   name: string;
   status: QAStepStatus;
+  /** When the step started (ISO); absent on runs recorded before it was added. */
+  startedAt?: string;
   durationMs?: number;
   request?: { method: string; url: string; headers: Record<string, string>; body?: string };
   response?: { status: number; headers: Record<string, string>; body?: string; truncated?: boolean };

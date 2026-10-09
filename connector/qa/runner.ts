@@ -207,7 +207,7 @@ function extractVars(step: QAStep, json: unknown, headers: Record<string, string
 const isTokenName = (name: string) => /token|secret|password|passwd|session|cookie|signature|otp|pin/i.test(name);
 
 async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunContext, secrets: string[]): Promise<{ result: QAStepResult; extracted: Record<string, string> }> {
-  const base: QAStepResult = { stepId: step.id, name: step.name, status: 'running', assertions: [] };
+  const base: QAStepResult = { stepId: step.id, name: step.name, status: 'running', startedAt: new Date().toISOString(), assertions: [] };
   const method = step.request.method.toUpperCase();
   if (ctx.env.readOnly && method !== 'GET') {
     return { result: { ...base, status: 'blocked', error: `Environment "${ctx.env.name}" read-only: request ${method} tidak dikirim.` }, extracted: {} };

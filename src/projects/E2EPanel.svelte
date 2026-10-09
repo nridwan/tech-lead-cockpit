@@ -11,6 +11,7 @@
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
+  import E2ELogViewer from './E2ELogViewer.svelte';
   import { projectDrafts, projectTasks, prdContext } from './project-tasks';
 
   /** E2E flows and runs belong to the project, so a flow can span the project's TADs. */
@@ -46,6 +47,27 @@
 
   // Runs
   let runs = $state<QARun[]>([]);
+  // Full-screen request log of a run.
+  let logOpen = $state(false);
+  let logRunId = $state<string | undefined>();
+  function openLog(runId?: string) {
+    logRunId = runId ?? activeRun?.id ?? runs[0]?.id;
+    logOpen = true;
+  }
+
+  // Search over the test cases (flows): name, description, category, tasks, steps (name, method, path, service).
+  let flowQuery = $state('');
+  let flowCategory = $state<QACategory | ''>('');
+  const visibleFlows = $derived.by(() => {
+    const flows = suite?.flows ?? [];
+    const terms = flowQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    return flows.filter((f) => {
+      if (flowCategory && f.category !== flowCategory) return false;
+      if (!terms.length) return true;
+      const hay = [f.name, f.description, QA_CATEGORY_LABELS[f.category], ...f.taskTitles, ...f.steps.flatMap((st) => [st.name, st.request.method, st.request.path, st.service ?? ''])].join(' ').toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  });
   let activeRun = $state<QARun | null>(null);
   let openSteps = $state(new Set<string>());
   let starting = $state(false);
@@ -402,12 +424,24 @@
         </div>
       {:else}
         <div class="list-tools">
+          <label class="flow-search">
+            <Icon name="search" size={13} />
+            <input type="search" bind:value={flowQuery} placeholder="Cari test case: nama, task, step, endpoint…" aria-label="Cari test case" />
+          </label>
+          <select class="input cat-select" bind:value={flowCategory} aria-label="Filter kategori">
+            <option value="">Semua kategori</option>
+            {#each QA_CATEGORIES as c (c)}<option value={c}>{QA_CATEGORY_LABELS[c]}</option>{/each}
+          </select>
+          {#if flowQuery || flowCategory}<span class="muted small">{visibleFlows.length} dari {suite.flows.length}</span>{/if}
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(true)}>Centang semua</button>
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>Kosongkan</button>
           <span class="grow"></span>
           <button class="btn btn-sm" onclick={addFlow}><Icon name="plus" size={13} /> Flow manual</button>
         </div>
-        {#each suite.flows as flow (flow.id)}
+        {#if !visibleFlows.length}
+          <p class="muted small">Tidak ada test case yang cocok. <button class="link-btn" onclick={() => { flowQuery = ''; flowCategory = ''; }}>Reset pencarian</button></p>
+        {/if}
+        {#each visibleFlows as flow (flow.id)}
           <article class="card flow" class:disabled={!flow.enabled}>
             <div class="flow-head">
               <input type="checkbox" checked={flow.enabled} onchange={() => toggleFlow(flow)} aria-label="Ikut dijalankan" />
@@ -486,6 +520,7 @@
           {:else}
             <button class="btn btn-sm" onclick={() => activeRun && copy(runReport(activeRun), 'Laporan')}><Icon name="copy" size={13} /> Salin laporan</button>
           {/if}
+          <button class="btn btn-sm btn-primary" onclick={() => openLog()} title="Riwayat semua request dan response run ini, layar penuh"><Icon name="list" size={13} /> Log request</button>
         </div>
         {#each activeRun.flows as flow (flow.flowId)}
           <article class="card flow">
@@ -544,9 +579,49 @@
   </div>
 </div>
 
+<E2ELogViewer bind:open={logOpen} bind:runId={logRunId} {runs} />
 <E2EEnvironmentModal bind:open={envModalOpen} bind:environments bind:selectedId={envId} {services} />
 
 <style>
+  .flow-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 220px;
+    max-width: 380px;
+    height: 30px;
+    padding: 0 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-3);
+  }
+  .flow-search:focus-within {
+    border-color: var(--accent);
+  }
+  .flow-search input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 12.5px;
+  }
+  .cat-select {
+    width: auto;
+    font-size: 12.5px;
+  }
+  .link-btn {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
   .e2e {
     display: flex;
     flex-direction: column;
@@ -701,6 +776,7 @@
   .run-head {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
   }
   .run-head select {
