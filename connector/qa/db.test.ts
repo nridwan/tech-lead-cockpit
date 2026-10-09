@@ -171,9 +171,9 @@ describe('QaManager databases', () => {
     const [saved] = await m.saveEnvironment(base, undefined, undefined, undefined, 's3cret');
     await m.saveSuite({ projectId: 'proj', projectName: 'P', updatedAt: '', flows: [{ id: 'f', name: 'f', description: '', category: 'happy-path', taskTitles: [], enabled: true, dataQueries: [{ name: 'uid', db: 'core-user-auth-ultimate', sql: 'SELECT id FROM users LIMIT 1' }], steps: [{ id: 's', name: 's', request: { method: 'GET', path: '/x' }, assertions: [] }] }] });
     const run = await m.startRun({ projectId: 'proj', environmentId: saved.id });
-    for (let i = 0; i < 100 && !connections.length; i++) await new Promise((r) => setTimeout(r, 10));
+    // Wait for the background run to finish (it also writes the run file before the folder goes).
+    for (let i = 0; i < 500 && (await m.getRun('proj', run.id))?.status === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
     expect(connections[0]).toEqual({ database: 'user_auth', password: 's3cret' });
-    expect(run.id).toBeTruthy();
   });
 
   it('reads only the schemas of the selected tasks\' services when generating', async () => {
