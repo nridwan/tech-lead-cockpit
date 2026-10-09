@@ -417,6 +417,8 @@ export class QaManager {
     }
     // Empty working folder: the AI gets the TAD in the prompt and has nothing else to read.
     const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));
+    // Shown until the AI streams its own progress (a big prompt can take a few minutes).
+    job.progress = `AI menyusun skenario${req.databases?.length ? ` dengan skema ${req.databases.length} database` : ''}… biasanya beberapa menit.`;
     const run = this.deps.runAi(req.ai, buildQaPrompt(req), {
       cwd,
       timeoutMs: GENERATE_TIMEOUT_MS,
