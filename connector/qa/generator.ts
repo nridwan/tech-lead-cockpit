@@ -37,6 +37,7 @@ const SCHEMA = `{
   "flows": [
     {
       "name": "nama flow singkat",
+      "stage": "1. Buat data promo (CMS)",
       "description": "tujuan flow & kondisi awal yang dibutuhkan",
       "category": "${QA_CATEGORIES.join(' | ')}",
       "taskTitles": ["judul Detail Task persis seperti di input"],
@@ -139,6 +140,9 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     '',
     'Aturan:',
     `- Kategori yang diminta: ${categories}. Buat minimal satu flow happy path per alur utama, lalu flow negatif yang paling berisiko.`,
+    '- URUTAN FLOW = URUTAN JOURNEY BISNIS dari awal sampai akhir, bukan per kategori. Mulai dari pembuatan data master/setup (mis. create promo lewat CMS), lalu approval & aktivasi, lalu pemakaian/transaksi (mis. validate, reserve, confirm), lalu pasca-transaksi (rollback, release, reporting, expired/scheduler). Uji negatif & edge case diletakkan tepat setelah happy path tahap yang diujinya.',
+    '- Isi "stage" setiap flow dengan nomor & nama tahap journey, mis. "1. Buat data promo (CMS)", "2. Approval & aktivasi", "3. Transaksi", "4. Pasca transaksi". Flow pada tahap yang sama memakai label yang sama persis.',
+    '- Data mengalir antar-flow saat dijalankan berurutan: nilai yang di-"extract" flow sebelumnya (mis. promoUuid dari create promo) otomatis tersedia sebagai {{promoUuid}} di flow berikutnya. Jadi flow tahap awal WAJIB membuat datanya sendiri dan meng-extract id/kode dengan nama variabel yang konsisten, dan flow selanjutnya memakai nama variabel yang sama. "dataQueries" hanya cadangan saat flow dijalankan sendiri (diabaikan bila variabelnya sudah terisi dari flow sebelumnya).',
     '- Gunakan endpoint, method, header, payload, dan response PERSIS sesuai Detail Task. Jangan mengarang endpoint yang tidak ada di TAD; jika data kurang, tulis asumsi di "notes".',
     '- "path" hanya path relatif (diawali /), JANGAN menulis host/URL lengkap. Host diatur per service di environment.',
     '- "service" diisi nama service seperti di TAD, supaya base URL yang benar dipakai.',
@@ -302,9 +306,11 @@ export function normalizeFlows(raw: unknown, taskTitles: string[]): QAFlow[] {
     if (!steps.length) continue;
     const category = (QA_CATEGORIES as readonly string[]).includes(String(f.category)) ? (f.category as QACategory) : 'happy-path';
     const titles = (Array.isArray(f.taskTitles) ? f.taskTitles : []).map((t) => str(t, 300)).filter(Boolean);
+    const stage = str(f.stage, 120);
     flows.push({
       id: randomUUID(),
       name: str(f.name, 200) || `Flow ${flows.length + 1}`,
+      ...(stage ? { stage } : {}),
       description: str(f.description, 2_000),
       category,
       taskTitles: titles.length ? titles : taskTitles.slice(0, 1),

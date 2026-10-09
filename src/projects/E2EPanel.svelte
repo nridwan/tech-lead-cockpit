@@ -210,6 +210,17 @@
     }
   }
 
+  /** Moves a flow one place in the journey (the order flows run and pass data in). */
+  async function moveFlow(flow: QAFlow, d: -1 | 1) {
+    if (!suite) return;
+    const flows = [...suite.flows];
+    const i = flows.findIndex((f) => f.id === flow.id);
+    const j = i + d;
+    if (i < 0 || j < 0 || j >= flows.length) return;
+    [flows[i], flows[j]] = [flows[j], flows[i]];
+    await persist({ ...($state.snapshot(suite) as QASuite), flows });
+  }
+
   function toggleFlow(flow: QAFlow) {
     if (!suite) return;
     void persist({ ...suite, flows: suite.flows.map((f) => (f.id === flow.id ? { ...f, enabled: !f.enabled } : f)) });
@@ -455,7 +466,10 @@
         {#if !visibleFlows.length}
           <p class="muted small">Tidak ada test case yang cocok. <button class="link-btn" onclick={() => { flowQuery = ''; flowCategory = ''; }}>Reset pencarian</button></p>
         {/if}
-        {#each visibleFlows as flow (flow.id)}
+        {#each visibleFlows as flow, fi (flow.id)}
+          {#if flow.stage && flow.stage !== visibleFlows[fi - 1]?.stage}
+            <h4 class="stage-head">{flow.stage}</h4>
+          {/if}
           <article class="card flow" class:disabled={!flow.enabled}>
             <div class="flow-head">
               <input type="checkbox" checked={flow.enabled} onchange={() => toggleFlow(flow)} aria-label="Ikut dijalankan" />
@@ -469,8 +483,10 @@
                 <span class="badge {STATUS[lastStatus[flow.id]].cls}">{STATUS[lastStatus[flow.id]].label}</span>
               {/if}
               <span class="grow"></span>
+              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, -1)} disabled={suite.flows[0]?.id === flow.id} title="Naikkan (urutan journey)" aria-label="Naikkan">↑</button>
+              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={suite.flows.at(-1)?.id === flow.id} title="Turunkan (urutan journey)" aria-label="Turunkan">↓</button>
               <button class="btn btn-ghost btn-sm" onclick={() => run([flow.id])} disabled={running || starting} title="Jalankan flow ini saja"><Icon name="play" size={13} /></button>
-              <button class="btn btn-ghost btn-sm" onclick={() => startEdit(flow)} title="Edit JSON flow"><Icon name="edit" size={13} /></button>
+              <button class="btn btn-ghost btn-sm" onclick={() => startEdit(flow)} title="Edit test case"><Icon name="edit" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => removeFlow(flow)} title="Hapus flow"><Icon name="trash" size={13} /></button>
             </div>
             {#if openFlows.has(flow.id)}
@@ -636,6 +652,18 @@
     border-radius: 8px;
     background: var(--ok-soft);
     color: var(--ok);
+  }
+  .stage-head {
+    margin: 14px 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .order-btn {
+    padding-left: 6px;
+    padding-right: 6px;
   }
   .data-queries {
     display: flex;

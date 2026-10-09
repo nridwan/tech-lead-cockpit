@@ -89,6 +89,8 @@ export interface QADbQueryLog {
   ok: boolean;
   result?: QADbResult;
   value?: string;
+  /** Not queried: the value came from this earlier flow of the run. */
+  reusedFrom?: string;
   error?: string;
 }
 
@@ -166,6 +168,8 @@ export interface QAFlow {
   category: QACategory;
   /** Detail Task titles this flow exercises. */
   taskTitles: string[];
+  /** Journey stage, e.g. "1. Buat data promo (CMS)"; flows run and show in journey order. */
+  stage?: string;
   /** Sample values for {{name}}; environment variables with the same name override them. */
   variables?: Record<string, string>;
   /** Real data from the environment's databases (read-only), loaded before the first step; overrides sample values. */

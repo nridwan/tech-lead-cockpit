@@ -549,6 +549,8 @@ export class QaManager {
     this.runs.set(run.id, state);
 
     void (async () => {
+      // One journey: values extracted by a flow are available to the next ones.
+      const carried = { values: {} as Record<string, string>, from: {} as Record<string, string> };
       for (const [i, flow] of flows.entries()) {
         if (state.cancelled) {
           run.flows[i].status = 'skipped';
@@ -561,6 +563,7 @@ export class QaManager {
           secretVariables,
           fetch: this.deps.fetch,
           query: env.databases?.length ? this.dbQuery(env) : undefined,
+          carried,
           cancelled: () => state.cancelled,
           onStep: (fi, step) => {
             run.flows[fi].steps.push(step);

@@ -195,7 +195,7 @@
                   <span class="path mono">{e.query.sql}</span>
                   <span class="muted small">{e.flow} › {e.query.label} · DB {e.query.db}</span>
                 </span>
-                <span class="code {e.query.ok ? 'code-ok' : 'code-server'}">{e.query.ok ? `${e.query.result?.rowCount ?? 0} baris` : 'Error'}</span>
+                <span class="code {e.query.ok ? 'code-ok' : 'code-server'}">{e.query.reusedFrom ? 'dari flow' : e.query.ok ? `${e.query.result?.rowCount ?? 0} baris` : 'Error'}</span>
               {:else}
                 <span class="method m-{(e.step.request?.method ?? 'none').toLowerCase()}">{e.step.request?.method ?? '—'}</span>
                 <span class="req">
@@ -225,6 +225,7 @@
                 {#if q.result}<span class="muted small">{q.result.rowCount} baris{q.result.truncated ? '+' : ''} · {q.result.durationMs} ms</span>{/if}
                 <span class="muted small">{time(q.at)}</span>
                 {#if q.value !== undefined}<span class="small">nilai: <code>{q.value}</code></span>{/if}
+                {#if q.reusedFrom}<span class="small reused">dipakai dari flow "{q.reusedFrom}" (tidak query DB)</span>{/if}
               </div>
               {#if q.error}<p class="err">{q.error}</p>{/if}
             </div>
@@ -549,6 +550,9 @@
   }
   .m-sql {
     background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .reused {
     color: var(--accent);
   }
   .grid-wrap {

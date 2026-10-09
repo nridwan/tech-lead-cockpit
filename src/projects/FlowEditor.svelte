@@ -107,6 +107,7 @@
   let name = $state(initial.name);
   let description = $state(initial.description);
   let category = $state(initial.category);
+  let stage = $state(initial.stage ?? '');
   let tasks = $state(new Set(initial.taskTitles));
   let variables = $state(lines(initial.variables));
   let dataQueries = $state<QADataQuery[]>(initial.dataQueries ?? []);
@@ -124,6 +125,7 @@
       name: name.trim(),
       description: description.trim(),
       category,
+      ...(stage.trim() ? { stage: stage.trim() } : {}),
       taskTitles: [...tasks],
       variables: record(variables, '=', 'Variabel'),
       ...(dataQueries.length ? { dataQueries: dataQueries.filter((q) => q.name.trim() && q.sql.trim()).map((q) => ({ ...q, name: q.name.trim().replace(/^\{\{|\}\}$/g, ''), column: q.column?.trim() || undefined })) } : {}),
@@ -173,6 +175,7 @@
         name = f.name ?? '';
         description = f.description ?? '';
         category = f.category ?? 'happy-path';
+        stage = f.stage ?? '';
         tasks = new Set(f.taskTitles ?? []);
         variables = lines(f.variables);
         dataQueries = f.dataQueries ?? [];
@@ -268,6 +271,7 @@
         <select class="input" bind:value={category}>{#each QA_CATEGORIES as c (c)}<option value={c}>{QA_CATEGORY_LABELS[c]}</option>{/each}</select>
       </label>
     </div>
+    <label class="field"><span>Tahap journey <em class="muted">(urutan alur, mis. "1. Buat data promo (CMS)")</em></span><input class="input" bind:value={stage} placeholder="2. Approval & aktivasi" /></label>
     <label class="field"><span>Deskripsi <em class="muted">(tujuan & kondisi awal)</em></span><textarea class="input" rows="2" bind:value={description}></textarea></label>
 
     {#if taskTitles.length}

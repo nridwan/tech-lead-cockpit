@@ -37,6 +37,11 @@ export interface RunContext {
   onStep?: (flowIndex: number, result: QAStepResult) => void;
   /** Read-only query on one of the environment's databases (data setup and data checks). */
   query?: (db: string, sql: string) => Promise<QADbResult>;
+  /**
+   * Values extracted by earlier flows of the same run (the journey: create promo → approve →
+   * reserve…), with the flow that produced each. Shared and updated across flows.
+   */
+  carried?: { values: Record<string, string>; from: Record<string, string> };
 }
 
 const BUILTINS: Record<string, () => string> = {
@@ -347,13 +352,19 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
   // resolved once, so {{$uuid}} in a variable stays the same for the whole flow.
   const vars: Record<string, string> = {};
   for (const [k, v] of Object.entries({ ...(flow.variables ?? {}), ...ctx.env.variables })) vars[k] = interpolate(v, vars);
-  Object.assign(vars, secretVars);
+  // Data created earlier in the run beats sample values; test credentials still win.
+  Object.assign(vars, ctx.carried?.values ?? {}, secretVars);
   const steps: QAStepResult[] = [];
   let stopped: string | undefined;
 
   // Real test data from the databases, before the first request; a missing value stops the flow.
   const dataQueries: QADbQueryLog[] = [];
   for (const q of flow.dataQueries ?? []) {
+    const reused = ctx.carried?.from[q.name];
+    if (reused && ctx.carried?.values[q.name] !== undefined) {
+      dataQueries.push({ kind: 'data', label: `{{${q.name}}}`, db: q.db, sql: q.sql, at: new Date().toISOString(), ok: true, value: ctx.carried.values[q.name], reusedFrom: reused });
+      continue;
+    }
     const log = await logQuery(ctx, 'data', `{{${q.name}}}`, q.db, q.sql, vars);
     const value = log.result ? firstValue(log.result, q.column) : undefined;
     if (log.ok && value === undefined) Object.assign(log, { ok: false, error: log.result?.rowCount ? `Kolom ${q.column ?? '(pertama)'} kosong.` : 'Query tidak mengembalikan data.' });
@@ -373,6 +384,7 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
     }
     const { result, extracted } = await runStep(step, vars, ctx, secrets);
     Object.assign(vars, extracted);
+    if (ctx.carried) for (const [k, v] of Object.entries(extracted)) (ctx.carried.values[k] = v), (ctx.carried.from[k] = flow.name);
     steps.push(result);
     ctx.onStep?.(flowIndex, result);
     if (result.status !== 'passed') stopped = `Dilewati karena step "${step.name}" ${result.status === 'blocked' ? 'diblokir' : 'gagal'}.`;
