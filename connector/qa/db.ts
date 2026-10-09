@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { QADatabase, QADbResult } from '../../src/lib/qa/types.ts';
+import type { QADbConnection, QADbResult } from '../../src/lib/qa/types.ts';
 
 /**
  * Read-only PostgreSQL access for E2E tests: real data for test variables and data checks after
@@ -39,7 +39,7 @@ export function assertReadOnlySql(sql: string): string {
   return trimmed;
 }
 
-function client(db: QADatabase, password: string | undefined): pg.Client {
+function client(db: QADbConnection, password: string | undefined): pg.Client {
   return new pg.Client({
     host: db.host,
     port: db.port || 5432,
@@ -54,7 +54,7 @@ function client(db: QADatabase, password: string | undefined): pg.Client {
 }
 
 /** Runs one read-only query: at most MAX_ROWS rows, values as strings. */
-export async function queryReadOnly(db: QADatabase, password: string | undefined, sql: string, maxRows = MAX_ROWS): Promise<QADbResult> {
+export async function queryReadOnly(db: QADbConnection, password: string | undefined, sql: string, maxRows = MAX_ROWS): Promise<QADbResult> {
   const safe = assertReadOnlySql(sql);
   // Cap rows without touching the query's own LIMIT/ORDER BY.
   const capped = /^(select|with|table|values)\b/i.test(skeleton(safe).trim()) ? `SELECT * FROM (${safe}) AS tlc_q LIMIT ${maxRows + 1}` : safe;
@@ -76,8 +76,14 @@ export async function queryReadOnly(db: QADatabase, password: string | undefined
   }
 }
 
+/** Names of the databases on the server (to map services to them). */
+export async function listDatabases(server: QADbConnection, password: string | undefined): Promise<string[]> {
+  const r = await queryReadOnly(server, password, 'SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname', 500);
+  return r.rows.map((row) => String(row[0])).filter((n) => n && n !== 'postgres');
+}
+
 /** Connects and reports the server version (the "Tes koneksi" button). */
-export async function testConnection(db: QADatabase, password: string | undefined): Promise<string> {
+export async function testConnection(db: QADbConnection, password: string | undefined): Promise<string> {
   const r = await queryReadOnly(db, password, 'SELECT version()');
   return String(r.rows[0]?.[0] ?? '').split(',')[0];
 }
@@ -86,7 +92,7 @@ const MAX_SCHEMA_TABLES = 150;
 const MAX_SCHEMA_CHARS = 30_000;
 
 /** Tables and columns (user schemas), compact, for the AI that writes the test queries. */
-export async function schemaSummary(db: QADatabase, password: string | undefined): Promise<string> {
+export async function schemaSummary(db: QADbConnection, password: string | undefined): Promise<string> {
   const r = await queryReadOnly(
     db,
     password,

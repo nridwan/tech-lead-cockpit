@@ -97,7 +97,8 @@ function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>): stri
     '- Assertion "db" di step: query SELECT SETELAH request untuk memeriksa data tersimpan/berubah benar (op: equals/exists/not_exists/contains/gt/lt; "column" = kolom yang dibandingkan). Boleh memakai {{variabel}} hasil extract.',
     '- WAJIB hanya SELECT. DILARANG INSERT/UPDATE/DELETE/DDL; query lain ditolak dan transaksi dijalankan read-only.',
     '- Pakai nama tabel & kolom PERSIS dari skema di bawah; "db" diisi nama database (bukan nama host).',
-    ...dbs.map((d) => `\n### Database "${d.name}"${d.error ? ` (skema tidak terbaca: ${d.error})` : ''}\n${d.schema || '(skema tidak tersedia)'}`),
+    '- Tiap service punya database sendiri: query data milik service X ke database service X ("db" = nama database di bawah).',
+    ...dbs.map((d) => `\n### Database "${d.name}"${d.service && d.service !== d.name ? ` (service ${d.service})` : ''}${d.error ? ` (skema tidak terbaca: ${d.error})` : ''}\n${d.schema || '(skema tidak tersedia)'}`),
   ].join('\n');
 }
 

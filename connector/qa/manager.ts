@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QADatabase, QADbResult, QAEnvironment, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
-import { QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
+import type { QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import { listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
+import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
 import { runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
@@ -35,32 +36,53 @@ export interface QaDeps {
   fetch?: typeof fetch;
   /** Read-only database access (PostgreSQL); tests inject a fake. */
   db?: {
-    query: (db: QADatabase, password: string | undefined, sql: string) => Promise<QADbResult>;
-    schema: (db: QADatabase, password: string | undefined) => Promise<string>;
-    test: (db: QADatabase, password: string | undefined) => Promise<string>;
+    query: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
+    schema: (db: QADbConnection, password: string | undefined) => Promise<string>;
+    test: (db: QADbConnection, password: string | undefined) => Promise<string>;
+    list: (server: QADbConnection, password: string | undefined) => Promise<string[]>;
   };
 }
 
-const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection };
-const DB_NAME = /^[A-Za-z][\w-]{0,39}$/;
+const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection, list: listDatabases };
+const DB_NAME = /^[A-Za-z][\w.-]{0,79}$/;
+const MAX_DATABASES = 80;
+/** Databases whose schema the AI reads in one generation (the selected tasks' services). */
+const MAX_SCHEMA_DBS = 8;
 const dbSecretKey = (envId: string, name: string) => `${envId}:db:${name}`;
+const serverSecretKey = (envId: string) => `${envId}:dbserver`;
+
+function cleanServer(raw: unknown): QADbServer | undefined {
+  const d = (raw ?? {}) as Partial<QADbServer>;
+  const host = String(d.host ?? '').trim();
+  if (!host) return undefined;
+  if (!/^[\w.-]{1,253}$/.test(host)) throw new QaInputError('Host server database tidak valid.');
+  const user = String(d.user ?? '').trim();
+  if (!user) throw new QaInputError('User server database wajib diisi.');
+  const port = Number(d.port) || 5432;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new QaInputError('Port server database tidak valid.');
+  return { host, port, user: user.slice(0, 100), ...(d.ssl ? { ssl: true } : {}) };
+}
 
 function cleanDatabases(raw: unknown): QADatabase[] {
   const out: QADatabase[] = [];
-  for (const item of Array.isArray(raw) ? raw.slice(0, 10) : []) {
+  for (const item of Array.isArray(raw) ? raw.slice(0, MAX_DATABASES) : []) {
     const d = (item ?? {}) as Partial<QADatabase>;
-    const name = String(d.name ?? '').trim();
-    const host = String(d.host ?? '').trim();
+    const service = String(d.service ?? '').trim();
+    const name = String(d.name ?? '').trim() || service;
     const database = String(d.database ?? '').trim();
-    const user = String(d.user ?? '').trim();
-    if (!name && !host && !database) continue;
-    if (!DB_NAME.test(name)) throw new QaInputError(`Nama database "${name}" tidak valid (huruf, angka, - atau _).`);
-    if (out.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw new QaInputError(`Nama database "${name}" dipakai dua kali.`);
-    if (!/^[\w.-]{1,253}$/.test(host)) throw new QaInputError(`Host database "${name}" tidak valid.`);
-    if (!database || !user) throw new QaInputError(`Database "${name}": nama database dan user wajib diisi.`);
-    const port = Number(d.port) || 5432;
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new QaInputError(`Port database "${name}" tidak valid.`);
-    out.push({ name, host, port, database: database.slice(0, 100), user: user.slice(0, 100), ...(d.ssl ? { ssl: true } : {}) });
+    if (!name && !database) continue;
+    if (!DB_NAME.test(name)) throw new QaInputError(`Nama database "${name}" tidak valid (huruf, angka, titik, - atau _).`);
+    if (out.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw new QaInputError(`"${name}" dipetakan dua kali.`);
+    if (!database || !/^[\w.$-]{1,100}$/.test(database)) throw new QaInputError(`${name}: nama database tidak valid.`);
+    const host = String(d.host ?? '').trim();
+    if (host && !/^[\w.-]{1,253}$/.test(host)) throw new QaInputError(`${name}: host tidak valid.`);
+    const port = Number(d.port);
+    out.push({
+      name,
+      ...(service ? { service: service.slice(0, 100) } : {}),
+      database,
+      ...(host ? { host, ...(Number.isInteger(port) && port > 0 && port < 65_536 ? { port } : {}), ...(d.user ? { user: String(d.user).trim().slice(0, 100) } : {}), ...(d.ssl ? { ssl: true } : {}) } : {}),
+    });
   }
   return out;
 }
@@ -105,6 +127,7 @@ export function validateEnvironment(raw: Partial<QAEnvironment>): QAEnvironment 
     variables: cleanRecord(raw.variables, 'Variabel'),
     auth: { type: authType, ...(authType === 'header' ? { headerName } : {}), ...(authType === 'basic' ? { username: String(raw.auth?.username ?? '').trim() } : {}) },
     readOnly: raw.readOnly === true,
+    dbServer: cleanServer(raw.dbServer),
     databases: cleanDatabases(raw.databases),
     timeoutMs: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : 30_000,
   };
@@ -151,14 +174,43 @@ export class QaManager {
 
   private envFile = () => join(this.dir, 'environments.json');
 
+  /**
+   * Databases saved before servers existed (each with its own host): when they share one server,
+   * that becomes the environment's server (password copied), and each gets its service guessed
+   * from the database name. Runs once per environment.
+   */
+  private async migrateDatabases(envs: QAEnvironment[]): Promise<boolean> {
+    let changed = false;
+    for (const env of envs) {
+      const legacy = (env.databases ?? []).filter((d) => d.host);
+      if (env.dbServer || !legacy.length) continue;
+      const first = legacy[0];
+      if (!legacy.every((d) => d.host === first.host && (d.port ?? 5432) === (first.port ?? 5432) && d.user === first.user)) continue;
+      env.dbServer = { host: first.host!, port: first.port ?? 5432, user: first.user ?? '', ...(first.ssl ? { ssl: true } : {}) };
+      const password = await this.deps.readSecret(dbSecretKey(env.id, first.name));
+      if (password && !(await this.deps.readSecret(serverSecretKey(env.id)))) await this.deps.writeSecret(serverSecretKey(env.id), password);
+      const guesses = matchDatabases(Object.keys(env.services), legacy.map((d) => d.database));
+      env.databases = (env.databases ?? []).map((d) => {
+        if (!d.host) return d;
+        const service = d.service ?? Object.entries(guesses).find(([, db]) => db === d.database)?.[0];
+        void this.deps.deleteSecret(dbSecretKey(env.id, d.name));
+        return { name: service ?? d.name, ...(service ? { service } : {}), database: d.database };
+      });
+      changed = true;
+    }
+    return changed;
+  }
+
   async listEnvironments(): Promise<QAEnvironment[]> {
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
+    if (await this.migrateDatabases(envs)) await this.write(this.envFile(), envs);
     return Promise.all(
       envs.map(async (e) => ({
         ...e,
         hasSecret: Boolean(await this.deps.readSecret(e.id)),
         secretVariableNames: Object.keys(await this.secretVariables(e.id)),
-        dbPasswords: Object.fromEntries(await Promise.all((e.databases ?? []).map(async (d) => [d.name, Boolean(await this.deps.readSecret(dbSecretKey(e.id, d.name)))] as const))),
+        dbServerPassword: Boolean(await this.deps.readSecret(serverSecretKey(e.id))),
+        dbPasswords: Object.fromEntries(await Promise.all((e.databases ?? []).filter((d) => d.host).map(async (d) => [d.name, Boolean(await this.deps.readSecret(dbSecretKey(e.id, d.name)))] as const))),
       })),
     );
   }
@@ -176,11 +228,15 @@ export class QaManager {
    * `secret`: undefined keeps the stored one, '' removes it. `secretVariables`: undefined keeps
    * them; an object replaces them, where an empty value keeps that variable's stored value.
    */
-  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>): Promise<QAEnvironment[]> {
+  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string): Promise<QAEnvironment[]> {
     const env = validateEnvironment(raw);
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
     const index = env.id ? envs.findIndex((e) => e.id === env.id) : -1;
     if (index < 0) env.id = slug(env.name);
+    if (dbServerPassword !== undefined) {
+      if (dbServerPassword === '' || !env.dbServer) await this.deps.deleteSecret(serverSecretKey(env.id));
+      else if (!(await this.deps.writeSecret(serverSecretKey(env.id), dbServerPassword))) throw new QaInputError('Gagal menyimpan password database ke Keychain.');
+    }
     // Database passwords: '' removes, a value sets, absent keeps; removed databases lose theirs.
     for (const [name, value] of Object.entries(dbPasswords ?? {})) {
       if (!env.databases?.some((d) => d.name === name) || typeof value !== 'string') continue;
@@ -208,24 +264,61 @@ export class QaManager {
     return this.listEnvironments();
   }
 
-  /** Read-only query on one of the environment's databases (by name, case-insensitive). */
+  /** Connection of one database: its own host, or the environment's server. */
+  private connection(env: QAEnvironment, db: QADatabase): QADbConnection {
+    const server = env.dbServer;
+    const host = db.host ?? server?.host;
+    if (!host) throw new QaDbError(`Server database environment ${env.name} belum diatur.`);
+    return { name: db.name, host, port: db.port ?? server?.port ?? 5432, user: db.user ?? server?.user ?? '', database: db.database, ssl: db.ssl ?? server?.ssl };
+  }
+
+  private async password(env: QAEnvironment, db?: QADatabase): Promise<string | undefined> {
+    return ((db?.host && (await this.deps.readSecret(dbSecretKey(env.id, db.name)))) || (await this.deps.readSecret(serverSecretKey(env.id)))) ?? undefined;
+  }
+
+  /** Database by name or service (case-insensitive). */
+  private findDb(env: QAEnvironment, name: string): QADatabase | undefined {
+    const n = name.toLowerCase();
+    return env.databases?.find((d) => d.name.toLowerCase() === n) ?? env.databases?.find((d) => d.service?.toLowerCase() === n);
+  }
+
+  /** Read-only query on one of the environment's databases. */
   private dbQuery(env: QAEnvironment): (name: string, sql: string) => Promise<QADbResult> {
     return async (name, sql) => {
-      const db = env.databases?.find((d) => d.name.toLowerCase() === name.toLowerCase());
+      const db = this.findDb(env, name);
       if (!db) throw new QaDbError(`Database "${name}" tidak ada di environment ${env.name}.`);
-      const password = (await this.deps.readSecret(dbSecretKey(env.id, db.name))) ?? undefined;
-      return (this.deps.db ?? REAL_DB).query(db, password, sql);
+      return (this.deps.db ?? REAL_DB).query(this.connection(env, db), await this.password(env, db), sql);
     };
   }
 
-  /** "Tes koneksi" for a saved database of an environment. */
-  async testDatabase(envId: string, name: string): Promise<string> {
+  private async savedEnv(envId: string): Promise<QAEnvironment> {
     const env = (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === envId);
-    const db = env?.databases?.find((d) => d.name === name);
-    if (!env || !db) throw new QaInputError('Database tidak ditemukan; simpan environment dulu.');
-    const password = (await this.deps.readSecret(dbSecretKey(env.id, db.name))) ?? undefined;
+    if (!env) throw new QaInputError('Environment tidak ditemukan; simpan dulu.');
+    return env;
+  }
+
+  /** "Tes koneksi": the server (no name) or one mapped database. */
+  async testDatabase(envId: string, name?: string): Promise<string> {
+    const env = await this.savedEnv(envId);
     try {
-      return await (this.deps.db ?? REAL_DB).test(db, password);
+      if (name) {
+        const db = this.findDb(env, name);
+        if (!db) throw new QaInputError('Database tidak ditemukan; simpan environment dulu.');
+        return await (this.deps.db ?? REAL_DB).test(this.connection(env, db), await this.password(env, db));
+      }
+      if (!env.dbServer) throw new QaInputError('Isi server database dulu.');
+      return await (this.deps.db ?? REAL_DB).test({ name: 'server', ...env.dbServer, database: 'postgres' }, await this.password(env));
+    } catch (e) {
+      throw new QaInputError((e as Error).message);
+    }
+  }
+
+  /** Database names on the environment's server, to map services to them. */
+  async listServerDatabases(envId: string): Promise<string[]> {
+    const env = await this.savedEnv(envId);
+    if (!env.dbServer) throw new QaInputError('Isi server database dulu.');
+    try {
+      return await (this.deps.db ?? REAL_DB).list({ name: 'server', ...env.dbServer, database: 'postgres' }, await this.password(env));
     } catch (e) {
       throw new QaInputError((e as Error).message);
     }
@@ -234,6 +327,7 @@ export class QaManager {
   async deleteEnvironment(id: string): Promise<QAEnvironment[]> {
     const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
     for (const d of envs.find((e) => e.id === id)?.databases ?? []) await this.deps.deleteSecret(dbSecretKey(id, d.name));
+    await this.deps.deleteSecret(serverSecretKey(id));
     await this.write(
       this.envFile(),
       envs.filter((e) => e.id !== id),
@@ -303,17 +397,23 @@ export class QaManager {
     req = { ...req, databases: undefined };
     const env = req.environmentId ? (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId) : undefined;
     if (env?.databases?.length) {
-      job.progress = 'Membaca skema database…';
-      req.databases = await Promise.all(
-        env.databases.map(async (d) => {
-          const password = (await this.deps.readSecret(dbSecretKey(env.id, d.name))) ?? undefined;
-          try {
-            return { name: d.name, schema: await (this.deps.db ?? REAL_DB).schema(d, password) };
-          } catch (e) {
-            return { name: d.name, schema: '', error: (e as Error).message };
-          }
-        }),
-      );
+      // Only the databases of the selected tasks' services (a project has many microservices).
+      const wanted = new Set(req.tasks.map((t) => t.service?.toLowerCase()).filter(Boolean));
+      let picked = env.databases.filter((d) => wanted.has((d.service ?? d.name).toLowerCase()));
+      if (!picked.length && env.databases.length <= 3) picked = env.databases;
+      picked = picked.slice(0, MAX_SCHEMA_DBS);
+      if (picked.length) {
+        job.progress = `Membaca skema ${picked.length} database…`;
+        req.databases = await Promise.all(
+          picked.map(async (d) => {
+            try {
+              return { name: d.name, service: d.service, schema: await (this.deps.db ?? REAL_DB).schema(this.connection(env, d), await this.password(env, d)) };
+            } catch (e) {
+              return { name: d.name, service: d.service, schema: '', error: (e as Error).message };
+            }
+          }),
+        );
+      }
     }
     // Empty working folder: the AI gets the TAD in the prompt and has nothing else to read.
     const cwd = await mkdtemp(join(tmpdir(), 'tlc-qa-'));

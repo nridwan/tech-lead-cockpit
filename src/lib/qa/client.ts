@@ -21,10 +21,12 @@ const q = (params: Record<string, string>) => `?${new URLSearchParams(params)}`;
 export const qa = {
   environments: () => call<QAEnvironment[]>('/environments'),
   /** `secret`: undefined keeps the stored token, '' removes it. `secretVariables`: undefined keeps them. */
-  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>) =>
-    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables, dbPasswords }),
-  /** Connects to a saved database of the environment (read-only) and returns the server version. */
-  testDatabase: (environmentId: string, name: string) => post<{ version: string }>('/db/test', { environmentId, name }).then((r) => r.version),
+  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string) =>
+    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables, dbPasswords, dbServerPassword }),
+  /** Connects (read-only) to the environment's database server, or one mapped database, and returns the server version. */
+  testDatabase: (environmentId: string, name?: string) => post<{ version: string }>('/db/test', { environmentId, name }).then((r) => r.version),
+  /** Database names on the environment's server. */
+  listDatabases: (environmentId: string) => post<{ databases: string[] }>('/db/list', { environmentId }).then((r) => r.databases),
   deleteEnvironment: (id: string) => post<QAEnvironment[]>('/environments/delete', { id }),
   /** `draftIds`/`projectName` let a project adopt the per-TAD suites stored before projects existed. */
   suite: (projectId: string, adopt?: { projectName: string; draftIds: string[] }) =>

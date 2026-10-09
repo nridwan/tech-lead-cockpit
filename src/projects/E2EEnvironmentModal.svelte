@@ -4,6 +4,7 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
+  import { matchDatabases, matchScore } from '../lib/qa/db-match';
   import { emptyEnvironment, type QAEnvironment } from '../lib/qa/types';
 
   let {
@@ -29,32 +30,83 @@
   let clearSecret = $state(false);
   let saving = $state(false);
   let error = $state('');
-  /** New database passwords typed in this form (by database name); empty = keep the stored one. */
-  let dbPasswords = $state<Record<string, string>>({});
-  let dbStatus = $state<Record<string, { ok: boolean; text: string } | 'testing'>>({});
+  // Databases: one server (one login) and a database per service.
+  let serverPassword = $state('');
+  let serverStatus = $state<{ ok: boolean; text: string } | 'testing' | null>(null);
+  let serverDbs = $state<string[]>([]);
+  let listing = $state(false);
+  let rowStatus = $state<Record<number, { ok: boolean; text: string } | 'testing'>>({});
+  /** Services matched automatically but not word for word: the user should look at them. */
+  let uncertain = $state(new Set<string>());
 
-  function addDatabase() {
-    if (!editing) return;
-    editing.databases = [...(editing.databases ?? []), { name: editing.databases?.length ? `db${editing.databases.length + 1}` : 'main', host: '', port: 5432, database: '', user: '' }];
+  /** Services to map: the environment's base URLs and the project's TAD services. */
+  const knownServices = $derived([...new Set([...Object.keys(fromLinesSafe(servicesText)), ...services])].filter(Boolean).sort());
+  function fromLinesSafe(text: string): Record<string, string> {
+    try {
+      return fromLines(text, '=');
+    } catch {
+      return {};
+    }
   }
-  function removeDatabase(i: number) {
+
+  async function savedId(): Promise<string | undefined> {
+    const ok = await save(true);
+    return ok ? editing?.id || selectedId : undefined;
+  }
+
+  async function testServer() {
+    serverStatus = 'testing';
+    const id = await savedId();
+    if (!id) return void (serverStatus = { ok: false, text: error || 'Simpan environment gagal.' });
+    try {
+      serverStatus = { ok: true, text: `Terhubung · ${await qa.testDatabase(id)}` };
+    } catch (e) {
+      serverStatus = { ok: false, text: (e as Error).message };
+    }
+  }
+
+  /** Lists the server's databases and maps every service without one to its best match. */
+  async function listAndMatch() {
+    if (!editing) return;
+    listing = true;
+    try {
+      const id = await savedId();
+      if (!id) return;
+      serverDbs = await qa.listDatabases(id);
+      const mapped = new Set((editing.databases ?? []).map((d) => (d.service ?? d.name).toLowerCase()));
+      const free = serverDbs.filter((d) => !(editing?.databases ?? []).some((x) => x.database === d));
+      const matches = matchDatabases(knownServices.filter((sv) => !mapped.has(sv.toLowerCase())), free);
+      const added = Object.entries(matches).map(([service, database]) => ({ name: service, service, database }));
+      uncertain = new Set(added.filter((a) => matchScore(a.service, a.database) < 1).map((a) => a.service));
+      editing.databases = [...(editing.databases ?? []), ...added];
+      const left = knownServices.filter((sv) => !mapped.has(sv.toLowerCase()) && !matches[sv]).length;
+      toasts.show(`${serverDbs.length} database di server · ${added.length} service dicocokkan${uncertain.size ? ` (${uncertain.size} perlu diperiksa)` : ''}${left ? ` · ${left} service tanpa pasangan` : ''}. Periksa lalu simpan.`, 'ok', 7000);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      listing = false;
+    }
+  }
+
+  function addRow() {
+    if (!editing) return;
+    editing.databases = [...(editing.databases ?? []), { name: '', service: '', database: '' }];
+  }
+  function removeRow(i: number) {
     if (!editing?.databases) return;
     editing.databases = editing.databases.filter((_, j) => j !== i);
   }
-  /** Saves the form (keeping it open), then connects to the database read-only. */
-  async function testDatabase(name: string) {
-    if (!editing) return;
-    dbStatus[name] = 'testing';
-    const ok = await save(true);
-    const id = ok ? editing?.id || selectedId : '';
-    if (!ok || !id) {
-      dbStatus[name] = { ok: false, text: error || 'Simpan environment gagal.' };
-      return;
-    }
+  async function testRow(i: number) {
+    const d = editing?.databases?.[i];
+    if (!d) return;
+    rowStatus[i] = 'testing';
+    const id = await savedId();
+    if (!id) return void (rowStatus[i] = { ok: false, text: error || 'Simpan gagal.' });
     try {
-      dbStatus[name] = { ok: true, text: `Terhubung · ${await qa.testDatabase(id, name)}` };
+      await qa.testDatabase(id, d.service || d.name);
+      rowStatus[i] = { ok: true, text: 'OK' };
     } catch (e) {
-      dbStatus[name] = { ok: false, text: (e as Error).message };
+      rowStatus[i] = { ok: false, text: (e as Error).message };
     }
   }
 
@@ -91,8 +143,10 @@
     clearSecret = false;
     error = '';
     e.databases ??= [];
-    dbPasswords = {};
-    dbStatus = {};
+    e.dbServer ??= { host: '', port: 5432, user: '' };
+    serverPassword = '';
+    serverStatus = null;
+    rowStatus = {};
   }
 
   async function save(keepOpen = false): Promise<boolean> {
@@ -107,6 +161,8 @@
         services: Object.fromEntries(Object.entries(fromLines(servicesText, '=')).filter(([, v]) => v)),
         headers: fromLines(headersText, ':'),
         variables: fromLines(variablesText, '='),
+        dbServer: editing.dbServer?.host?.trim() ? $state.snapshot(editing.dbServer) : undefined,
+        databases: (editing.databases ?? []).filter((d) => (d.service || d.name).trim() || d.database.trim()).map((d) => ({ ...$state.snapshot(d), name: (d.service || d.name).trim(), service: d.service?.trim() || undefined })),
       };
     } catch (e) {
       error = (e as Error).message;
@@ -115,15 +171,14 @@
     saving = true;
     try {
       const before = new Set(environments.map((e) => e.id));
-      const passwords = Object.fromEntries(Object.entries($state.snapshot(dbPasswords)).filter(([, v]) => v));
-      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables, Object.keys(passwords).length ? passwords : undefined);
+      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables, undefined, serverPassword || undefined);
       const saved = env.id ? env.id : environments.find((e) => !before.has(e.id))?.id;
       if (saved) selectedId = saved;
       secret = '';
-      dbPasswords = {};
+      serverPassword = '';
       if (keepOpen) {
         const fresh = environments.find((e) => e.id === saved);
-        if (fresh && editing) Object.assign(editing, { id: fresh.id, hasSecret: fresh.hasSecret, dbPasswords: fresh.dbPasswords });
+        if (fresh && editing) Object.assign(editing, { id: fresh.id, hasSecret: fresh.hasSecret, dbServerPassword: fresh.dbServerPassword, dbPasswords: fresh.dbPasswords });
       } else {
         editing = null;
         toasts.show('Environment tersimpan.', 'ok', 2000);
@@ -254,40 +309,54 @@
       <section class="dbs">
         <div class="dbs-head">
           <strong>Database (hanya baca)</strong>
-          <span class="muted small">PostgreSQL. Dipakai untuk mengambil data nyata sebagai variabel uji dan memeriksa data setelah request. Hanya SELECT, dijalankan di transaksi read-only, sehingga data tidak bisa diubah atau dihapus.</span>
-          <span class="grow"></span>
-          <button class="btn btn-sm" type="button" onclick={addDatabase}><Icon name="plus" size={12} /> Database</button>
+          <span class="muted small">PostgreSQL, untuk data nyata variabel uji dan cek data setelah request. Hanya SELECT di transaksi read-only, sehingga data tidak bisa diubah atau dihapus.</span>
         </div>
-        {#each editing.databases ?? [] as d, i (i)}
-          <div class="db">
-            <div class="db-grid">
-              <label class="field"><span>Nama <em class="muted">(dipakai di test)</em></span><input class="input mono" bind:value={d.name} placeholder="promo" /></label>
-              <label class="field"><span>Host</span><input class="input mono" bind:value={d.host} placeholder="172.31.135.20" /></label>
-              <label class="field"><span>Port</span><input class="input mono" type="number" bind:value={d.port} placeholder="5432" /></label>
-              <label class="field"><span>Nama database</span><input class="input mono" bind:value={d.database} placeholder="promo_db" /></label>
-              <label class="field"><span>User</span><input class="input mono" bind:value={d.user} autocomplete="off" placeholder="readonly_user" /></label>
-              <label class="field">
-                <span>Password {editing.dbPasswords?.[d.name] ? '(tersimpan)' : ''}</span>
-                <input class="input" type="password" bind:value={dbPasswords[d.name]} autocomplete="off" placeholder={editing.dbPasswords?.[d.name] ? 'Kosongkan untuk tetap memakai yang lama' : 'Password database'} />
-              </label>
-            </div>
-            <div class="db-actions">
-              <label class="check small"><input type="checkbox" bind:checked={d.ssl} /> SSL</label>
-              <span class="grow"></span>
-              {#if dbStatus[d.name] === 'testing'}
-                <span class="muted small">Menghubungkan…</span>
-              {:else if dbStatus[d.name]}
-                {@const st = dbStatus[d.name] as { ok: boolean; text: string }}
-                <span class="small {st.ok ? 'ok' : 'err'}">{st.text}</span>
-              {/if}
-              <button class="btn btn-sm" type="button" onclick={() => testDatabase(d.name)} disabled={saving || !d.host || !d.database || !d.user}>Simpan & tes koneksi</button>
-              <button class="btn btn-ghost btn-sm" type="button" onclick={() => removeDatabase(i)} aria-label="Hapus database {d.name}"><Icon name="trash" size={12} /></button>
-            </div>
+        {#if editing.dbServer}
+          <div class="db-grid">
+            <label class="field"><span>Host server</span><input class="input mono" bind:value={editing.dbServer.host} placeholder="172.31.135.20" /></label>
+            <label class="field"><span>Port</span><input class="input mono" type="number" bind:value={editing.dbServer.port} placeholder="5432" /></label>
+            <label class="field"><span>User</span><input class="input mono" bind:value={editing.dbServer.user} autocomplete="off" placeholder="readonly_user" /></label>
+            <label class="field">
+              <span>Password {editing.dbServerPassword ? '(tersimpan)' : ''}</span>
+              <input class="input" type="password" bind:value={serverPassword} autocomplete="off" placeholder={editing.dbServerPassword ? 'Kosongkan untuk tetap memakai yang lama' : 'Password database'} />
+            </label>
+          </div>
+          <div class="db-actions">
+            <label class="check small"><input type="checkbox" bind:checked={editing.dbServer.ssl} /> SSL</label>
+            <span class="grow"></span>
+            {#if serverStatus === 'testing'}<span class="muted small">Menghubungkan…</span>{:else if serverStatus}<span class="small {serverStatus.ok ? 'ok' : 'err'}">{serverStatus.text}</span>{/if}
+            <button class="btn btn-sm" type="button" onclick={testServer} disabled={saving || !editing.dbServer.host || !editing.dbServer.user}>Simpan & tes koneksi</button>
+          </div>
+        {/if}
+
+        <div class="dbs-head map-head">
+          <strong class="small">Database per service ({editing.databases?.length ?? 0})</strong>
+          <span class="grow"></span>
+          <button class="btn btn-sm btn-primary" type="button" onclick={listAndMatch} disabled={listing || saving || !editing.dbServer?.host || !editing.dbServer?.user}>{listing ? 'Mengambil…' : 'Ambil daftar database & cocokkan'}</button>
+          <button class="btn btn-sm" type="button" onclick={addRow}><Icon name="plus" size={12} /> Baris</button>
+        </div>
+        {#if editing.databases?.length}
+          <div class="map">
+            <div class="map-row head"><span>Service</span><span>Database</span><span></span></div>
+            {#each editing.databases as d, i (i)}
+              <div class="map-row" class:check-me={uncertain.has(d.service ?? '')} title={uncertain.has(d.service ?? '') ? 'Cocok sebagian: pastikan database ini memang milik service tersebut' : undefined}>
+                <input class="input mono" bind:value={d.service} list="db-services" placeholder="core-promo-ultimate" aria-label="Service" oninput={() => { const n = new Set(uncertain); n.delete(d.service ?? ''); uncertain = n; }} />
+                <input class="input mono" bind:value={d.database} list="db-names" placeholder="promo_db" aria-label="Nama database" />
+                <span class="row-actions">
+                  {#if uncertain.has(d.service ?? '')}<span class="warn-tag small">periksa</span>{/if}
+                  {#if rowStatus[i] === 'testing'}<span class="muted small">…</span>{:else if rowStatus[i]}{@const st = rowStatus[i] as { ok: boolean; text: string }}<span class="small {st.ok ? 'ok' : 'err'}" title={st.text}>{st.ok ? 'OK' : 'Gagal'}</span>{/if}
+                  <button class="btn btn-ghost btn-xs" type="button" onclick={() => testRow(i)} disabled={saving || !d.database} title="Tes database ini">Tes</button>
+                  <button class="btn btn-ghost btn-xs" type="button" onclick={() => removeRow(i)} aria-label="Hapus baris"><Icon name="trash" size={11} /></button>
+                </span>
+              </div>
+            {/each}
           </div>
         {:else}
-          <p class="muted small">Belum ada database. Tanpa database, test memakai contoh nilai dari AI dan variabel environment.</p>
-        {/each}
-        <p class="muted small">Saran: pakai user database yang hanya punya izin SELECT.</p>
+          <p class="muted small">Isi server lalu klik <strong>Ambil daftar database & cocokkan</strong>: nama database di server dicocokkan otomatis dengan nama service. Bisa juga tambah baris manual.</p>
+        {/if}
+        <datalist id="db-services">{#each knownServices as sv (sv)}<option value={sv}></option>{/each}</datalist>
+        <datalist id="db-names">{#each serverDbs as dn (dn)}<option value={dn}></option>{/each}</datalist>
+        <p class="muted small">Saat generate, AI hanya membaca skema database milik service dari task yang dipilih. Saran: pakai user yang hanya punya izin SELECT.</p>
       </section>
 
       <p class="muted small">Token, password, dan variabel rahasia disimpan di macOS Keychain, tidak pernah dikirim ke AI, dan disamarkan (<code>***</code>) di hasil run maupun perintah curl. Variabel biasa tersimpan sebagai teks di <code>~/.tech-lead-cockpit/qa</code>.</p>
@@ -407,19 +476,60 @@
     flex-wrap: wrap;
     gap: 8px;
   }
-  .db {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
-  }
+
   .db-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: 2fr 90px 1.2fr 1.4fr;
     gap: 8px;
+  }
+  .map-head {
+    margin-top: 6px;
+  }
+  .map {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .map-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 170px;
+    align-items: center;
+    gap: 6px;
+  }
+  .map-row.head {
+    position: sticky;
+    top: 0;
+    background: var(--surface-2);
+    font-size: 11px;
+    color: var(--text-3);
+    text-transform: uppercase;
+  }
+  .map-row .input {
+    font-size: 12px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  .map-row.check-me .input {
+    border-color: var(--warn);
+  }
+  .warn-tag {
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--warn-soft);
+    color: var(--warn);
+    font-weight: 600;
+  }
+  .row-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+  .btn-xs {
+    padding: 2px 8px;
+    font-size: 11.5px;
   }
   .db-actions {
     display: flex;

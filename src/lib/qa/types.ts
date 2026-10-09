@@ -20,9 +20,33 @@ export type QAMethod = (typeof QA_METHODS)[number];
 
 export type QAAuthType = 'none' | 'bearer' | 'basic' | 'header';
 
-/** A PostgreSQL database of the environment, queried read-only (SELECT only); password in the Keychain. */
+/** The PostgreSQL server holding the services' databases (one login for all); password in the Keychain. */
+export interface QADbServer {
+  host: string;
+  port: number;
+  user: string;
+  ssl?: boolean;
+}
+
+/**
+ * A service's database, queried read-only (SELECT only). Connection details come from the
+ * environment's server unless this entry has its own host.
+ */
 export interface QADatabase {
-  /** Short name used by flows, e.g. "promo". */
+  /** Name flows use in "db" (usually the service name, e.g. core-promo-ultimate). */
+  name: string;
+  /** Service (as in the TAD) this database belongs to; generation only reads the selected tasks' ones. */
+  service?: string;
+  /** Database name on the server. */
+  database: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  ssl?: boolean;
+}
+
+/** A fully resolved connection (server details + database). */
+export interface QADbConnection {
   name: string;
   host: string;
   port: number;
@@ -87,9 +111,13 @@ export interface QAEnvironment {
   };
   /** Only GET requests are sent; other steps are blocked. */
   readOnly: boolean;
-  /** Databases for real test data and data checks (read-only). */
+  /** Server of the services' databases (one login). */
+  dbServer?: QADbServer;
+  /** Databases per service, for real test data and data checks (read-only). */
   databases?: QADatabase[];
-  /** Set by the connector: which databases have a password in the Keychain. */
+  /** Set by the connector: the server password is in the Keychain. */
+  dbServerPassword?: boolean;
+  /** Set by the connector: databases with their own password in the Keychain. */
   dbPasswords?: Record<string, boolean>;
   timeoutMs: number;
   /** Set by the connector: a token/password is stored in the Keychain. */
@@ -180,7 +208,7 @@ export interface QAGenerateRequest {
   /** Environment whose databases the AI may use for real data and data checks. */
   environmentId?: string;
   /** Filled by the connector from that environment: schema per database (never passwords). */
-  databases?: { name: string; schema: string; error?: string }[];
+  databases?: { name: string; service?: string; schema: string; error?: string }[];
 }
 
 export type QAJobStatus = 'running' | 'done' | 'error' | 'cancelled';

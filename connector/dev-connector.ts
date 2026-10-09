@@ -960,13 +960,18 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
   try {
     if (route === 'GET /qa/environments') return send(res, 200, await qa.listEnvironments());
     if (route === 'POST /qa/environments') {
-      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string> }>(req, 256 * 1024);
+      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string>; dbServerPassword?: string }>(req, 512 * 1024);
       if (body.secret !== undefined && typeof body.secret !== 'string') throw new QaInputError('Token harus berupa teks.');
-      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables, body.dbPasswords));
+      if (body.dbServerPassword !== undefined && typeof body.dbServerPassword !== 'string') throw new QaInputError('Password harus berupa teks.');
+      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables, body.dbPasswords, body.dbServerPassword));
     }
     if (route === 'POST /qa/db/test') {
       const body = await readJson<{ environmentId?: string; name?: string }>(req, 16 * 1024);
-      return send(res, 200, { version: await qa.testDatabase(String(body.environmentId ?? ''), String(body.name ?? '')) });
+      return send(res, 200, { version: await qa.testDatabase(String(body.environmentId ?? ''), body.name ? String(body.name) : undefined) });
+    }
+    if (route === 'POST /qa/db/list') {
+      const body = await readJson<{ environmentId?: string }>(req, 16 * 1024);
+      return send(res, 200, { databases: await qa.listServerDatabases(String(body.environmentId ?? '')) });
     }
     if (route === 'POST /qa/environments/delete') {
       const body = await readJson<{ id?: string }>(req, 16 * 1024);

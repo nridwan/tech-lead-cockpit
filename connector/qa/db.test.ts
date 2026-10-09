@@ -52,7 +52,7 @@ describe('read-only SQL guard', () => {
   });
 });
 
-const env: QAEnvironment = { id: 'dev', name: 'Dev', baseUrl: 'https://api.dev.test', services: {}, headers: {}, variables: {}, auth: { type: 'none' }, readOnly: false, timeoutMs: 5_000, databases: [{ name: 'promo', host: 'db.dev.test', port: 5432, database: 'promo', user: 'ro' }] };
+const env: QAEnvironment = { id: 'dev', name: 'Dev', baseUrl: 'https://api.dev.test', services: {}, headers: {}, variables: {}, auth: { type: 'none' }, readOnly: false, timeoutMs: 5_000, dbServer: { host: 'db.dev.test', port: 5432, user: 'ro' }, databases: [{ name: 'promo', service: 'core-promo-ultimate', database: 'promo_db' }] };
 
 const flow: QAFlow = {
   id: 'f1',
@@ -128,7 +128,7 @@ describe('generator with a database', () => {
 describe('QaManager databases', () => {
   let dir = '';
   const secrets = new Map<string, string>();
-  const seen: { password?: string; sql: string }[] = [];
+  const connections: { database: string; password?: string }[] = [];
   let prompt = '';
   const manager = () =>
     new QaManager({
@@ -138,40 +138,72 @@ describe('QaManager databases', () => {
       deleteSecret: async (k) => secrets.delete(k),
       runAi: (_ai, p) => ((prompt = p), { done: Promise.resolve({ reply: '{"flows":[{"name":"x","steps":[{"name":"s","request":{"method":"GET","path":"/x"}}]}]}' }), cancel: () => {} }),
       db: {
-        query: async (_d, password, sql) => (seen.push({ password, sql }), result(['x'], [['1']])),
-        schema: async (_d, password) => `promos(id uuid) [pw:${password ? 'yes' : 'no'}]`,
-        test: async () => 'PostgreSQL 16.2',
+        query: async (c, password) => (connections.push({ database: c.database, password }), result(['x'], [['1']])),
+        schema: async (c, password) => `${c.database}: tables(id) [pw:${password ? 'yes' : 'no'}]`,
+        test: async (c) => `PostgreSQL 16.2 (${c.database})`,
+        list: async () => ['promo_db', 'user_auth', 'payment'],
       },
     });
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'tlc-qa-db-'));
     secrets.clear();
-    seen.length = 0;
+    connections.length = 0;
   });
   afterEach(() => rm(dir, { recursive: true, force: true }));
 
-  it('stores database passwords in the Keychain only, tests the connection and reads the schema for generation', async () => {
+  const base = { ...env, id: '', databases: [{ name: 'core-promo-ultimate', service: 'core-promo-ultimate', database: 'promo_db' }, { name: 'core-user-auth-ultimate', service: 'core-user-auth-ultimate', database: 'user_auth' }] };
+
+  it('keeps one server password in the Keychain for every mapped database, and lists the server databases', async () => {
     const m = manager();
-    const [saved] = await m.saveEnvironment({ ...env, id: '' }, undefined, undefined, { promo: 's3cret' });
-    expect(saved.databases?.[0]).toMatchObject({ name: 'promo', host: 'db.dev.test' });
-    expect(saved.dbPasswords).toEqual({ promo: true });
-    expect(secrets.get(`${saved.id}:db:promo`)).toBe('s3cret');
+    const [saved] = await m.saveEnvironment(base, undefined, undefined, undefined, 's3cret');
+    expect(saved.dbServer).toEqual({ host: 'db.dev.test', port: 5432, user: 'ro' });
+    expect(saved.dbServerPassword).toBe(true);
+    expect(secrets.get(`${saved.id}:dbserver`)).toBe('s3cret');
     expect(await readFile(join(dir, 'environments.json'), 'utf8')).not.toContain('s3cret');
-    expect(await m.testDatabase(saved.id, 'promo')).toBe('PostgreSQL 16.2');
+    expect(await m.testDatabase(saved.id)).toBe('PostgreSQL 16.2 (postgres)');
+    expect(await m.testDatabase(saved.id, 'core-user-auth-ultimate')).toBe('PostgreSQL 16.2 (user_auth)');
+    expect(await m.listServerDatabases(saved.id)).toEqual(['promo_db', 'user_auth', 'payment']);
+  });
 
-    const job = await m.generate({ projectId: 'proj', projectName: 'P', ai: { provider: 'claude', model: '' }, tasks: [{ title: 't', spec: 's' }], categories: ['happy-path'], environmentId: saved.id });
-    expect(job.status).toBeDefined();
-    expect(prompt).toContain('promos(id uuid) [pw:yes]');
+  it('runs queries on the mapped database (by name or service) with the server login', async () => {
+    const m = manager();
+    const [saved] = await m.saveEnvironment(base, undefined, undefined, undefined, 's3cret');
+    await m.saveSuite({ projectId: 'proj', projectName: 'P', updatedAt: '', flows: [{ id: 'f', name: 'f', description: '', category: 'happy-path', taskTitles: [], enabled: true, dataQueries: [{ name: 'uid', db: 'core-user-auth-ultimate', sql: 'SELECT id FROM users LIMIT 1' }], steps: [{ id: 's', name: 's', request: { method: 'GET', path: '/x' }, assertions: [] }] }] });
+    const run = await m.startRun({ projectId: 'proj', environmentId: saved.id });
+    for (let i = 0; i < 100 && !connections.length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(connections[0]).toEqual({ database: 'user_auth', password: 's3cret' });
+    expect(run.id).toBeTruthy();
+  });
+
+  it('reads only the schemas of the selected tasks\' services when generating', async () => {
+    const m = manager();
+    const [saved] = await m.saveEnvironment(base, undefined, undefined, undefined, 's3cret');
+    await m.generate({ projectId: 'proj', projectName: 'P', ai: { provider: 'claude', model: '' }, tasks: [{ title: 't', service: 'CORE-PROMO-ULTIMATE', spec: 's' }], categories: ['happy-path'], environmentId: saved.id });
+    expect(prompt).toContain('promo_db: tables(id) [pw:yes]');
+    expect(prompt).not.toContain('user_auth: tables');
     expect(prompt).not.toContain('s3cret');
-
-    // Removing the database removes its password.
-    await m.saveEnvironment({ ...saved, databases: [] });
-    expect(secrets.has(`${saved.id}:db:promo`)).toBe(false);
   });
 
   it('rejects an invalid database definition', async () => {
-    await expect(manager().saveEnvironment({ ...env, id: '', databases: [{ name: 'bad name', host: 'h', port: 5432, database: 'd', user: 'u' }] })).rejects.toThrow('tidak valid');
-    await expect(manager().saveEnvironment({ ...env, id: '', databases: [{ name: 'promo', host: 'h', port: 5432, database: '', user: 'u' }] })).rejects.toThrow('wajib');
+    await expect(manager().saveEnvironment({ ...env, id: '', databases: [{ name: 'bad name', database: 'd' }] })).rejects.toThrow('tidak valid');
+    await expect(manager().saveEnvironment({ ...env, id: '', databases: [{ name: 'promo', database: '' }] })).rejects.toThrow('tidak valid');
+    await expect(manager().saveEnvironment({ ...env, id: '', dbServer: { host: 'db', port: 5432, user: '' } })).rejects.toThrow('User');
+  });
+});
+
+describe('databases saved before servers existed', () => {
+  it('become a server + per-service mapping, keeping the password', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tlc-qa-mig-'));
+    const secrets = new Map<string, string>([['dev:db:main', 'pw']]);
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, 'environments.json'), JSON.stringify([{ ...env, dbServer: undefined, services: { 'core-promo-ultimate': 'http://x' }, databases: [{ name: 'main', host: '10.0.0.5', port: 5432, user: 'postgres', database: 'db_promo_engine' }] }]));
+    const m = new QaManager({ dir, readSecret: async (k) => secrets.get(k) ?? null, writeSecret: async (k, v) => (secrets.set(k, v), true), deleteSecret: async (k) => secrets.delete(k), runAi: () => ({ done: Promise.resolve({ reply: '' }), cancel: () => {} }) });
+    const [e] = await m.listEnvironments();
+    expect(e.dbServer).toEqual({ host: '10.0.0.5', port: 5432, user: 'postgres' });
+    expect(e.databases).toEqual([{ name: 'core-promo-ultimate', service: 'core-promo-ultimate', database: 'db_promo_engine' }]);
+    expect(secrets.get('dev:dbserver')).toBe('pw');
+    expect(e.dbServerPassword).toBe(true);
+    await rm(dir, { recursive: true, force: true });
   });
 });
