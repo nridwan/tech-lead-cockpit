@@ -191,7 +191,7 @@ describe('E2E multi-agent pipeline', () => {
         { id: 'wrong', name: 'Wrong path', description: '', category: 'happy-path', taskTitles: [], enabled: true, stage: '1. Buat promo', steps: [step('a')] },
         { id: 'buggy', name: 'Buggy service', description: '', category: 'happy-path', taskTitles: [], enabled: true, steps: [step('b')] },
         { id: 'fine', name: 'Fine', description: '', category: 'happy-path', taskTitles: [], enabled: true, steps: [step('c')] },
-      ] as QAFlow[],
+      ] as unknown as QAFlow[],
     });
     const runId = randomUUID();
     const result = (flowId: string, status: 'failed' | 'passed') => ({ flowId, name: flowId, category: 'happy-path', taskTitles: [], status, steps: [{ stepId: 'a', name: 'a', status, assertions: [{ passed: status === 'passed', message: 'status 404 ≠ 200' }] }] });

@@ -258,8 +258,27 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 14px;
+    /* The panel itself doesn't scroll: these cards scroll inside, the test cases keep room below. */
+    flex-shrink: 0;
+    min-height: 0;
+  }
+  .plan {
+    max-height: 62%;
+  }
+  .agents {
+    max-height: 30%;
+  }
+  .agent-list,
+  .stages {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .stages {
+    padding-right: 4px;
   }
   .sec-head {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -366,6 +385,9 @@
     }
   }
   .notes {
+    flex-shrink: 0;
+    max-height: 90px;
+    overflow-y: auto;
     margin: 0;
     padding: 8px 10px;
     border-radius: 8px;
@@ -381,6 +403,7 @@
     list-style: none;
   }
   .stage {
+    flex-shrink: 0;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -480,6 +503,9 @@
     color: var(--ok);
   }
   .plan-actions {
+    flex-shrink: 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
     display: flex;
     align-items: center;
     gap: 8px;
