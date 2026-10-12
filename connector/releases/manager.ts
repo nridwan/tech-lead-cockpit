@@ -7,7 +7,7 @@ import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/bran
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
 import { buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
-import { findEvidence, indexChanges, unattributedFiles, type FileText } from '../../src/lib/release/evidence.ts';
+import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
@@ -295,7 +295,7 @@ export class ReleaseManager {
     // Each ticket is looked for in the code of its own service (all services when it names none).
     const evidence = new Map<string, CodeEvidence[]>();
     const byRef = new Map<string, { summary: string; evidence: CodeEvidence }[]>();
-    for (const t of tickets) {
+    for (const t of withSharedEndpoints(tickets)) {
       const services = release.services.filter((s) => !t.service || sameService(s.name, t.service));
       for (const s of services) {
         for (const ref of serviceRefs.get(s.id) ?? []) {
@@ -409,7 +409,7 @@ export class ReleaseManager {
     // Tickets are found in the diff itself; a key in a commit only supports it.
     const files = indexChanges(cmp.changes);
     const ref = `${path}@${source}`;
-    const tickets = all
+    const tickets = withSharedEndpoints(all)
       .filter((t) => t.service && sameService(t.service, service.name))
       .map((t) => {
         const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, files);

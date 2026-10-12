@@ -56,6 +56,39 @@ export function ticketTerms(summary: string): string[][] {
   return out;
 }
 
+/** Hint words of a ticket name (request, mobile, get…): never required, but they back up a near match. */
+function ticketHints(summary: string): string[] {
+  return [...new Set(ticketName(summary).toLowerCase().split(/[^a-z0-9]+/).filter((w) => HINT.has(w)))];
+}
+
+/** The required words of a ticket as one comparable string: "cashin channel detail". */
+const signature = (summary: string) =>
+  ticketTerms(summary)
+    .map((t) => t[0])
+    .sort()
+    .join(' ');
+
+/**
+ * One feature has a ticket per service: the gateway's "Register API Request Kode Cashin" and the
+ * backend's "Develop API Request Kode Cashin". A ticket without TAD endpoints takes those of the
+ * tickets with exactly the same words (at least two), so the gateway route is found too.
+ */
+export function withSharedEndpoints<T extends TicketProbe>(tickets: T[]): T[] {
+  const pool = new Map<string, Set<string>>();
+  for (const t of tickets) {
+    const sig = signature(t.summary);
+    if (!t.endpoints?.length || sig.split(' ').length < 2) continue;
+    const set = pool.get(sig) ?? new Set<string>();
+    for (const e of t.endpoints) set.add(e);
+    pool.set(sig, set);
+  }
+  return tickets.map((t) => {
+    if (t.endpoints?.length) return t;
+    const shared = pool.get(signature(t.summary));
+    return shared ? { ...t, endpoints: [...shared] } : t;
+  });
+}
+
 /** /v1/cashin/channel/detail → the path and its shorter tails (a router group may hold the prefix). */
 export function endpointVariants(endpoint: string): string[] {
   const path = endpoint.replace(/^\s*(GET|POST|PUT|PATCH|DELETE)\s+/i, '').replace(/^https?:\/\/[^/]+/i, '').split(/[?#\s]/)[0];
@@ -88,6 +121,7 @@ const has = (text: string, term: string[]) => term.some((t) => text.includes(t))
 /** Where the ticket shows in these changes, strongest first; undefined when it does not. */
 export function findEvidence(probe: TicketProbe, files: FileText[]): Omit<CodeEvidence, 'ref'> | undefined {
   const terms = ticketTerms(probe.summary);
+  const hints = ticketHints(probe.summary);
   const variants = (probe.endpoints ?? []).flatMap(endpointVariants);
   const strong: CodeHit[] = [];
   const weak: CodeHit[] = [];
@@ -108,6 +142,15 @@ export function findEvidence(probe: TicketProbe, files: FileText[]): Omit<CodeEv
     else {
       const joined = f.chunks.map(join);
       if (terms.every((t) => joined.some((j) => has(j, t)))) weak.push({ path: f.path, match: terms.map((t) => t[0]).join(' + ') });
+      else if (terms.length >= 3 && hints.length) {
+        // All words but one in one name, backed by a hint word: /mobile/cashin/channel/{id} for
+        // "Get Detail Cashin Channel Mobile". Close, but a human should confirm.
+        const near = f.chunks.find((ch) => {
+          const j = join(ch);
+          return terms.filter((t) => has(j, t)).length === terms.length - 1 && hints.some((h) => j.includes(h));
+        });
+        if (near) weak.push({ path: f.path, match: near });
+      }
     }
   }
   // Code before tests: a test alone is not the feature.

@@ -3,7 +3,7 @@ import type { MrFileChange } from '../gitlab/types';
 import { taskEndpoints } from '../tad/task-links';
 import { jiraKeysIn } from './checks';
 import { buildReport, codeKeys, forCurrentServices, type ReleaseTicket } from './coverage';
-import { endpointVariants, findEvidence, indexChanges, ticketTerms, unattributedFiles } from './evidence';
+import { endpointVariants, findEvidence, indexChanges, ticketTerms, unattributedFiles, withSharedEndpoints } from './evidence';
 import { removeServices } from './import';
 import type { MrCheck, Release } from './types';
 
@@ -57,6 +57,23 @@ describe('ticket found in the code', () => {
   it('uses the TAD endpoint, also under a router group prefix', () => {
     expect(endpointVariants('POST /v1/topup/code/{id}')).toEqual(['/v1/topup/code', '/topup/code']);
     expect(findEvidence({ key: 'MU-7', summary: '[BACKEND][CORE-TOPUP][TOKO] - Penyesuaian', endpoints: ['/api/v1/topup/code'] }, files)?.hits[0]).toEqual({ path: 'internal/router/router.go', match: '/topup/code' });
+  });
+
+  it("finds a gateway route through the backend ticket of the same feature", () => {
+    const gateway = indexChanges([
+      file('config/gateway.json', ['    "endpoint": "/v1/shop/mobile/topup/request",', '    "endpoint": "/v1/shop/mobile/topup/channel/{id}",']),
+    ]);
+    const tickets = withSharedEndpoints([
+      { key: 'MU-10', summary: '[BACKEND][CORE-TOPUP][TOKO] - Develop API Request Kode Topup Mobile', endpoints: ['POST /v1/shop/mobile/topup/request'] },
+      { key: 'MU-11', summary: '[BACKEND][GATEWAY][TOKO] - Register API Request Kode Topup Mobile' },
+      { key: 'MU-12', summary: '[BACKEND][GATEWAY][TOKO] - Register API Get Detail Topup Channel Mobile' },
+    ]);
+    // Same words ("kode topup"): the gateway ticket takes the backend endpoint.
+    expect(tickets[1].endpoints).toEqual(['POST /v1/shop/mobile/topup/request']);
+    expect(findEvidence(tickets[1], gateway)).toEqual({ strength: 'strong', hits: [{ path: 'config/gateway.json', match: '/v1/shop/mobile/topup/request' }] });
+    // No backend twin with an endpoint: the route misses "detail" but has the hint "mobile".
+    expect(tickets[2].endpoints).toBeUndefined();
+    expect(findEvidence(tickets[2], gateway)).toEqual({ strength: 'weak', hits: [{ path: 'config/gateway.json', match: 'v1/shop/mobile/topup/channel/' }] });
   });
 
   it('does not count a test file alone as the feature', () => {
