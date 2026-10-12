@@ -1176,7 +1176,7 @@ interface CodeRead {
 interface AiRead {
   model: string;
   tickets: Map<string, AiTicketVerdict>;
-  unrelated: Map<string, { path: string; reason: string }[]>;
+  unrelated: Map<string, { path: string; reason: string; flag?: string }[]>;
   risks: Map<string, { path: string; reason: string }[]>;
   pending: Map<string, ReleaseAiNeed[]>;
   errors: string[];

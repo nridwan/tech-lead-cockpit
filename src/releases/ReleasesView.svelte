@@ -621,7 +621,10 @@
                       <details open><summary class="err-text">AI: {src.aiRisks.length} risiko/temuan review</summary><ul>{#each src.aiRisks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}<span>{r.reason}</span></li>{/each}</ul></details>
                     {/if}
                     {#if src.aiUnrelated?.length}
-                      <details open><summary class="warn-text">AI: {src.aiUnrelated.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each src.aiUnrelated as u, i (i)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>
+                      {@const loose = src.aiUnrelated.filter((u) => !u.flag)}
+                      {@const flagged = src.aiUnrelated.filter((u) => u.flag)}
+                      {#if loose.length}<details open><summary class="warn-text">AI: {loose.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each loose as u, i (i)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>{/if}
+                      {#if flagged.length}<details><summary>AI: {flagged.length} perubahan tanpa tiket di balik feature flag (aman ikut selama flag mati)</summary><ul>{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>{/if}
                     {:else if src.unattributed.length}
                       <details><summary>{src.unattributed.length}{src.unattributed.length >= 30 ? '+' : ''} file tidak terkait tiket scope mana pun</summary><ul class="mono">{#each src.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
                     {/if}

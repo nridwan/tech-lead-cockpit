@@ -172,6 +172,7 @@ export function ticketsPrompt(input: { service: string; target: string; refs: st
     '- "sebagian": hanya sebagian yang terlihat, atau ragu.',
     '- "tidak": tidak terlihat di diff.',
     'Lalu sebutkan perubahan yang TIDAK punya tiket di daftar (kemungkinan di luar scope yang ikut terbawa), per file: termasuk endpoint/route baru atau yang diubah tanpa tiket (mis. endpoint yang didaftarkan di config API gateway tapi tidak ada tiketnya), fitur lain, atau perubahan config yang tidak dibutuhkan tiket. Sebut endpoint/fungsinya di reason. Abaikan perubahan kecil yang jelas pendukung fitur tiket (mis. DTO/validator fitur yang sama).',
+    'Feature flag: perubahan di luar tiket yang SELURUH perilakunya dijaga feature flag/toggle dengan default MATI (mis. if os.Getenv("X_ENABLE") == "true", config enabled: false, flag di DB/remote config yang belum dinyalakan) tidak masalah ikut naik karena fungsinya tersembunyi. Bila hanya sebagian yang dijaga flag, atau default-nya hidup, perlakukan sebagai perubahan di luar scope biasa. Tetap sebut di "unrelated" dengan "flag": "<NAMA_FLAG>" dan tambahkan di "needs" env/config flag itu dengan nilai mati (kind env/other, when pre) supaya tetap mati di produksi.',
     '',
     'Terakhir, daftar SEMUA yang harus disiapkan di server sebelum/sesudah deploy supaya tidak ada yang ketinggalan, dari isi diff:',
     '- "env": variabel environment baru atau yang mulai dibaca kode (os.Getenv, process.env, config ${X}, tag env, viper, dll). label = NAMA_ENV, detail = contoh nilai/keterangan.',
@@ -182,7 +183,7 @@ export function ticketsPrompt(input: { service: string; target: string; refs: st
     'Setiap item diberi "when": "pre" (sebelum deploy) atau "post" (sesudah deploy), supaya panduan deploy lengkap dan berurutan.',
     '',
     'Skema jawaban:',
-    '{"tickets":[{"key":"MU-1","verdict":"ada|sebagian|tidak","files":["path/file.go"],"reason":"..."}],"unrelated":[{"path":"path/file.go","reason":"..."}],"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file.go"]}],"risks":[{"path":"path/file.go","reason":"..."}]}',
+    '{"tickets":[{"key":"MU-1","verdict":"ada|sebagian|tidak","files":["path/file.go"],"reason":"..."}],"unrelated":[{"path":"path/file.go","reason":"...","flag":"NAMA_FLAG bila di balik feature flag default mati"}],"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file.go"]}],"risks":[{"path":"path/file.go","reason":"..."}]}',
   ].join('\n');
 }
 
@@ -209,7 +210,8 @@ export function picksPrompt(input: { repo: string; source: string; target: strin
     'Tugas: tentukan commit mana yang harus masuk branch rilis supaya isinya PERSIS scope di atas.',
     '- include true hanya bila perubahan commit itu milik tiket scope (nilai dari diff, bukan judul).',
     '- Banyak commit tidak punya Jira key, atau judulnya tidak jelas: tetap nilai dari diff. Masuk bila perubahannya bagian fitur scope (atau diminta instruksi Tech Lead); bila tidak terkait tiket mana pun, include false dan jelaskan isinya di reason.',
-    '- Commit campuran (scope + di luar scope): include false, jelaskan di reason dan notes.',
+    '- Commit campuran (scope + di luar scope): include false, jelaskan di reason dan notes. KECUALI bagian di luar scope-nya seluruhnya di balik feature flag default mati: include true, sebut nama flag di reason, dan ingatkan di notes agar flag tetap mati di produksi.',
+    '- Feature flag: perubahan di luar tiket yang SELURUH perilakunya dijaga feature flag/toggle dengan default MATI (mis. if os.Getenv("X_ENABLE") == "true", config enabled: false, flag di DB/remote config yang belum dinyalakan) tidak masalah ikut naik karena fungsinya tersembunyi. Bila hanya sebagian yang dijaga flag, atau default-nya hidup, perlakukan sebagai perubahan di luar scope biasa.',
     '- Commit pendukung (config, CI, dependency) include true hanya bila dibutuhkan fitur scope.',
     '- Perhatikan urutan: commit scope yang bergantung pada commit lain yang tidak dipilih bisa konflik; sebutkan di notes.',
     '- Sebutkan di notes tiket scope yang tidak ditemukan di commit mana pun.',
@@ -299,12 +301,16 @@ export function parseJsonReply(reply: string): Record<string, unknown> | null {
 }
 
 /** Entries with the same path become one, their reasons joined. */
-function mergeByPath(list: { path: string; reason: string }[]): { path: string; reason: string }[] {
-  const out: { path: string; reason: string }[] = [];
+function mergeByPath(list: { path: string; reason: string; flag?: string }[]): { path: string; reason: string; flag?: string }[] {
+  const out: { path: string; reason: string; flag?: string }[] = [];
   for (const u of list) {
     const prev = out.find((x) => x.path === u.path);
     if (!prev) out.push({ ...u });
-    else if (u.reason && !prev.reason.includes(u.reason)) prev.reason = `${prev.reason} · ${u.reason}`;
+    else {
+      if (u.reason && !prev.reason.includes(u.reason)) prev.reason = `${prev.reason} · ${u.reason}`;
+      // Behind a flag only when every change of the file is.
+      if (prev.flag !== u.flag) delete prev.flag;
+    }
   }
   return out;
 }
@@ -322,7 +328,7 @@ export function parseTicketsReply(
   reply: string,
   keys: string[],
   paths: string[],
-): { tickets: Map<string, AiTicketVerdict>; unrelated: { path: string; reason: string }[]; needs: AiNeed[]; risks: { path: string; reason: string }[] } | null {
+): { tickets: Map<string, AiTicketVerdict>; unrelated: { path: string; reason: string; flag?: string }[]; needs: AiNeed[]; risks: { path: string; reason: string }[] } | null {
   const json = parseJsonReply(reply);
   if (!json) return null;
   const want = new Set(keys);
@@ -336,7 +342,13 @@ export function parseTicketsReply(
   }
   // One entry per file: the AI may name a file twice (two unrelated changes in one config).
   const unrelated = mergeByPath(
-    (Array.isArray(json.unrelated) ? json.unrelated : []).map((u) => ({ path: str((u as Record<string, unknown>).path, 300), reason: str((u as Record<string, unknown>).reason) })).filter((u) => known.has(u.path)),
+    (Array.isArray(json.unrelated) ? json.unrelated : [])
+      .map((u) => {
+        const r = u as Record<string, unknown>;
+        const flag = str(r.flag, 100);
+        return { path: str(r.path, 300), reason: str(r.reason), ...(flag && !/^(-|tidak|none|null)$/i.test(flag) ? { flag } : {}) };
+      })
+      .filter((u) => known.has(u.path)),
   ).slice(0, 50);
   const needs: AiNeed[] = [];
   for (const n of Array.isArray(json.needs) ? json.needs : []) {
@@ -503,6 +515,7 @@ export function patchPrompt(input: { repo: string; source: string; target: strin
     'Tugas: pilih hunk yang harus masuk branch rilis supaya isinya persis scope + instruksi Tech Lead.',
     '- Pilih hunk milik tiket scope atau yang diminta instruksi; nilai dari isinya, bukan dari judul commit.',
     '- Jangan pilih hunk fitur lain, reformat/whitespace, atau file infra yang tidak dibutuhkan, kecuali diminta instruksi.',
+    '- Hunk fitur lain yang seluruhnya di balik feature flag default mati BOLEH dipilih bila memudahkan (mis. menjaga satu blok tetap utuh); sebut nama flag di reason. Bila tidak perlu, tetap jangan dipilih.',
     '- Bila satu blok baru terpecah ke beberapa hunk yang saling bergantung (mis. koma JSON, kurung penutup, import), pilih semua bagiannya supaya file tetap valid.',
     '- Jelaskan singkat setiap hunk yang dipilih; sebut di notes bila ada yang diminta tapi tidak ditemukan.',
     '',
@@ -543,6 +556,7 @@ export function safetyPrompt(input: { repo: string; branch: string; from: string
     '- Route/endpoint/handler, kolom atau tabel database, migrasi, env/config, file template, atau dependency yang dirujuk tapi tidak ikut.',
     '- Untuk config gateway/proxy: backend/endpoint yang dirujuk harus ada; pola route tidak bentrok.',
     '- Perubahan yang ikut tapi setengah (mis. pemanggil ikut, implementasinya tidak).',
+    '- Feature flag: perubahan di luar tiket yang SELURUH perilakunya dijaga feature flag/toggle dengan default MATI (mis. if os.Getenv("X_ENABLE") == "true", config enabled: false, flag di DB/remote config yang belum dinyalakan) tidak masalah ikut naik karena fungsinya tersembunyi. Bila hanya sebagian yang dijaga flag, atau default-nya hidup, perlakukan sebagai perubahan di luar scope biasa. Kode seperti itu yang ikut bukan masalah; cukup pastikan flag-nya terdefinisi dengan nilai mati (sebut di summary).',
     'verdict: "aman" bila tidak ada ketergantungan putus; "putus" bila ada yang pasti putus; "perlu dicek" bila ragu atau bukti tidak cukup. Sebut file dan nama yang jadi bukti.',
     '',
     'Skema jawaban:',

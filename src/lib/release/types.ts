@@ -251,8 +251,8 @@ export interface CodeSource {
   files: number;
   /** Changed files no scope ticket accounts for (first 30). */
   unattributed: string[];
-  /** Changed files the AI found unrelated to every scope ticket, with why. */
-  aiUnrelated?: { path: string; reason: string }[];
+  /** Changed files the AI found unrelated to every scope ticket, with why; `flag` = all behind a feature flag that is off (fine to ship). */
+  aiUnrelated?: { path: string; reason: string; flag?: string }[];
   /** Review findings of the AI (leaked secrets, bugs, risks, decisions to make). */
   aiRisks?: { path: string; reason: string }[];
   /** Deploy needs the AI found in a branch without a release MR: they enter the document once the MR exists. */
@@ -389,7 +389,7 @@ export interface ReleaseAiJob {
   patch?: { files: PatchFile[]; skipped: string[] };
   /** mr: the AI's reading of the source branch diff for one service. */
   verdicts?: ({ key: string } & AiTicketVerdict)[];
-  unrelated?: { path: string; reason: string }[];
+  unrelated?: { path: string; reason: string; flag?: string }[];
   needs?: ReleaseAiNeed[];
   risks?: { path: string; reason: string }[];
   notes?: string[];

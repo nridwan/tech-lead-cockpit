@@ -499,9 +499,15 @@
                 </li>
               {/each}
             </ul>
-            {#if aiMrDone?.unrelated?.length}
-              <h4 class="w">Perubahan tanpa tiket (AI) — {aiMrDone.unrelated.length}</h4>
-              <ul class="small tickets">{#each aiMrDone.unrelated as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+            {#if aiMrDone?.unrelated?.some((u) => !u.flag)}
+              {@const loose = aiMrDone.unrelated.filter((u) => !u.flag)}
+              <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length}</h4>
+              <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+            {/if}
+            {#if aiMrDone?.unrelated?.some((u) => u.flag)}
+              {@const flagged = aiMrDone.unrelated.filter((u) => u.flag)}
+              <h4>Di balik feature flag (aman ikut selama flag mati) — {flagged.length}</h4>
+              <ul class="small tickets">{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> — {u.reason}</li>{/each}</ul>
             {/if}
             {#if aiMrDone?.risks?.length}
               <h4 class="bad">Risiko / temuan review (AI) — {aiMrDone.risks.length}</h4>

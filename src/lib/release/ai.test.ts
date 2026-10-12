@@ -44,6 +44,7 @@ describe('release AI prompts and answers', () => {
     expect(p).toContain('Endpoint: /v1/x');
     expect(p).toMatch(/CREATE\/ALTER\/DROP TABLE/);
     expect(p).toContain('"needs"');
+    expect(p).toMatch(/feature flag/i);
   });
 
   it('reads the JSON object out of a chatty or fenced reply', () => {
@@ -59,7 +60,7 @@ describe('release AI prompts and answers', () => {
         { key: 'MU-9', verdict: 'ada', files: [], reason: 'bukan tiket rilis' },
         { key: 'MU-2', verdict: 'mungkin', files: [], reason: '' },
       ],
-      unrelated: [{ path: 'b.go', reason: 'fitur lain' }, { path: 'x.go', reason: 'tidak berubah' }, { path: 'b.go', reason: 'route kyc' }],
+      unrelated: [{ path: 'b.go', reason: 'fitur lain' }, { path: 'x.go', reason: 'tidak berubah' }, { path: 'b.go', reason: 'route kyc' }, { path: 'c.go', reason: 'scheduler pajak', flag: 'TAX_SCHEDULER_ENABLE' }, { path: 'd.go', reason: 'x', flag: 'tidak' }],
       needs: [
         { kind: 'env', when: 'pre', label: 'Tambah env `TOPUP_LIMIT`', detail: 'batas topup', files: ['a.go'] },
         { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },
@@ -67,10 +68,11 @@ describe('release AI prompts and answers', () => {
         { kind: 'cuaca', label: 'x' },
       ],
     });
-    const r = parseTicketsReply(reply, ['MU-1', 'MU-2'], ['a.go', 'b.go'])!;
+    const r = parseTicketsReply(reply, ['MU-1', 'MU-2'], ['a.go', 'b.go', 'c.go', 'd.go'])!;
     expect([...r.tickets]).toEqual([['MU-1', { verdict: 'ada', files: ['a.go'], reason: 'handler X' }]]);
     // A file named twice becomes one entry.
-    expect(r.unrelated).toEqual([{ path: 'b.go', reason: 'fitur lain · route kyc' }]);
+    // Code fully behind an off feature flag keeps the flag's name (fine to ship); "tidak" is no flag.
+    expect(r.unrelated).toEqual([{ path: 'b.go', reason: 'fitur lain · route kyc' }, { path: 'c.go', reason: 'scheduler pajak', flag: 'TAX_SCHEDULER_ENABLE' }, { path: 'd.go', reason: 'x' }]);
     expect(r.needs).toEqual([
       { kind: 'env', when: 'pre', label: 'TOPUP_LIMIT', detail: 'batas topup', files: ['a.go'] },
       { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },
