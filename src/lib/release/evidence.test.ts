@@ -128,6 +128,10 @@ describe('ticket service', () => {
     expect(belongsTo(t, 'portal-frontend')).toBe(true);
     expect(belongsTo(t, 'PORTAL')).toBe(true);
     expect(belongsTo({ service: 'PORTAL', summary: '[BACKEND][PORTAL][TOKO] - API' }, 'portal-frontend')).toBe(false);
+    // With the front-end repo in the release, the back-end PORTAL is not the ticket's service.
+    expect(belongsTo(t, 'PORTAL', false, ['PORTAL', 'portal-frontend'])).toBe(false);
+    expect(belongsTo(t, 'portal-frontend', false, ['PORTAL', 'portal-frontend'])).toBe(true);
+    expect(belongsTo({ service: 'PORTAL', summary: '[BACKEND][PORTAL][TOKO] - API' }, 'PORTAL', false, ['PORTAL', 'portal-frontend'])).toBe(true);
   });
 
   it('matches the TAD service or the one the title names', () => {

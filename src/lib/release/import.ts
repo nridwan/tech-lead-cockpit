@@ -292,7 +292,8 @@ export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdow
 export function servicesOutsideScope(release: Release, report: { tickets: { service?: string; alsoService?: string; summary?: string }[] } | null | undefined): ReleaseService[] {
   if (!report) return [];
   // The Jira title decides too (a report kept from before may only have the TAD row's service).
-  const owns = (t: { service?: string; alsoService?: string; summary?: string }, name: string) => belongsTo(t, name) || Boolean(t.summary && belongsTo({ service: ticketService(t.summary, release.codenames), summary: t.summary }, name));
+  const names = release.services.map((s) => s.name);
+  const owns = (t: { service?: string; alsoService?: string; summary?: string }, name: string) => belongsTo(t, name, false, names) || Boolean(t.summary && belongsTo({ service: ticketService(t.summary, release.codenames), summary: t.summary }, name, false, names));
   return release.services.filter((s) => !s.mrs.length && !report.tickets.some((t) => owns(t, s.name)));
 }
 

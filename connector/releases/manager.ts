@@ -10,7 +10,7 @@ import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hun
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
-import { belongsTo, buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
@@ -204,7 +204,9 @@ export class ReleaseManager {
     const folders = Object.keys(repoPaths);
     let addedServices = 0;
     const ignored = release.ignoredServices ?? [];
-    for (const name of [...new Set(tickets.flatMap((t) => [t.service, t.alsoService]).filter((s): s is string => Boolean(s)))]) {
+    // A front-end ticket's service is X's front-end repo when there is one (not the back-end X).
+    const home = (t: ReleaseTicket, x?: string) => (x && isFrontTicket(t.summary) ? (folders.find((f) => FRONT_SUFFIXES.some((sfx) => sameService(`${x}-${sfx}`, f))) ?? x) : x);
+    for (const name of [...new Set(tickets.flatMap((t) => [home(t, t.service), home(t, t.alsoService)]).filter((s): s is string => Boolean(s)))]) {
       if (services.some((s) => sameService(s.name, name)) || ignored.some((n) => sameService(n, name))) continue;
       services.push({ id: newId(), name, mrs: [], order: services.length + 1 });
       addedServices++;
@@ -314,7 +316,7 @@ export class ReleaseManager {
     const evidence = new Map<string, CodeEvidence[]>();
     const byRef = new Map<string, { summary: string; evidence: CodeEvidence }[]>();
     for (const t of withSharedEndpoints(tickets)) {
-      for (const s of release.services.filter((x) => belongsTo(t, x.name, true))) {
+      for (const s of release.services.filter((x) => belongsTo(t, x.name, true, release.services.map((x) => x.name)))) {
         for (const ref of serviceRefs.get(s.id) ?? []) {
           const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, diffs.get(ref)!);
           if (!found) continue;
@@ -480,7 +482,7 @@ export class ReleaseManager {
     const files = indexChanges(cmp.changes);
     const ref = `${path}@${source}`;
     const tickets = withSharedEndpoints(all)
-      .filter((t) => belongsTo(t, service.name))
+      .filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name)))
       .map((t) => {
         const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, files);
         const byKey = keysInCode.includes(t.key);
@@ -795,11 +797,11 @@ export class ReleaseManager {
     const services = release.services.filter((s) => (code.serviceRefs.get(s.id) ?? []).length);
     for (const [i, s] of services.entries()) {
       const refs = code.serviceRefs.get(s.id)!;
-      const tickets = code.tickets.filter((t) => belongsTo(t, s.name, true));
+      const tickets = code.tickets.filter((t) => belongsTo(t, s.name, true, release.services.map((x) => x.name)));
       const changes = refs.flatMap((r) => code.changed.get(r) ?? []);
       if (!changes.length) continue;
       live.job.progress = `AI membaca ${s.name} (${i + 1}/${services.length})…`;
-      const focus = focusTerms(withSharedEndpoints(code.tickets).filter((t) => belongsTo(t, s.name, true)).flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']));
+      const focus = focusTerms(withSharedEndpoints(code.tickets).filter((t) => belongsTo(t, s.name, true, release.services.map((x) => x.name))).flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']));
       const texts: string[] = [];
       for (const r of refs) {
         // A live MR: its branches; a service without one: target ... its source branch.
@@ -867,7 +869,7 @@ export class ReleaseManager {
     live.job.progress = `Membaca commit ${source}…`;
     const cmp = await gitlab.compare(path, release.targetBranch, source);
     const { tickets: all } = await this.tickets(release);
-    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name));
+    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name)));
     const focus = focusTerms([...tickets.flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']), instruction]);
     const plan = planReleaseBranch(cmp.commits, new Set(all.map((t) => t.key)), { base: release.targetBranch, branch: releaseBranchName(release) });
     const line = plan.commits.slice(-AI_MAX_COMMITS);
@@ -908,7 +910,7 @@ export class ReleaseManager {
     const cmp = await gitlab.compare(path, release.targetBranch, source);
     if (!cmp.changes.length) throw new Error(`${source} tidak punya perubahan dibanding ${release.targetBranch}.`);
     const { tickets: all } = await this.tickets(release);
-    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name));
+    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name)));
     const focus = focusTerms(tickets.flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']));
     cmp.changes = await this.fillMissingDiffs(path, release.targetBranch, source, cmp.changes);
     live.job.progress = 'AI membaca diff…';
@@ -960,7 +962,7 @@ export class ReleaseManager {
     const { files, skipped } = await this.patchFiles(path, release.targetBranch, source);
     if (!files.length) throw new Error(`${source} tidak punya perubahan yang bisa dipilih dibanding ${release.targetBranch}.`);
     const { tickets: all } = await this.tickets(release);
-    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name));
+    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name)));
     const focus = focusTerms([...tickets.flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']), instruction]);
     const patch = files.map((f) => patchFile(f.path, f.status, f.fh));
     live.job.progress = `AI memilih perubahan (${patch.reduce((n, f) => n + f.hunks.length, 0)} hunk)…`;
@@ -1065,7 +1067,7 @@ export class ReleaseManager {
     const problems = applied.flatMap((a) => (a.problem ? [a.problem] : []));
     if (problems.length && !req.force) throw new ReleaseInputError(`${problems.join(' ')} Pilih juga hunk pasangannya (koma/kurung), atau buat tetap bila memang disengaja.`);
     const { tickets } = await this.tickets(release);
-    const keys = tickets.filter((t) => belongsTo(t, service.name)).map((t) => t.key);
+    const keys = tickets.filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name))).map((t) => t.key);
     const message = `Rilis ${release.name}: perubahan pilihan dari ${source}${keys.length ? `\n\nJira: ${keys.join(', ')}` : ''}`;
     const commit = await gitlab.commitFiles(path, { branch, start: release.targetBranch, message, actions });
     const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch } : s)) });

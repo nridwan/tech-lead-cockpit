@@ -434,6 +434,7 @@ export function discoverPrompt(input: AiDiscoverInput): string {
     'Aturan:',
     '- Service masuk rilis hanya bila ada tiket scope untuk repo itu. Cocokkan nama service di tiket dengan nama repo secara teliti: "core-tcico" dan "core-tcico-ultimate" adalah dua repo berbeda.',
     '- Tiket mobile/web (IOS, ANDROID, dll.) masuk hanya bila ada repo yang jelas untuk platform itu.',
+    '- Tiket [FRONTEND]/[FE]/[WEB]/[CMS] dengan service X milik repo front-end X (mis. x-frontend, x-fe, x-web), BUKAN repo back-end X. Repo back-end X masuk hanya bila ada tiket back-end untuknya.',
     '- Untuk service yang sudah ada tapi project GitLab-nya belum diketahui, isi gitlabPath dari daftar repo bila jelas.',
     '- MR masuk hanya bila repo-nya service rilis DAN isinya (judul/branch) berkaitan dengan tiket scope. Jangan masukkan MR fitur lain atau yang tidak jelas.',
     '- Hanya usulkan tambahan; jangan ulang yang sudah ada.',

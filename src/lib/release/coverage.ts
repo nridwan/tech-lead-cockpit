@@ -27,17 +27,27 @@ export interface ReleaseTicket {
 
 /** Type tags of front-end work, and the repo suffixes a front-end of a service goes by. */
 const FRONT_TYPES = new Set(['frontend', 'fe', 'webfe', 'web', 'cms']);
-const FRONT_SUFFIXES = ['frontend', 'fe', 'web'];
+export const FRONT_SUFFIXES = ['frontend', 'fe', 'web'];
+
+/** A [FRONTEND]/[FE]/[WEB]/[CMS] ticket. */
+export const isFrontTicket = (summary: string) => FRONT_TYPES.has(norm(ticketTags(summary)[0] ?? ''));
 
 /**
  * Does the ticket belong to this service? The service its Jira title names, or the TAD row's (a
- * TAD row can put a worker task under the main service). A [FRONTEND][X] ticket also belongs to
- * the front-end repo of X (x-frontend, x-fe, x-web). `orNone`: a ticket naming no service matches.
+ * TAD row can put a worker task under the main service). A [FRONTEND][X] ticket belongs to X's
+ * front-end repo (x-frontend, x-fe, x-web) and, when the release has one (`among`), only to it:
+ * the back-end X is then not its service. `orNone`: a ticket naming no service matches.
  */
-export function belongsTo(t: { service?: string; alsoService?: string; summary?: string }, name: string, orNone = false): boolean {
+export function belongsTo(t: { service?: string; alsoService?: string; summary?: string }, name: string, orNone = false, among: string[] = []): boolean {
   if (!t.service && !t.alsoService) return orNone;
-  const front = Boolean(t.summary) && FRONT_TYPES.has(norm(ticketTags(t.summary!)[0] ?? ''));
-  return [t.service, t.alsoService].some((x) => x && (sameService(x, name) || (front && FRONT_SUFFIXES.some((sfx) => sameService(`${x}-${sfx}`, name)))));
+  const front = Boolean(t.summary) && isFrontTicket(t.summary!);
+  const frontOf = (x: string, n: string) => FRONT_SUFFIXES.some((sfx) => sameService(`${x}-${sfx}`, n));
+  return [t.service, t.alsoService].some((x) => {
+    if (!x) return false;
+    if (front && frontOf(x, name)) return true;
+    if (!sameService(x, name)) return false;
+    return !(front && among.some((n) => frontOf(x, n)));
+  });
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -136,11 +146,12 @@ export function buildReport(
     const byKey = [...keysByMr].filter(([, keys]) => keys.has(t.key)).map(([ref]) => ref);
     // The code decides; a key in a commit only adds where it is.
     const found = [...new Set([...evidence.filter((e) => e.strength === 'strong').map((e) => e.ref), ...byKey])];
-    const noRepo = Boolean(service || t.alsoService) && !release.services.some((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name));
+    const names = release.services.map((s) => s.name);
+    const noRepo = Boolean(service || t.alsoService) && !release.services.some((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name, false, names));
     // The AI's reading decides when there is one: "ada" is in the code, "sebagian" needs a look,
     // "tidak" is missing unless the pattern match found it (then the two disagree: needs a look).
     const ai = code.ai?.get(t.key);
-    const own = release.services.filter((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name)).map((s) => s.name);
+    const own = release.services.filter((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name, false, names)).map((s) => s.name);
     const aiRefs = (code.sources ?? []).filter((x) => own.includes(x.service) && !x.error).map((x) => x.ref);
     const inMrs = !ai ? found : ai.verdict === 'ada' ? [...new Set([...found, ...(found.length ? [] : aiRefs.slice(0, 1))])] : [];
     const unsure = !ai ? !found.length && evidence.length > 0 : ai.verdict === 'sebagian' || (ai.verdict === 'tidak' && found.length > 0);
