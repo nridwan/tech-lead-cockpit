@@ -51,7 +51,7 @@
   let jiraError = $state('');
   let openTickets = $state<string | null>(null);
   const jiraLoads = $derived(
-    Object.fromEntries(Object.entries(jiraDetail).map(([id, l]) => [id, { days: l.days, issues: l.issues.length, inProgress: l.issues.filter((i) => i.statusCategory === 'indeterminate').length }])),
+    Object.fromEntries(Object.entries(jiraDetail).map(([id, l]) => [id, { days: l.days, issues: l.issues.length, inProgress: l.issues.filter((i) => i.stage === 'in_progress').length, postDev: l.postDev?.length ?? 0 }])),
   );
   let replaceFor = $state<Record<string, string>>({});
 
@@ -145,7 +145,7 @@
               <span class="start" class:late={r.waitDays > 0}>mulai {fmt(r.availableFrom)}{r.waitDays > 0 ? ` · +${r.waitDays} hari kerja` : ''}</span>
               {#if r.jira}
                 <button class="jira" class:heavy={r.jira.days >= 5} onclick={() => (openTickets = openTickets === r.member.id ? null : r.member.id)} title="Tiket Jira terbuka di luar proyek ini">
-                  <Icon name="jira" size={10} /> {r.jira.issues ? `${r.jira.issues} tiket · ±${r.jira.days} hari` : 'Jira kosong'} {r.jira.issues ? (openTickets === r.member.id ? '▾' : '▸') : ''}
+                  <Icon name="jira" size={10} /> {r.jira.issues ? `${r.jira.issues} tiket dev · ±${r.jira.days} hari` : 'tidak ada tiket dev'} {openTickets === r.member.id ? '▾' : '▸'}
                 </button>
               {:else}
                 <span class="jira unknown" title={r.member.jira ? 'Beban Jira belum termuat' : 'Tautkan akun Jira di daftar tim'}><Icon name="jira" size={10} /> beban ?</span>
@@ -153,11 +153,20 @@
               {#if r.familiarity && r.familiarity.share > 0}<span class="fam" title="{r.familiarity.commits} commit di repo task {ROLE_LABELS[role]} proyek ini">{Math.round(r.familiarity.share * 100)}% commit repo proyek</span>{/if}
               {#if r.inProject}<span class="chip">di tim</span>{/if}
             </div>
-            {#if openTickets === r.member.id && r.member.jira && jiraDetail[r.member.jira.accountId]?.issues.length}
+            {#if openTickets === r.member.id && r.member.jira && jiraDetail[r.member.jira.accountId]}
+              {@const detail = jiraDetail[r.member.jira.accountId]}
               <ul class="tickets small">
-                {#each jiraDetail[r.member.jira.accountId].issues as i (i.key)}
-                  <li><span class="mono">{i.key}</span> {i.summary} <span class="muted">· {i.status} · {i.estimateDays} hari{i.source === 'default' ? ' (default)' : ''}{i.due ? ` · due ${i.due}` : ''}</span></li>
+                {#each detail.issues as i (i.key)}
+                  <li><span class="mono">{i.key}</span> {i.summary} <span class="muted">· {i.status}{i.stage === 'in_progress' ? ' (sedang dikerjakan)' : ''} · {i.estimateDays} hari{i.source === 'default' ? ' (default)' : ''}{i.due ? ` · due ${i.due}` : ''}</span></li>
+                {:else}
+                  <li class="muted">Tidak ada tiket yang masih perlu dikerjakan.</li>
                 {/each}
+                {#if detail.postDev?.length}
+                  <li class="post-head muted">Sudah lewat development, tidak dihitung ({detail.postDev.length}):</li>
+                  {#each detail.postDev as i (i.key)}
+                    <li class="post"><span class="mono">{i.key}</span> {i.summary} <span class="muted">· {i.status}</span></li>
+                  {/each}
+                {/if}
               </ul>
             {/if}
             <ul class="reasons small muted">
@@ -341,6 +350,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .tickets .post {
+    opacity: 0.6;
+  }
+  .tickets .post-head {
+    margin-top: 4px;
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

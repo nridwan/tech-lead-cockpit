@@ -557,8 +557,11 @@
                 {#each loadDetail[d.jira.accountId].issues as i (i.key)}
                   <li><span class="mono">{i.key}</span> {i.summary} <span class="muted">· {i.status} · {days(i.estimateDays)}{i.source === 'default' ? ' (default)' : i.source === 'remaining' ? ' (sisa estimasi)' : ' (estimasi awal)'}{i.due ? ` · due ${fmtShort(i.due)}` : ''}</span></li>
                 {:else}
-                  <li class="muted">Tidak ada tiket aktif.</li>
+                  <li class="muted">Tidak ada tiket yang masih perlu dikerjakan.</li>
                 {/each}
+                {#if loadDetail[d.jira.accountId].postDev?.length}
+                  <li class="muted">Tidak dihitung, sudah lewat development: {loadDetail[d.jira.accountId].postDev!.map((i) => `${i.key} (${i.status})`).join(', ')}</li>
+                {/if}
               </ul>
             {/if}
           {/each}

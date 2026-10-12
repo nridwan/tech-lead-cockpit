@@ -35,6 +35,11 @@ export interface JiraLoadIssue {
   summary: string;
   status: string;
   statusCategory?: string;
+  /**
+   * Where the ticket is in development, from its status (same rules as the progress report):
+   * todo, coding (in_progress), or past development (review, ready to test, QA, done).
+   */
+  stage?: 'todo' | 'in_progress' | 'review' | 'done';
   due?: string;
   estimateDays: number;
   /** remaining / original estimate from Jira, or the default per issue. */
@@ -44,8 +49,12 @@ export interface JiraLoadIssue {
 export interface DeveloperJiraLoad {
   accountId: string;
   displayName: string;
+  /** Days of the counted issues (to do and coding). */
   days: number;
+  /** Counted issues: still to be developed. */
   issues: JiraLoadIssue[];
+  /** Open in Jira but past development (in review, ready to test, QA): shown, not counted. */
+  postDev?: JiraLoadIssue[];
 }
 
 export interface JiraCandidate {

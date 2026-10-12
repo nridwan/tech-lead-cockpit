@@ -1,4 +1,5 @@
 import type { DeveloperJiraLoad, JiraCandidate, JiraLoadIssue } from '../../src/lib/estimate/types.ts';
+import { jiraDevStage } from '../../src/lib/tad/progress-report.ts';
 
 /**
  * Workload already on a developer's plate in Jira: their open issues outside the project, in
@@ -6,6 +7,10 @@ import type { DeveloperJiraLoad, JiraCandidate, JiraLoadIssue } from '../../src/
  * (most tickets carry no estimate). Jira counts 8 hours per day by default. Teams rarely close
  * tickets, so issues not updated for `staleDays` and epics (containers, not work) are skipped;
  * the result is an indication the Tech Lead can still correct per developer.
+ *
+ * Jira puts statuses like READY TO TEST, IN QA or IN REVIEW TL in its "In Progress" category, but
+ * development is finished there. The status rules of the progress report (jiraDevStage) decide:
+ * tickets past development are listed apart and never count as load or as "in progress".
  */
 
 const ACCOUNT = /^[\w.@:-]{1,128}$/;
@@ -33,6 +38,16 @@ export function issueLoadDays(fields: { timeestimate?: number | null; timeorigin
 
 const assigneeId = (a: any): string => a?.accountId || a?.name || a?.key || '';
 
+/** Development stage of an open ticket from its status. */
+export function loadStage(status: string, statusCategory?: string): NonNullable<JiraLoadIssue['stage']> {
+  const stage = jiraDevStage({ status, statusCategory } as Parameters<typeof jiraDevStage>[0]);
+  if (stage === 'merged') return 'done';
+  if (stage === 'review') return 'review';
+  if (stage === 'in_progress') return 'in_progress';
+  // Unknown status: "To Do"-like statuses wait, anything else in Jira's progress category is coding.
+  return statusCategory === 'indeterminate' ? 'in_progress' : 'todo';
+}
+
 /** Groups open issues by assignee, skipping the project's own tasks. */
 export function aggregateLoads(issues: any[], excludeKeys: string[], defaultDays: number): Record<string, DeveloperJiraLoad> {
   const skip = new Set(excludeKeys);
@@ -42,22 +57,29 @@ export function aggregateLoads(issues: any[], excludeKeys: string[], defaultDays
     const type = it.fields?.issuetype;
     if (!id || skip.has(it.key) || type?.name === 'Epic' || (typeof type?.hierarchyLevel === 'number' && type.hierarchyLevel > 0)) continue;
     const f = it.fields ?? {};
+    const status = f.status?.name ?? 'Unknown';
+    const statusCategory = f.status?.statusCategory?.key;
     const issue: JiraLoadIssue = {
       key: it.key,
       summary: String(f.summary ?? '').slice(0, 200),
-      status: f.status?.name ?? 'Unknown',
-      statusCategory: f.status?.statusCategory?.key,
+      status,
+      statusCategory,
+      stage: loadStage(status, statusCategory),
       due: f.duedate ?? undefined,
       ...issueLoadDays(f, defaultDays),
     };
-    const load = (out[id] ??= { accountId: id, displayName: f.assignee?.displayName ?? id, days: 0, issues: [] });
+    const load = (out[id] ??= { accountId: id, displayName: f.assignee?.displayName ?? id, days: 0, issues: [], postDev: [] });
+    if (issue.stage === 'review' || issue.stage === 'done') {
+      load.postDev!.push(issue);
+      continue;
+    }
     load.issues.push(issue);
     load.days += issue.estimateDays;
   }
   for (const l of Object.values(out)) {
     l.days = Math.round(l.days * 2) / 2;
     // In progress first, then by due date: the order they are likely worked on.
-    l.issues.sort((a, b) => Number(b.statusCategory === 'indeterminate') - Number(a.statusCategory === 'indeterminate') || (a.due ?? '9999').localeCompare(b.due ?? '9999'));
+    l.issues.sort((a, b) => Number(b.stage === 'in_progress') - Number(a.stage === 'in_progress') || (a.due ?? '9999').localeCompare(b.due ?? '9999'));
   }
   return out;
 }
@@ -101,7 +123,7 @@ export async function jiraCandidates(jira: JiraSearch, projectKeys: string[], ex
   return users
     .map((u) => {
       const l = loads[u.accountId];
-      const inProgress = l?.issues.filter((i) => i.statusCategory === 'indeterminate').length ?? 0;
+      const inProgress = l?.issues.filter((i) => i.stage === 'in_progress').length ?? 0;
       return { accountId: u.accountId, displayName: u.displayName, email: u.emailAddress, openIssues: l?.issues.length ?? 0, inProgress, loadDays: l?.days ?? 0 };
     })
     .sort((a, b) => a.loadDays - b.loadDays || a.openIssues - b.openIssues || a.displayName.localeCompare(b.displayName));

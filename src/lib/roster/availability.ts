@@ -106,7 +106,7 @@ export interface RecommendInput {
   projects: EstimateProject[];
   holidays: Holiday[];
   /** Open Jira work outside the project, by Jira account (already fetched). */
-  jiraLoads?: Record<string, { days: number; issues: number; inProgress?: number }>;
+  jiraLoads?: Record<string, { days: number; issues: number; inProgress?: number; postDev?: number }>;
   activity?: ActivityResponse;
   /** End of the window for counting leave (the current schedule end); default 20 working days. */
   windowEnd?: string;
@@ -161,7 +161,10 @@ export function recommendMembers(input: RecommendInput): MemberRecommendation[] 
       const reasons: string[] = [];
       reasons.push(offset === 0 ? `bisa mulai ${fmt(start)}` : `bisa mulai ${fmt(from)} (${offset} hari kerja setelah proyek mulai)`);
       for (const b of busy) reasons.push(`${Math.round(b.allocation * 100)}% di ${b.projectName} sampai ${fmt(b.until)}`);
-      if (jira) reasons.push(jira.issues ? `${jira.issues} tiket Jira aktif${jira.inProgress ? `, ${jira.inProgress} in progress` : ''} (±${jira.days} hari${jiraUntil ? `, selesai ±${fmt(jiraUntil)}` : ''})` : 'tidak ada tiket Jira aktif');
+      if (jira) {
+        reasons.push(jira.issues ? `${jira.issues} tiket Jira belum selesai dev${jira.inProgress ? `, ${jira.inProgress} sedang dikerjakan` : ''} (±${jira.days} hari${jiraUntil ? `, selesai ±${fmt(jiraUntil)}` : ''})` : 'tidak ada tiket Jira yang perlu dikerjakan');
+        if (jira.postDev) reasons.push(`${jira.postDev} tiket sudah lewat development (review, ready to test, QA), tidak dihitung`);
+      }
       else reasons.push(m.jira ? 'beban Jira belum termuat' : 'beban Jira tidak diketahui: akun Jira belum ditautkan di daftar tim');
       if (familiarity?.topService) reasons.push(`${Math.round((familiarity.topShare ?? 0) * 100)}% commit di ${familiarity.topService} (${input.activity!.days} hari terakhir)`);
       else if (familiarity) reasons.push(m.gitEmails.length ? `belum ada commit di repo ${ROLE_LABELS[role]} proyek ini` : 'email git belum diisi di daftar tim');

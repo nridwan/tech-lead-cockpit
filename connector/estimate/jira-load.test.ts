@@ -37,6 +37,38 @@ describe('Jira load', () => {
     expect(loads.citra).toMatchObject({ displayName: 'CITRA', days: 3 });
   });
 
+  it('does not count tickets past development (review, ready to test, QA) as load or as in progress', () => {
+    const loads = aggregateLoads(
+      [
+        issue('MU-10', 'barru', ['READY TO TEST', 'indeterminate']),
+        issue('MU-11', 'barru', ['IN REVIEW TL', 'indeterminate']),
+        issue('MU-12', 'barru', ['IN QA', 'indeterminate']),
+        issue('MU-13', 'barru', ['Code Not Pass', 'indeterminate']),
+        issue('MU-14', 'barru', ['To Do', 'new']),
+        issue('MU-15', 'barru', ['In Progress', 'indeterminate']),
+        issue('MU-16', 'barru', ['Analisa', 'indeterminate']),
+      ],
+      [],
+      0.5,
+    );
+    const l = loads.barru;
+    expect(l.postDev!.map((i) => [i.key, i.stage])).toEqual([
+      ['MU-10', 'done'],
+      ['MU-11', 'review'],
+      ['MU-12', 'done'],
+    ]);
+    // Rework, coding and unknown progress statuses are coding; To Do waits.
+    expect(Object.fromEntries(l.issues.map((i) => [i.key, i.stage]))).toEqual({ 'MU-13': 'in_progress', 'MU-14': 'todo', 'MU-15': 'in_progress', 'MU-16': 'in_progress' });
+    expect(l.days).toBe(2);
+    expect(l.issues.filter((i) => i.stage === 'in_progress')).toHaveLength(3);
+  });
+
+  it('gives an account whose tickets are all past development no load', () => {
+    const l = aggregateLoads([issue('MU-1', 'barru', ['READY TO TEST', 'indeterminate']), issue('MU-2', 'barru', ['IN REVIEW TL', 'indeterminate'])], [], 0.5).barru;
+    expect(l).toMatchObject({ days: 0, issues: [] });
+    expect(l.postDev).toHaveLength(2);
+  });
+
   it('queries open work per account and ranks candidates by load', async () => {
     const jqls: string[] = [];
     const jira: JiraSearch = {

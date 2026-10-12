@@ -81,6 +81,8 @@ Urutan rekomendasi per role (`recommendMembers`):
 3. Porsi commit 180 hari terakhir di repo task role itu (email git anggota terhadap total commit repo). Sinyal pendukung, bukan penentu, karena cenderung menguntungkan orang lama.
 4. Cuti di periode proyek, lalu nama.
 
+Status tiket dibaca dengan aturan yang sama seperti laporan progres (`jiraDevStage` di [`progress-report.ts`](../../../src/lib/tad/progress-report.ts), lewat `loadStage` di [`jira-load.ts`](../../../connector/estimate/jira-load.ts)). Jira memasukkan READY TO TEST, IN QA, dan IN REVIEW TL ke kategori "In Progress", padahal development sudah selesai. Tiket seperti itu masuk `postDev`: ditampilkan, tapi tidak dihitung sebagai beban dan tidak disebut "sedang dikerjakan". Yang dihitung hanya To Do dan tiket yang sedang di-coding (termasuk rework seperti Code Not Pass).
+
 Panel menampilkan badge beban Jira per kandidat (jumlah tiket, ±hari, perkiraan selesai) dengan daftar tiket yang bisa dibuka, dan tombol muat ulang.
 
 Setiap kandidat membawa alasan yang ditampilkan di UI (mulai kapan, proyek lain, tiket Jira, porsi commit, cuti, kapasitas). Semua data dihitung lokal dari Jira, folder Services, dan proyek Cockpit lain; tidak ada AI. Chip proyek di TAD dan data aplikasi mobile juga memakai `projectAvailability`, sehingga tanggal target konsisten.

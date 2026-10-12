@@ -102,7 +102,11 @@ describe('recommendMembers', () => {
     // 3 days of Jira work (Mon–Wed) → Thursday, which is leave → Friday.
     expect(budi.availableFrom).toBe('2026-10-09');
     expect(budi.jira).toEqual({ days: 3, issues: 2, until: '2026-10-07' });
-    expect(budi.reasons).toContain('2 tiket Jira aktif, 1 in progress (±3 hari, selesai ±7 Okt)');
+    expect(budi.reasons).toContain('2 tiket Jira belum selesai dev, 1 sedang dikerjakan (±3 hari, selesai ±7 Okt)');
+    // Tickets past development are mentioned, never counted.
+    const post = recommendMembers({ role: 'BACKEND', members: [members[0]], project: current, projects: [current], holidays: [], jiraLoads: { 'acc-b': { days: 0, issues: 0, postDev: 27 } } })[0];
+    expect(post.availableFrom).toBe('2026-10-05');
+    expect(post.reasons).toEqual(expect.arrayContaining(['tidak ada tiket Jira yang perlu dikerjakan', '27 tiket sudah lewat development (review, ready to test, QA), tidak dihitung']));
     const fajar = recs.find((r) => r.member.id === 'fajar')!;
     expect(fajar.reasons).toContain('email git belum diisi di daftar tim');
     expect(fajar.reasons).toContain('beban Jira tidak diketahui: akun Jira belum ditautkan di daftar tim');
