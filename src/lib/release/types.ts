@@ -358,6 +358,8 @@ export interface ReleaseAiJob {
   kind: 'tickets' | 'picks' | 'document' | 'mr';
   serviceId?: string;
   sourceBranch?: string;
+  /** What the Tech Lead asked (document fix, commit pick). */
+  instruction?: string;
   model: string;
   status: 'running' | 'done' | 'error' | 'cancelled';
   progress?: string;
@@ -376,7 +378,12 @@ export interface ReleaseAiJob {
 }
 
 /** A fix the AI proposes for one service's part of the deployment document. */
-export type ReleaseDocFix = Pick<ReleaseService, 'envBlock' | 'preDeploy' | 'postDeploy' | 'failover'> & { serviceId: string; name: string };
+export type ReleaseDocFix = Pick<ReleaseService, 'envBlock' | 'preDeploy' | 'postDeploy' | 'failover'> & {
+  serviceId: string;
+  name: string;
+  /** The service's full list of manual queries after the fix (replaces the current ones). */
+  queries?: { label: string; sql?: string }[];
+};
 
 /** Something the server needs for a release, found by the AI in the diff. */
 export interface ReleaseAiNeed {

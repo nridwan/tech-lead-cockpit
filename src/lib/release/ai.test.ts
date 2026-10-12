@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MrFileChange } from '../gitlab/types';
-import { diffText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, ticketsPrompt } from './ai';
+import { diffText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
 
 const change = (path: string, diff: string): MrFileChange => ({ oldPath: path, newPath: path, newFile: false, renamedFile: false, deletedFile: false, diff, additions: 1, deletions: 0 });
 
@@ -63,12 +63,19 @@ describe('release AI prompts and answers', () => {
     expect(r.notes).toEqual(['MU-3 tidak ada']);
   });
 
+  it('takes the instruction and judges commits without a key from their diff', () => {
+    const p = picksPrompt({ repo: 'g/gw', source: 'staging', target: 'master', tickets: [], commits: [{ sha: 'a'.repeat(40), shortId: 'aaaaaaaa', title: 'update', merge: false, diff: '+x' }], instruction: 'perubahan CI tetap ikut' });
+    expect(p).toContain('Instruksi Tech Lead');
+    expect(p).toContain('perubahan CI tetap ikut');
+    expect(p).toMatch(/tidak punya Jira key/);
+  });
+
   it("proposes document fixes only for the release's services", () => {
-    const r = parseDocumentReply(JSON.stringify({ services: [{ name: 'CORE-TOPUP', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'] }, { name: 'lain', envBlock: 'X=1' }, { name: 'core-ledger' }], summary: ['B ditambah'] }), [
+    const r = parseDocumentReply(JSON.stringify({ services: [{ name: 'CORE-TOPUP', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'], queries: [{ label: 'Buat tabel x', sql: 'CREATE TABLE x (id int);' }, { label: '' }] }, { name: 'lain', envBlock: 'X=1' }, { name: 'core-ledger' }], summary: ['B ditambah'] }), [
       { id: 's1', name: 'core-topup' },
       { id: 's2', name: 'core-ledger' },
     ])!;
-    expect(r.fixes).toEqual([{ serviceId: 's1', name: 'core-topup', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'] }]);
+    expect(r.fixes).toEqual([{ serviceId: 's1', name: 'core-topup', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'], queries: [{ label: 'Buat tabel x', sql: 'CREATE TABLE x (id int);' }] }]);
     expect(r.summary).toEqual(['B ditambah']);
   });
 });

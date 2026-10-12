@@ -44,6 +44,7 @@
   // AI pick of the release-branch commits: reads each commit's diff against the scope.
   let ai = $state(loadReleaseAi());
   let aiPicks = $state<Record<string, AiPick>>({});
+  let pickInstruction = $state('');
   const aiPick = new AiJobWatch(
     () => release.id,
     'picks',
@@ -96,7 +97,7 @@
 
   async function startAiPick() {
     saveReleaseAi(ai);
-    await aiPick.start(ai, { sourceBranch: plan?.sourceBranch ?? source.trim() });
+    await aiPick.start(ai, { sourceBranch: plan?.sourceBranch ?? source.trim(), instruction: pickInstruction.trim() || undefined });
     if (aiPick.error) toasts.show(aiPick.error, 'err');
   }
 
@@ -232,6 +233,7 @@
         <button class="link-btn" onclick={() => (showBranch = !showBranch)}>{showBranch ? '▾' : '▸'} {plan.sourceBranch} juga berisi perubahan di luar rilis? Buat branch rilis dari {plan.targetBranch}</button>
         {#if showBranch}
           <p class="muted small">Commit jalur utama {plan.sourceBranch} (lama ke baru). Merge commit dihitung bersama isi branch fiturnya, jadi satu pilihan membawa satu fitur utuh. Klik <strong>Pilih dengan AI</strong>: AI membaca diff tiap commit dan memilih yang benar-benar milik scope, dengan alasannya.</p>
+          <textarea class="input pick-ins" rows="2" bind:value={pickInstruction} placeholder="Instruksi untuk AI (opsional), mis. perubahan CI/Dockerfile tanpa task tetap ikut; commit refactor logger jangan ikut"></textarea>
           <div class="row">
             <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiPick.running} />
             {#if aiPick.running}
@@ -239,7 +241,7 @@
               <button class="btn btn-sm" onclick={() => aiPick.cancel()}><Icon name="x" size={12} /> Batalkan</button>
             {:else}
               <button class="btn btn-sm btn-primary" onclick={startAiPick} disabled={!picks.length}><Icon name="sparkles" size={12} /> Pilih dengan AI</button>
-              {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch}<span class="muted small">Pilihan AI ({aiPick.job.model})</span>{/if}
+              {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch}<span class="muted small">Pilihan AI ({aiPick.job.model}){aiPick.job.instruction ? ` · instruksi: ${aiPick.job.instruction}` : ''}</span>{/if}
             {/if}
           </div>
           {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch && aiPick.job.notes?.length}
@@ -510,6 +512,9 @@
     border-radius: var(--radius-sm);
     white-space: pre-wrap;
     font-size: 12px;
+  }
+  .pick-ins {
+    width: 100%;
   }
   .ai-notes {
     margin: 0;

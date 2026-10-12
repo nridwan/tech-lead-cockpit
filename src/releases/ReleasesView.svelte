@@ -24,7 +24,6 @@
   import ShareMrModal from './ShareMrModal.svelte';
   import CreateMrModal from './CreateMrModal.svelte';
   import DeployInfoForm from './DeployInfoForm.svelte';
-  import ServiceDeployFields from './ServiceDeployFields.svelte';
 
   /**
    * Release management: the MRs into the production branch of every service in a release, what
@@ -49,7 +48,6 @@
   let shareOpen = $state(false);
   let publishOpen = $state(false);
   let mrFor = $state<ReleaseService | null>(null);
-  let openDetail = $state<Record<string, boolean>>({});
   let mrInput = $state<Record<string, string>>({});
   let codenameText = $state('');
   let keysText = $state('');
@@ -100,6 +98,11 @@
             ...(fix.failover ? { failover: fix.failover } : {}),
           },
     );
+    if (fix.queries) {
+      const svc = current.services.find((s) => s.id === fix.serviceId);
+      const mine = (i: Release['items'][number]) => i.kind === 'sql' && i.service?.toLowerCase() === svc?.name.toLowerCase();
+      current.items = [...current.items.filter((i) => !mine(i)), ...fix.queries.map((q) => ({ id: crypto.randomUUID(), kind: 'sql' as const, label: q.label, service: svc?.name, ...(q.sql ? { detail: q.sql } : {}), source: 'ai' as const, done: false }))];
+    }
     appliedFixes = { ...appliedFixes, [`${aiDoc.job?.id}:${fix.serviceId}`]: true };
   }
   let appliedFixes = $state<Record<string, boolean>>({});
@@ -529,8 +532,6 @@
                   {/if}
                 </div>
               {/each}
-              <button class="link-btn small" onclick={() => (openDetail[s.id] = !openDetail[s.id])}>{openDetail[s.id] ? '▾' : '▸'} Detail deployment (commit id, .env, pre/post-deploy, failover)</button>
-              {#if openDetail[s.id]}<ServiceDeployFields service={s} checks={report?.mrs ?? []} release={current} />{/if}
               <div class="add-mr">
                 <input class="input mono" value={mrInput[s.id] ?? ''} oninput={(e) => (mrInput[s.id] = e.currentTarget.value)} placeholder="Tempel link MR ke {current.targetBranch}" aria-label="Link MR" onkeydown={(e) => e.key === 'Enter' && addMr(s)} />
                 <button class="btn btn-sm" onclick={() => addMr(s)}><Icon name="plus" size={12} /> MR</button>
@@ -671,6 +672,7 @@
                   {/if}
                   {#if fix.preDeploy}<div class="small"><span class="label">Pre-deploy usulan</span><ul>{#each fix.preDeploy as p, i (i)}<li class:new={!svc?.preDeploy?.includes(p)}>{p}</li>{/each}</ul></div>{/if}
                   {#if fix.postDeploy}<div class="small"><span class="label">Post-deploy usulan</span><ul>{#each fix.postDeploy as p, i (i)}<li class:new={!svc?.postDeploy?.includes(p)}>{p}</li>{/each}</ul></div>{/if}
+                  {#if fix.queries}<div class="small"><span class="label">Query usulan ({fix.queries.length})</span>{#each fix.queries as q, i (i)}<div><strong>{q.label}</strong>{#if q.sql}<pre>{q.sql}</pre>{/if}</div>{:else}<div class="muted">semua query dihapus</div>{/each}</div>{/if}
                   {#if fix.failover}<div class="small"><span class="label">Failover usulan</span> {fix.failover}</div>{/if}
                 </div>
               {:else}

@@ -273,14 +273,10 @@ function code(body: string, language?: string): string {
   return `<ac:structured-macro ac:name="code" ac:schema-version="1">${language ? `<ac:parameter ac:name="language">${esc(language)}</ac:parameter>` : ''}<ac:parameter ac:name="wrap">true</ac:parameter><ac:plain-text-body>${cdata(body)}</ac:plain-text-body></ac:structured-macro>`;
 }
 
-/**
- * Commit id for a service, from the release data: the merged (else open) release MR's commit.
- * A commit id typed in only counts when the release has no checked MR for the service.
- */
+/** Commit id for a service: the merge commit of its merged release MR, else none (TBA). */
 export function serviceCommit(service: ReleaseService, checks: MrCheck[]): string | undefined {
-  const mine = checks.filter((c) => service.mrs.some((m) => m.ref === c.ref) && !c.error && c.state !== 'closed');
-  const merged = mine.find((c) => c.state === 'merged' && c.commitSha);
-  return (merged ?? mine.find((c) => c.commitSha))?.commitSha ?? service.commitId;
+  // Before the review is merged the document says TBA: an open MR's head or a typed sha goes stale.
+  return checks.find((c) => service.mrs.some((m) => m.ref === c.ref) && !c.error && c.state === 'merged' && c.commitSha)?.commitSha;
 }
 
 /** Change Log rows from the release itself when none were written: one row for the release. */

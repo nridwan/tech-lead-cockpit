@@ -85,7 +85,7 @@ export interface AiCommitInput {
   diff: string;
 }
 
-export function picksPrompt(input: { repo: string; source: string; target: string; tickets: AiTicketInput[]; commits: AiCommitInput[] }): string {
+export function picksPrompt(input: { repo: string; source: string; target: string; tickets: AiTicketInput[]; commits: AiCommitInput[]; instruction?: string }): string {
   return [
     `Repo: ${input.repo}. Branch rilis dibuat dari ${input.target}, lalu commit dari ${input.source} di-cherry-pick satu per satu (merge commit dengan -m 1).`,
     '',
@@ -97,11 +97,13 @@ export function picksPrompt(input: { repo: string; source: string; target: strin
     '',
     'Tugas: tentukan commit mana yang harus masuk branch rilis supaya isinya PERSIS scope di atas.',
     '- include true hanya bila perubahan commit itu milik tiket scope (nilai dari diff, bukan judul).',
+    '- Banyak commit tidak punya Jira key, atau judulnya tidak jelas: tetap nilai dari diff. Masuk bila perubahannya bagian fitur scope (atau diminta instruksi Tech Lead); bila tidak terkait tiket mana pun, include false dan jelaskan isinya di reason.',
     '- Commit campuran (scope + di luar scope): include false, jelaskan di reason dan notes.',
     '- Commit pendukung (config, CI, dependency) include true hanya bila dibutuhkan fitur scope.',
     '- Perhatikan urutan: commit scope yang bergantung pada commit lain yang tidak dipilih bisa konflik; sebutkan di notes.',
     '- Sebutkan di notes tiket scope yang tidak ditemukan di commit mana pun.',
     '',
+    ...(input.instruction ? [`Instruksi Tech Lead (utamakan, selama tidak memasukkan perubahan yang jelas di luar rilis tanpa disebut): ${input.instruction}`, ''] : []),
     'Skema jawaban (satu entri per commit, sha lengkap):',
     '{"picks":[{"sha":"<sha>","include":true,"keys":["MU-1"],"reason":"..."}],"notes":["..."]}',
   ].join('\n');
@@ -114,6 +116,8 @@ export interface AiDocService {
   preDeploy?: string[];
   postDeploy?: string[];
   failover?: string;
+  /** Manual queries in the document now. */
+  queries: { label: string; sql?: string }[];
   /** Env names added in .env files and read by the code, migrations and SQL files, from the diff. */
   code: { envAdded: string[]; envReadInCode: string[]; migrations: string[]; sql: string[]; envDiff: string };
 }
@@ -130,6 +134,8 @@ export function documentPrompt(input: { instruction: string; release: string; se
         `Pre-deploy: ${s.preDeploy?.length ? s.preDeploy.join(' | ') : '(kosong)'}`,
         `Post-deploy: ${s.postDeploy?.length ? s.postDeploy.join(' | ') : '(kosong)'}`,
         `Failover: ${s.failover ?? '(default)'}`,
+        `Query manual di dokumen: ${s.queries.length ? '' : '(kosong)'}`,
+        ...s.queries.map((q) => `- ${q.label}${q.sql ? `\n\`\`\`sql\n${q.sql}\n\`\`\`` : ''}`),
         `Dari kode: env baru di file .env: ${s.code.envAdded.join(', ') || '-'}; env dibaca kode tanpa ada di .env: ${s.code.envReadInCode.join(', ') || '-'}; migrasi: ${s.code.migrations.join(', ') || '-'}; query manual: ${s.code.sql.join(', ') || '-'}`,
         s.code.envDiff ? `Diff file .env/config:\n${s.code.envDiff}` : '',
       ]
@@ -142,11 +148,13 @@ export function documentPrompt(input: { instruction: string; release: string; se
     'Perbaiki dokumen sesuai instruksi dan kode. Aturan:',
     '- Hanya ubah service yang perlu diubah; service lain jangan disertakan.',
     '- envBlock adalah isi lengkap blok .env service setelah diperbaiki (KEY=nilai per baris). Pertahankan nilai yang sudah ada; untuk env baru tanpa nilai yang diketahui tulis KEY= (kosong), jangan mengarang rahasia.',
-    '- preDeploy/postDeploy berisi daftar langkah lengkap setelah diperbaiki.',
+    '- preDeploy/postDeploy berisi daftar langkah lengkap setelah diperbaiki (tanpa query; query di "queries").',
+    '- queries berisi daftar LENGKAP query manual service setelah diperbaiki (label singkat + SQL lengkap), termasuk CREATE/ALTER TABLE yang dibutuhkan kode tapi belum ada migrasinya. Sertakan hanya bila query perlu diubah.',
+    '- Commit id tidak diisi (diisi setelah MR merge).',
     '- Jelaskan setiap perubahan di summary.',
     '',
     'Skema jawaban:',
-    '{"services":[{"name":"<nama service persis>","envBlock":"KEY=...","preDeploy":["..."],"postDeploy":["..."],"failover":"..."}],"summary":["..."]}',
+    '{"services":[{"name":"<nama service persis>","envBlock":"KEY=...","preDeploy":["..."],"postDeploy":["..."],"queries":[{"label":"...","sql":"..."}],"failover":"..."}],"summary":["..."]}',
   ].join('\n');
 }
 
@@ -251,6 +259,13 @@ export function parseDocumentReply(reply: string, services: { id: string; name: 
     if (Array.isArray(r.preDeploy)) fix.preDeploy = strs(r.preDeploy, 40);
     if (Array.isArray(r.postDeploy)) fix.postDeploy = strs(r.postDeploy, 40);
     if (typeof r.failover === 'string' && r.failover.trim()) fix.failover = str(r.failover, 300);
+    if (Array.isArray(r.queries)) {
+      fix.queries = r.queries
+        .map((q) => ({ label: str((q as Record<string, unknown>).label, 300), sql: typeof (q as Record<string, unknown>).sql === 'string' ? ((q as Record<string, unknown>).sql as string).trim().slice(0, 20_000) : '' }))
+        .filter((q) => q.label)
+        .map((q) => (q.sql ? q : { label: q.label }))
+        .slice(0, 40);
+    }
     if (Object.keys(fix).length > 2) fixes.push(fix);
   }
   return { fixes, summary: strs(json.summary, 20) };

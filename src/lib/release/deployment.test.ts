@@ -189,10 +189,12 @@ describe('writing a deployment page', () => {
     expect(xhtml).toContain('<time datetime="2026-10-20" />');
   });
 
-  it('prefers the MR commit over a typed one, and renders a Confluence-like preview', async () => {
+  it('fills the commit id only once the release MR is merged, and renders a Confluence-like preview', async () => {
     const svc = { id: 's1', name: 'core-payment', mrs: [{ ref: 'p/core!1', projectPath: 'p/core', iid: 1, webUrl: 'u', via: 'auto' as const }], order: 1, commitId: 'old0000' };
-    expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'opened', commitSha: 'head1234' } as unknown as MrCheck])).toBe('head1234');
-    expect(serviceCommit(svc, [])).toBe('old0000');
+    // Still in review: TBA, not the head or a typed sha.
+    expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'opened', commitSha: 'head1234' } as unknown as MrCheck])).toBeUndefined();
+    expect(serviceCommit(svc, [])).toBeUndefined();
+    expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'merged', commitSha: 'merge999' } as unknown as MrCheck])).toBe('merge999');
     const { storageToPreviewHtml } = await import('./preview');
     const html = storageToPreviewHtml(deploymentStorage(imported), new Map([['acc-sup', 'Super Visor']]));
     expect(html).toContain('<span class="lozenge lz-blue">DOCUMENT APPROVAL</span>');

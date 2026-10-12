@@ -624,6 +624,7 @@ export class ReleaseManager {
       releaseId: release.id,
       kind,
       ...(kind === 'picks' || kind === 'mr' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
+      ...(instruction && (kind === 'picks' || kind === 'document') ? { instruction } : {}),
       model: `${opts.ai.provider}/${opts.ai.model}`,
       status: 'running',
       progress: 'Menyiapkan…',
@@ -640,7 +641,7 @@ export class ReleaseManager {
     const job = live.job;
     try {
       if (job.kind === 'tickets') await this.aiTickets(live, ai);
-      else if (job.kind === 'picks') await this.aiPicks(live, ai);
+      else if (job.kind === 'picks') await this.aiPicks(live, ai, instruction);
       else if (job.kind === 'mr') await this.aiMr(live, ai);
       else await this.aiDocument(live, ai, instruction);
       if (live.cancelled) throw new Error('Dibatalkan.');
@@ -798,7 +799,7 @@ export class ReleaseManager {
     live.job.notes = [...discovered.filter((n) => n.startsWith('AI menambah')), ...read.errors];
   }
 
-  private async aiPicks(live: AiLive, ai: AiSelection) {
+  private async aiPicks(live: AiLive, ai: AiSelection, instruction: string) {
     const release = await this.get(live.job.releaseId);
     const service = this.service(release, live.job.serviceId ?? '');
     const path = service.gitlabPath!;
@@ -823,7 +824,7 @@ export class ReleaseManager {
       commits.push({ sha: c.sha, shortId: c.shortId, title: c.title, merge: c.merge, brought: c.merge ? d?.commits.map((x) => x.title).filter((t) => t !== c.title) : undefined, diff: d ? diffText(d.changes, per).text : '(perubahan tidak terbaca)' });
     }
     live.job.progress = 'AI memilih commit…';
-    const out = await this.ask(live, ai, picksPrompt({ repo: path, source, target: release.targetBranch, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits }));
+    const out = await this.ask(live, ai, picksPrompt({ repo: path, source, target: release.targetBranch, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits, instruction }));
     if (out.error) throw new Error(`AI gagal: ${out.error}`);
     const parsed = parsePicksReply(out.reply, line.map((c) => c.sha));
     if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
@@ -873,6 +874,7 @@ export class ReleaseManager {
         preDeploy: s.preDeploy,
         postDeploy: s.postDeploy,
         failover: s.failover,
+        queries: release.items.filter((i) => i.kind === 'sql' && i.service?.toLowerCase() === s.name.toLowerCase()).map((i) => ({ label: i.label, ...(i.detail ? { sql: i.detail } : {}) })),
         code: { envAdded: c.envAdded, envReadInCode: c.envReadInCode, migrations: c.migrations, sql: c.sqlOutside, envDiff: diffText(changes.filter((x) => isEnvOrConfigFile(x.newPath)), 20_000).text },
       };
     });
