@@ -298,6 +298,17 @@ export function parseJsonReply(reply: string): Record<string, unknown> | null {
   return null;
 }
 
+/** Entries with the same path become one, their reasons joined. */
+function mergeByPath(list: { path: string; reason: string }[]): { path: string; reason: string }[] {
+  const out: { path: string; reason: string }[] = [];
+  for (const u of list) {
+    const prev = out.find((x) => x.path === u.path);
+    if (!prev) out.push({ ...u });
+    else if (u.reason && !prev.reason.includes(u.reason)) prev.reason = `${prev.reason} · ${u.reason}`;
+  }
+  return out;
+}
+
 const str = (v: unknown, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const strs = (v: unknown, max = 20) => (Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean).slice(0, max) : []);
 const VERDICTS: AiVerdict[] = ['ada', 'sebagian', 'tidak'];
@@ -323,10 +334,10 @@ export function parseTicketsReply(
     if (!want.has(key) || !VERDICTS.includes(verdict)) continue;
     tickets.set(key, { verdict, files: strs((t as Record<string, unknown>).files, 8).filter((p) => known.has(p)), reason: str((t as Record<string, unknown>).reason) });
   }
-  const unrelated = (Array.isArray(json.unrelated) ? json.unrelated : [])
-    .map((u) => ({ path: str((u as Record<string, unknown>).path, 300), reason: str((u as Record<string, unknown>).reason) }))
-    .filter((u) => known.has(u.path))
-    .slice(0, 50);
+  // One entry per file: the AI may name a file twice (two unrelated changes in one config).
+  const unrelated = mergeByPath(
+    (Array.isArray(json.unrelated) ? json.unrelated : []).map((u) => ({ path: str((u as Record<string, unknown>).path, 300), reason: str((u as Record<string, unknown>).reason) })).filter((u) => known.has(u.path)),
+  ).slice(0, 50);
   const needs: AiNeed[] = [];
   for (const n of Array.isArray(json.needs) ? json.needs : []) {
     const r = n as Record<string, unknown>;

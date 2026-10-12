@@ -59,7 +59,7 @@ describe('release AI prompts and answers', () => {
         { key: 'MU-9', verdict: 'ada', files: [], reason: 'bukan tiket rilis' },
         { key: 'MU-2', verdict: 'mungkin', files: [], reason: '' },
       ],
-      unrelated: [{ path: 'b.go', reason: 'fitur lain' }, { path: 'x.go', reason: 'tidak berubah' }],
+      unrelated: [{ path: 'b.go', reason: 'fitur lain' }, { path: 'x.go', reason: 'tidak berubah' }, { path: 'b.go', reason: 'route kyc' }],
       needs: [
         { kind: 'env', when: 'pre', label: 'Tambah env `TOPUP_LIMIT`', detail: 'batas topup', files: ['a.go'] },
         { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },
@@ -69,7 +69,8 @@ describe('release AI prompts and answers', () => {
     });
     const r = parseTicketsReply(reply, ['MU-1', 'MU-2'], ['a.go', 'b.go'])!;
     expect([...r.tickets]).toEqual([['MU-1', { verdict: 'ada', files: ['a.go'], reason: 'handler X' }]]);
-    expect(r.unrelated).toEqual([{ path: 'b.go', reason: 'fitur lain' }]);
+    // A file named twice becomes one entry.
+    expect(r.unrelated).toEqual([{ path: 'b.go', reason: 'fitur lain · route kyc' }]);
     expect(r.needs).toEqual([
       { kind: 'env', when: 'pre', label: 'TOPUP_LIMIT', detail: 'batas topup', files: ['a.go'] },
       { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },

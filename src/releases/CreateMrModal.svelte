@@ -364,7 +364,7 @@
             </div>
             {#if patchDone}
               {#if patchDone.notes?.length}<ul class="small ai-notes">{#each patchDone.notes as n, i (i)}<li>{n}</li>{/each}</ul>{/if}
-              {#each patchDone.patch?.files ?? [] as f (f.path)}
+              {#each patchDone.patch?.files ?? [] as f, fi (fi)}
                 <div class="pfile">
                   <div class="small"><span class="mono">{f.path}</span> <span class="tag">{f.status === 'new' ? 'file baru' : f.status === 'deleted' ? 'dihapus' : `${f.hunks.length} hunk`}</span></div>
                   {#each f.hunks as h (h.id)}
@@ -378,7 +378,7 @@
               {#if patchPreview}
                 <div class="pfile">
                   <strong class="small">Hasil di {plan.targetBranch} (belum ditulis)</strong>
-                  {#each patchPreview.files as pf (pf.path)}
+                  {#each patchPreview.files as pf, pi (pi)}
                     <div class="small"><span class="mono">{pf.path}</span> · {pf.status === 'create' ? 'file baru' : pf.status === 'delete' ? 'dihapus' : 'diubah'}</div>
                     {#if pf.problem}<div class="small err-text">{pf.problem}</div>{/if}
                     {#if pf.changes?.length}<ul class="small">{#each pf.changes as c, i (i)}<li class="mono">{c}</li>{/each}</ul>{/if}
@@ -440,13 +440,13 @@
                   <span class="mono">{t.key}</span> {t.summary}
                   <span class="muted">· {t.status} · {v ? `AI: ${v.verdict}` : t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
                   {#if v?.reason}<div class="muted evidence"><Icon name="sparkles" size={11} /> {v.reason}</div>{/if}
-                  {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h (h.path)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
+                  {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h, i (i)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
                 </li>
               {/each}
             </ul>
             {#if aiMrDone?.unrelated?.length}
               <h4 class="w">Perubahan tanpa tiket (AI) — {aiMrDone.unrelated.length}</h4>
-              <ul class="small tickets">{#each aiMrDone.unrelated as u (u.path)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+              <ul class="small tickets">{#each aiMrDone.unrelated as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
             {/if}
             {#if aiMrDone?.risks?.length}
               <h4 class="bad">Risiko / temuan review (AI) — {aiMrDone.risks.length}</h4>

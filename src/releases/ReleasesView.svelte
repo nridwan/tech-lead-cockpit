@@ -557,7 +557,7 @@
                       <details open><summary class="err-text">AI: {src.aiRisks.length} risiko/temuan review</summary><ul>{#each src.aiRisks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}<span>{r.reason}</span></li>{/each}</ul></details>
                     {/if}
                     {#if src.aiUnrelated?.length}
-                      <details open><summary class="warn-text">AI: {src.aiUnrelated.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each src.aiUnrelated as u (u.path)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>
+                      <details open><summary class="warn-text">AI: {src.aiUnrelated.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each src.aiUnrelated as u, i (i)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>
                     {:else if src.unattributed.length}
                       <details><summary>{src.unattributed.length}{src.unattributed.length >= 30 ? '+' : ''} file tidak terkait tiket scope mana pun</summary><ul class="mono">{#each src.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
                     {/if}
@@ -582,10 +582,10 @@
                         <span class="muted">{t.service} tidak ada di rilis</span>
                       {:else if t.code?.length || t.byKey?.length}
                         {#if t.inMrs.length}<strong>ada</strong>{:else}<strong class="warn-text">perlu dicek</strong>{/if}
-                        {#each t.code ?? [] as e (e.ref)}
+                        {#each t.code ?? [] as e, ei (ei)}
                           <div class="evidence" title={e.ref}>
                             {e.strength === 'strong' ? '✓' : '≈'}
-                            {#each e.hits.slice(0, 2) as h (h.path)}<span class="mono">{h.path}</span> <span class="muted">({h.match})</span> {/each}
+                            {#each e.hits.slice(0, 2) as h, i (i)}<span class="mono">{h.path}</span> <span class="muted">({h.match})</span> {/each}
                           </div>
                         {/each}
                         {#if t.byKey?.length && !t.code?.some((e) => e.strength === 'strong')}<div class="muted">key di commit {t.byKey.join(', ')}</div>{/if}
