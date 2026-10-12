@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { EstimateProject } from '../../src/lib/estimate/types.ts';
 import type { MrCommit, MrDetail, MrFileChange, MrSummary } from '../../src/lib/gitlab/types.ts';
 import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
+import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
 import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
@@ -30,6 +31,8 @@ export interface ReleaseGitLab {
   compare?(path: string, target: string, source: string): Promise<{ commits: MrCommit[]; changes: MrFileChange[]; truncated: boolean }>;
   openMrFor?(path: string, source: string, target: string): Promise<MrSummary | undefined>;
   createMr?(path: string, req: { source: string; target: string; title: string; description: string }): Promise<MrSummary>;
+  createBranch?(path: string, branch: string, ref: string): Promise<void>;
+  cherryPick?(path: string, sha: string, branch: string): Promise<{ id: string }>;
 }
 
 export interface ReleaseDeps {
@@ -306,7 +309,7 @@ export class ReleaseManager {
     const release = await this.get(id);
     const service = this.service(release, serviceId);
     const path = service.gitlabPath!;
-    const source = (sourceBranch || release.sourceBranch || 'staging').trim();
+    const source = (sourceBranch || service.sourceBranch || release.sourceBranch || 'staging').trim();
     const target = release.targetBranch;
     if (!/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
     const gitlab = await this.deps.gitlab();
@@ -360,6 +363,7 @@ export class ReleaseManager {
       description,
       formUrl: base ? newMrFormUrl(base, path, source, target, title, description) : '',
       ...(scopes ? { canCreate: scopes.includes('api') } : {}),
+      releaseBranch: planReleaseBranch(cmp.commits, new Set([...scopeKeys, ...accepted]), { base: target, branch: releaseBranchName(release.version, release.date) }),
       warnings,
     };
   }
@@ -384,8 +388,40 @@ export class ReleaseManager {
     const services = release.services.map((s) =>
       s.id === serviceId && !s.mrs.some((m) => m.ref === mr.ref) ? { ...s, mrs: [...s.mrs, { ref: mr.ref, projectPath: mr.projectPath, iid: mr.iid, webUrl: mr.webUrl, title: mr.title, via: 'manual' as const }] } : s,
     );
-    const saved = await this.deps.store.save({ ...release, services, sourceBranch: release.sourceBranch || source });
+    // Remember the branch this service released from (a release branch, or another than the default).
+    const saved = await this.deps.store.save({ ...release, services: services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: source } : s)) });
     return { release: saved, ref: mr.ref, webUrl: mr.webUrl, created: !existing };
+  }
+
+  /**
+   * Creates a release branch from the target and cherry-picks the chosen commits in order (the
+   * user confirmed). Stops at the first failure (usually a conflict) and says which commit; what
+   * was picked stays on the branch. The service then releases from that branch.
+   */
+  async createReleaseBranch(id: string, serviceId: string, req: { branch: string; picks: { sha: string; title?: string }[] }): Promise<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const path = service.gitlabPath!;
+    const branch = req.branch.trim();
+    if (!/^[\w./-]{1,100}$/.test(branch) || branch === release.targetBranch) throw new ReleaseInputError('Nama branch rilis tidak valid.');
+    if (!req.picks.length) throw new ReleaseInputError('Pilih minimal satu commit untuk branch rilis.');
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.createBranch || !gitlab.cherryPick || !gitlab.branchExists) throw new ReleaseInputError('GitLab belum terhubung.');
+    if (await gitlab.branchExists(path, branch)) throw new ReleaseInputError(`Branch ${branch} sudah ada di ${path}. Pakai nama lain, atau pakai branch itu sebagai branch sumber.`);
+    await gitlab.createBranch(path, branch, release.targetBranch);
+    const picked: string[] = [];
+    let failed: { sha: string; title?: string; error: string } | undefined;
+    for (const p of req.picks) {
+      try {
+        await gitlab.cherryPick(path, p.sha, branch);
+        picked.push(p.sha);
+      } catch (e) {
+        failed = { sha: p.sha, title: p.title, error: (e as Error).message };
+        break;
+      }
+    }
+    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch } : s)) });
+    return { release: saved, branch, picked, ...(failed ? { failed } : {}) };
   }
 
   private validRefs(release: Release, refs: string[]): string[] {

@@ -138,6 +138,8 @@ export interface MrCommit {
   title: string;
   authorName: string;
   createdAt: string;
+  /** Parent commit ids (from compare; tells merge commits and the first-parent line apart). */
+  parentIds?: string[];
 }
 
 export type RiskKind = 'auth' | 'database' | 'payment' | 'infra' | 'api' | 'config' | 'size' | 'tests';

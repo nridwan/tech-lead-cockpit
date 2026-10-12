@@ -5,6 +5,7 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { openExternal } from '../lib/open-external';
+  import { releaseBranchCommands, type BranchPick } from '../lib/release/branch';
   import { releases } from '../lib/release/client';
   import type { MrPlan, Release, ReleaseService } from '../lib/release/types';
 
@@ -13,11 +14,19 @@
    * files, env/migrations/queries, tickets), then creates it through the GitLab API (token with
    * scope api, confirmed) or opens GitLab's own form filled in.
    */
-  let { release, service, onclose, oncreated }: { release: Release; service: ReleaseService; onclose: () => void; oncreated: (r: Release) => void } = $props();
+  let { release, service, onclose, oncreated, onchanged }: { release: Release; service: ReleaseService; onclose: () => void; oncreated: (r: Release) => void; onchanged?: (r: Release) => void } = $props();
+  const oncreatedBranch = (r: Release) => onchanged?.(r);
 
   let open = $state(true);
   // The release's source branch is only the starting value; the field is edited here.
-  let source = $state(untrack(() => release.sourceBranch ?? 'staging'));
+  let source = $state(untrack(() => service.sourceBranch ?? release.sourceBranch ?? 'staging'));
+  // Release branch (when the source also holds work outside the release).
+  let showBranch = $state(false);
+  let branchName = $state('');
+  let picks = $state<BranchPick[]>([]);
+  let branching = $state(false);
+  let branchResult = $state<{ picked: number; failed?: { sha: string; title?: string; error: string } } | null>(null);
+  const chosen = $derived(picks.filter((p) => p.include));
   let plan = $state<MrPlan | null>(null);
   let loading = $state(false);
   let error = $state('');
@@ -37,6 +46,10 @@
       plan = await releases.mrPlan(release.id, service.id, source.trim());
       title = plan.title;
       description = plan.description;
+      branchName = plan.releaseBranch.branch;
+      picks = plan.releaseBranch.commits.map((c) => ({ ...c }));
+      // A dirty source: suggest the release branch right away.
+      showBranch = plan.outOfScope.length > 0 || plan.releaseBranch.commits.some((c) => c.reason === 'out-of-scope' || c.reason === 'mixed');
     } catch (e) {
       error = (e as Error).message;
       plan = null;
@@ -62,6 +75,45 @@
       error = (e as Error).message;
     } finally {
       creating = false;
+    }
+  }
+
+  async function copyCommands() {
+    if (!plan) return;
+    try {
+      await navigator.clipboard.writeText(releaseBranchCommands({ base: plan.targetBranch, branch: branchName.trim() }, chosen));
+      toasts.show('Perintah git disalin. Setelah branch di-push, isi branch sumber dengan nama branch itu lalu Bandingkan.', 'ok', 5000);
+    } catch {
+      toasts.show('Tidak bisa menyalin ke clipboard.', 'err');
+    }
+  }
+
+  async function makeBranch() {
+    if (!plan || !chosen.length || !branchName.trim()) return;
+    const ok = await confirmDialog({
+      title: 'Buat branch rilis di GitLab?',
+      message: `Branch ${branchName.trim()} dibuat dari ${plan.targetBranch} di ${plan.projectPath}, lalu ${chosen.length} commit di-cherry-pick berurutan. Kalau ada konflik, proses berhenti di commit itu.`,
+      confirmText: 'Buat branch',
+    });
+    if (!ok) return;
+    branching = true;
+    branchResult = null;
+    try {
+      const r = await releases.createReleaseBranch(release.id, service.id, branchName.trim(), chosen.map((p) => ({ sha: p.sha, title: p.title })));
+      branchResult = { picked: r.picked.length, failed: r.failed };
+      oncreatedBranch(r.release);
+      if (r.failed) {
+        toasts.show(`Berhenti di ${r.failed.sha.slice(0, 8)}: ${r.failed.error}`, 'err', 8000);
+      } else {
+        toasts.show(`Branch ${r.branch} siap dengan ${r.picked.length} commit.`, 'ok', 4000);
+        source = r.branch;
+        showBranch = false;
+        await load();
+      }
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      branching = false;
     }
   }
 
@@ -91,6 +143,42 @@
       {#if plan.warnings.length}
         <div class="warn">{#each plan.warnings as w (w)}<p><Icon name="alert" size={12} /> {w}</p>{/each}</div>
       {/if}
+
+      <section class="branch">
+        <button class="link-btn" onclick={() => (showBranch = !showBranch)}>{showBranch ? '▾' : '▸'} {plan.sourceBranch} juga berisi perubahan di luar rilis? Buat branch rilis dari {plan.targetBranch}</button>
+        {#if showBranch}
+          <p class="muted small">Commit jalur utama {plan.sourceBranch} (lama ke baru). Merge commit dihitung bersama isi branch fiturnya, jadi satu pilihan membawa satu fitur utuh. Yang di luar scope atau tanpa Jira key tidak dipilih; centang manual bila memang perlu.</p>
+          <div class="row">
+            <label class="inline small">Nama branch <input class="input mono bname" bind:value={branchName} /></label>
+            <span class="small">{chosen.length} dari {picks.length} commit dipilih</span>
+          </div>
+          <ul class="picks">
+            {#each picks as p (p.sha)}
+              <li class:off={!p.include}>
+                <label>
+                  <input type="checkbox" bind:checked={p.include} />
+                  <span class="mono">{p.shortId}</span>
+                  {#if p.merge}<span class="tag">merge</span>{/if}
+                  <span class="ptitle">{p.title}</span>
+                  {#if p.reason === 'out-of-scope'}<span class="tag bad-tag">di luar scope: {p.outsideKeys.join(', ')}</span>
+                  {:else if p.reason === 'mixed'}<span class="tag bad-tag">campur: {p.outsideKeys.join(', ')} di luar scope</span>
+                  {:else if p.reason === 'no-key'}<span class="tag warn-tag">tanpa Jira key</span>
+                  {:else}<span class="tag ok-tag">{p.keys.join(', ')}</span>{/if}
+                </label>
+              </li>
+            {:else}
+              <li class="muted small">Tidak ada commit untuk dipilih.</li>
+            {/each}
+          </ul>
+          {#if branchResult?.failed}
+            <p class="err small">Berhenti di <span class="mono">{branchResult.failed.sha.slice(0, 8)}</span> {branchResult.failed.title ?? ''}: {branchResult.failed.error}. {branchResult.picked} commit sebelumnya sudah masuk ke branch {branchName}. Selesaikan konfliknya secara lokal (git cherry-pick), push, lalu Bandingkan dengan branch itu.</p>
+          {/if}
+          <div class="row">
+            <button class="btn btn-sm" onclick={copyCommands} disabled={!chosen.length}><Icon name="copy" size={12} /> Salin perintah git</button>
+            <button class="btn btn-sm btn-primary" onclick={makeBranch} disabled={branching || !chosen.length || !branchName.trim() || plan.canCreate === false}><Icon name="merge" size={12} /> {branching ? 'Membuat…' : 'Buat branch & cherry-pick di GitLab'}</button>
+          </div>
+        {/if}
+      </section>
 
       <div class="grid">
         <section>
@@ -203,6 +291,69 @@
   }
   .bad {
     color: var(--err);
+  }
+  .branch {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+  .link-btn {
+    border: none;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+  }
+  .bname {
+    width: 240px;
+  }
+  .picks {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+  }
+  .picks li label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .picks li.off {
+    opacity: 0.65;
+  }
+  .ptitle {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tag {
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--surface-hover);
+    white-space: nowrap;
+  }
+  .ok-tag {
+    background: var(--ok-soft);
+  }
+  .warn-tag {
+    background: var(--warn-soft);
+  }
+  .bad-tag {
+    background: var(--err-soft);
   }
   .field {
     display: flex;

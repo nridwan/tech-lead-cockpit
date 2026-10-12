@@ -43,7 +43,8 @@ export function validateRelease(raw: Partial<Release>): Release {
     const mrs = arr<Partial<ReleaseMrRef>>(s.mrs, 20)
       .map(validMr)
       .filter((m): m is ReleaseMrRef => Boolean(m) && !seen.has(m!.ref) && Boolean(seen.add(m!.ref)));
-    return [{ id: id(s.id), name: sName, ...(PATH.test(gitlabPath) ? { gitlabPath } : {}), mrs, order: Number.isInteger(s.order) && Number(s.order) > 0 ? Number(s.order) : i + 1, ...(s.pic ? { pic: text(s.pic, 80) } : {}), ...(s.note ? { note: text(s.note, 500) } : {}) }];
+    const sourceBranch = text(s.sourceBranch, 100);
+    return [{ id: id(s.id), name: sName, ...(PATH.test(gitlabPath) ? { gitlabPath } : {}), ...(sourceBranch && BRANCH.test(sourceBranch) ? { sourceBranch } : {}), mrs, order: Number.isInteger(s.order) && Number(s.order) > 0 ? Number(s.order) : i + 1, ...(s.pic ? { pic: text(s.pic, 80) } : {}), ...(s.note ? { note: text(s.note, 500) } : {}) }];
   });
   const items: ReleaseItem[] = arr<Partial<ReleaseItem>>(raw.items, 300).flatMap((it) => {
     const label = text(it.label, 300);

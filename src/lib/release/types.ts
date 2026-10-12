@@ -1,3 +1,5 @@
+import type { ReleaseBranchPlan } from './branch';
+
 // Release management: one release groups the MRs into the production branch (master by default)
 // of every service a set of projects touched, the checks on them (code, env, database), the
 // deploy runbook, and the release document (imported from Confluence/Markdown or generated).
@@ -31,6 +33,8 @@ export interface ReleaseService {
   name: string;
   /** GitLab project path (group/repo), from the repo's git remote or typed in. */
   gitlabPath?: string;
+  /** Branch this service's release MR comes from (staging, a release branch…); default the release's. */
+  sourceBranch?: string;
   mrs: ReleaseMrRef[];
   /** 1 = deployed first. */
   order: number;
@@ -229,5 +233,7 @@ export interface MrPlan {
   formUrl: string;
   /** The token has the `api` scope; undefined when GitLab can't tell. */
   canCreate?: boolean;
+  /** A clean branch from the target with only the scope's commits (for a dirty source). */
+  releaseBranch: ReleaseBranchPlan;
   warnings: string[];
 }

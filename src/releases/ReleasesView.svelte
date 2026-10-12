@@ -399,11 +399,12 @@
                 </span>
                 <input class="input svc-name" bind:value={s.name} aria-label="Nama service" />
                 <input class="input mono path" bind:value={s.gitlabPath} placeholder="group/repo di GitLab" aria-label="Path GitLab" />
+                <input class="input mono src" value={s.sourceBranch ?? ''} oninput={(e) => (s.sourceBranch = e.currentTarget.value.trim() || undefined)} placeholder={current.sourceBranch ?? 'staging'} title="Branch sumber MR rilis untuk service ini (kosong = {current.sourceBranch ?? 'staging'})" aria-label="Branch sumber" />
                 <input class="input pic" bind:value={s.pic} placeholder="PIC" aria-label="PIC" />
                 <button class="btn btn-ghost btn-sm" onclick={() => removeService(s)} aria-label="Hapus service {s.name}"><Icon name="trash" size={12} /></button>
               </div>
               {#if !s.mrs.length}
-                <p class="err small no-mr"><Icon name="alert" size={12} /> Belum ada MR ke {current.targetBranch}. <button class="btn btn-sm btn-primary" onclick={async () => { await flush(); mrFor = s; }} disabled={!s.gitlabPath} title={s.gitlabPath ? `Buat MR ${current.sourceBranch ?? 'staging'} ke ${current.targetBranch}` : 'Isi path GitLab dulu'}><Icon name="merge" size={12} /> Buat MR</button></p>
+                <p class="err small no-mr"><Icon name="alert" size={12} /> Belum ada MR ke {current.targetBranch}. <button class="btn btn-sm btn-primary" onclick={async () => { await flush(); mrFor = s; }} disabled={!s.gitlabPath} title={s.gitlabPath ? `Buat MR ${s.sourceBranch ?? current.sourceBranch ?? 'staging'} ke ${current.targetBranch}` : 'Isi path GitLab dulu'}><Icon name="merge" size={12} /> Buat MR</button></p>
               {/if}
               {#each s.mrs as m (m.ref)}
                 {@const c = checkOf(m.ref)}
@@ -583,7 +584,7 @@
   <ShareMrModal bind:open={shareOpen} release={current} {report} onshared={(r) => setCurrent(r)} />
   <PublishReleaseModal bind:open={publishOpen} release={current} markdown={docMd} onpublished={(r) => setCurrent(r)} />
   {#if mrFor}
-    <CreateMrModal release={current} service={mrFor} onclose={() => (mrFor = null)} oncreated={(r) => { setCurrent(r); mrFor = null; }} />
+    <CreateMrModal release={current} service={mrFor} onclose={() => (mrFor = null)} oncreated={(r) => { setCurrent(r); mrFor = null; }} onchanged={(r) => setCurrent(r)} />
   {/if}
 {/if}
 
@@ -824,6 +825,9 @@
   }
   .pic {
     flex: 0 1 140px;
+  }
+  .svc-head .src {
+    flex: 0 1 150px;
   }
   .no-mr {
     display: flex;

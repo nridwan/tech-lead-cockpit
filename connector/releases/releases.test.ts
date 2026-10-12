@@ -219,6 +219,31 @@ describe('ReleaseManager', () => {
     expect(created.release.services[0].mrs.map((x) => x.ref)).toEqual(['payments/core-payment!40']);
   });
 
+  it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
+    const calls: string[] = [];
+    const m = manager({
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async (_p, b) => b === 'release/taken',
+        createBranch: async (path, branch, ref) => void calls.push(`branch ${branch} from ${ref}`),
+        cherryPick: async (_p, sha) => {
+          if (sha === 'bbbbbbb') throw new Error('Sorry, we cannot cherry-pick this commit automatically.');
+          calls.push(`pick ${sha}`);
+          return { id: `new-${sha}` };
+        },
+      }),
+    });
+    const r = await m.store.save({ name: 'R', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    await expect(m.createReleaseBranch(r.id, 's1', { branch: 'release/taken', picks: [{ sha: 'aaaaaaa' }] })).rejects.toThrow(/sudah ada/);
+    await expect(m.createReleaseBranch(r.id, 's1', { branch: 'master', picks: [{ sha: 'aaaaaaa' }] })).rejects.toThrow(/tidak valid/);
+    const res = await m.createReleaseBranch(r.id, 's1', { branch: 'release/v2', picks: [{ sha: 'aaaaaaa' }, { sha: 'bbbbbbb', title: 'MU-13 limit' }, { sha: 'ccccccc' }] });
+    expect(calls).toEqual(['branch release/v2 from master', 'pick aaaaaaa']);
+    expect(res).toMatchObject({ branch: 'release/v2', picked: ['aaaaaaa'], failed: { sha: 'bbbbbbb', title: 'MU-13 limit' } });
+    // The service now releases from the new branch.
+    expect(res.release.services[0].sourceBranch).toBe('release/v2');
+  });
+
   it('reports a missing GitLab connection instead of failing', async () => {
     const m = manager({ gitlab: async () => null });
     const r = await m.store.save({ name: 'X', projectIds: ['p1'] } as never);

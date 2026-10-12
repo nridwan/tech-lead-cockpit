@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MrDetail, MrFileChange } from '../gitlab/types';
+import { planReleaseBranch, releaseBranchCommands, releaseBranchName } from './branch';
 import { checkMr, envAddedIn, envReadsIn, isMigration, jiraKeysIn } from './checks';
 import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from './coverage';
 import { releaseMarkdown } from './document';
@@ -299,6 +300,55 @@ describe('scope check against the code', () => {
     expect(rep.warnings).toContain('1 commit tanpa Jira key: scope-nya tidak bisa dipastikan.');
     const closed = buildReport(r, scopeTickets, [check({ state: 'closed', keyCommits: { 'MU-99': ['x'] } })]);
     expect(closed.outOfScope).toEqual([]);
+  });
+});
+
+describe('release branch plan', () => {
+  // staging (first parent, oldest → newest):
+  //   m1 = merge feature/MU-12 (commits f1 "refund api", f2 "fix") → in scope
+  //   d1 = direct "MU-50 banner promo"                         → out of scope
+  //   m2 = merge feature/MU-13 + MU-60 (f3 "MU-13 limit", f4 "MU-60 promo") → mixed
+  //   d2 = "hotfix typo"                                        → no key
+  //   m3 = merge feature/MU-14 (f5 "wip")                       → in scope by the merge title
+  const c = (id: string, title: string, parentIds: string[], createdAt: string) => ({ id, shortId: id, title, authorName: 'x', createdAt, parentIds });
+  const commits = [
+    c('m3', "Merge branch 'feature/MU-14-report' into 'staging'", ['d2', 'f5'], '2026-10-10T09:00:00Z'),
+    c('f5', 'wip', ['base'], '2026-10-10T08:00:00Z'),
+    c('d2', 'hotfix typo', ['m2'], '2026-10-09T09:00:00Z'),
+    c('m2', "Merge branch 'feature/limit' into 'staging'", ['d1', 'f4'], '2026-10-08T09:00:00Z'),
+    c('f4', 'MU-60 promo', ['f3'], '2026-10-08T08:00:00Z'),
+    c('f3', 'MU-13 limit', ['base'], '2026-10-08T07:00:00Z'),
+    c('d1', 'MU-50 banner promo', ['m1'], '2026-10-07T09:00:00Z'),
+    c('m1', "Merge branch 'feature/MU-12-refund' into 'staging'", ['base', 'f2'], '2026-10-06T09:00:00Z'),
+    c('f2', 'fix', ['f1'], '2026-10-06T08:00:00Z'),
+    c('f1', 'refund api', ['base'], '2026-10-06T07:00:00Z'),
+  ];
+
+  it('walks the first-parent line oldest first and judges each merge with what it brought in', () => {
+    const plan = planReleaseBranch(commits, new Set(['MU-12', 'MU-13', 'MU-14']), { base: 'master', branch: 'release/v2.4.0' });
+    expect(plan.commits.map((p) => [p.sha, p.merge, p.include, p.reason ?? '', p.keys.join(',')])).toEqual([
+      ['m1', true, true, '', 'MU-12'],
+      ['d1', false, false, 'out-of-scope', 'MU-50'],
+      ['m2', true, false, 'mixed', 'MU-13,MU-60'],
+      ['d2', false, false, 'no-key', ''],
+      ['m3', true, true, '', 'MU-14'],
+    ]);
+    expect(plan.commits[2].outsideKeys).toEqual(['MU-60']);
+  });
+
+  it('gives terminal commands with -m 1 for merges, and a branch name', () => {
+    const plan = planReleaseBranch(commits, new Set(['MU-12', 'MU-14']), { base: 'master', branch: 'release/v2.4.0' });
+    const cmd = releaseBranchCommands(plan, plan.commits.filter((p) => p.include));
+    expect(cmd.split('\n')).toEqual([
+      'git fetch origin',
+      'git checkout -b release/v2.4.0 origin/master',
+      "git cherry-pick -m 1 m1   # Merge branch 'feature/MU-12-refund' into 'staging'",
+      "git cherry-pick -m 1 m3   # Merge branch 'feature/MU-14-report' into 'staging'",
+      'git push -u origin release/v2.4.0',
+    ]);
+    expect(releaseBranchName('v2.4.0')).toBe('release/v2.4.0');
+    expect(releaseBranchName('', '2026-10-20')).toBe('release/2026-10-20');
+    expect(releaseBranchName('Rilis Oktober')).toBe('release/Rilis-Oktober');
   });
 });
 

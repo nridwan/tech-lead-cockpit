@@ -43,6 +43,13 @@ Rilis dianggap **scope sesuai** hanya bila: semua tiket scope ada di kode MR ril
 Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service yang belum ada di commit, dan tiket di luar scope yang akan terbawa. Judul dan deskripsi (tiket, checklist server, commit) bisa diedit.
 - **Buat MR**: lewat API, butuh token scope `api` (dicek dari `/personal_access_tokens/self`), selalu dikonfirmasi, audit `gitlab.mr.create`. MR terbuka untuk branch yang sama ditautkan, bukan dibuat dua kali.
 - **Buka form di GitLab**: form "new merge request" GitLab yang sudah terisi; tidak butuh scope tulis.
+- **Branch sumber per service**: `ReleaseService.sourceBranch` (kosong = default rilis). Branch yang dipakai saat membuat MR atau branch rilis diingat per service.
+
+### Branch rilis (staging kotor)
+
+[`src/lib/release/branch.ts`](../../../src/lib/release/branch.ts) `planReleaseBranch`: jalur first-parent branch sumber (dari `parent_ids` GitLab compare), lama ke baru. Merge commit dinilai bersama commit yang dibawanya (dari parent kedua, tanpa menyeberang jalur utama), jadi satu pilihan = satu fitur utuh. Default terpilih hanya yang semua key-nya di scope (termasuk `accepted`); `out-of-scope`, `mixed`, dan `no-key` tidak terpilih tapi bisa dicentang.
+- **Salin perintah git**: `git checkout -b release/<versi> origin/<target>` + `git cherry-pick [-m 1] <sha>` berurutan + push.
+- **Buat branch & cherry-pick di GitLab** (`POST /releases/mr/branch`): `createBranch` dari target lalu `cherryPick` satu per satu; berhenti di kegagalan pertama (biasanya konflik) dan melaporkan commit-nya; audit `gitlab.branch.create`. Service lalu memakai branch itu sebagai sumber.
 
 ## 🧾 Cakupan tiket ([`src/lib/release/coverage.ts`](../../../src/lib/release/coverage.ts))
 
@@ -73,15 +80,15 @@ HTML dibangun dari data dengan semua nilai di-escape; hanya `p`, `b`, `a` (http/
 | [`connector/releases/store.ts`](../../../connector/releases/store.ts) | `~/.tech-lead-cockpit/releases/<id>.json` (0600), validasi |
 | [`connector/releases/manager.ts`](../../../connector/releases/manager.ts) | Tiket, discover, check (laporan di `releases/reports/`), import, share |
 | [`connector/releases/repos.ts`](../../../connector/releases/repos.ts) | `git remote get-url origin` per repo di folder Services → path project GitLab |
-| [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch`, `compare`, `branchExists`, `openMrFor`, `tokenScopes`, `createMr` (satu-satunya tulis, butuh scope `api`) |
+| [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch`, `compare` (dengan `parentIds`), `branchExists`, `openMrFor`, `tokenScopes`; tulis (scope `api`, setelah konfirmasi): `createMr`, `createBranch`, `cherryPick` |
 | [`src/releases/CreateMrModal.svelte`](../../../src/releases/CreateMrModal.svelte) | Buat MR per service: perbandingan, temuan, scope, judul/deskripsi, API atau form GitLab |
 | [`src/lib/release/mr.ts`](../../../src/lib/release/mr.ts) | Judul, deskripsi, dan URL form MR GitLab |
 
-Route: `GET /releases`, `GET /releases/one`, `GET /releases/report`, `GET /releases/codenames`, `POST /releases`, `POST /releases/delete`, `POST /releases/discover`, `POST /releases/check`, `POST /releases/import`, `POST /releases/mr/plan`, `POST /releases/mr/create`, `POST /releases/share/preview`, `POST /releases/share`.
+Route: `GET /releases`, `GET /releases/one`, `GET /releases/report`, `GET /releases/codenames`, `POST /releases`, `POST /releases/delete`, `POST /releases/discover`, `POST /releases/check`, `POST /releases/import`, `POST /releases/mr/plan`, `POST /releases/mr/create`, `POST /releases/mr/branch`, `POST /releases/share/preview`, `POST /releases/share`.
 
 ## 🔒 Batas
 
-- Jira hanya dibaca. Tulis ke luar hanya setelah konfirmasi: pesan Teams, membuat MR di GitLab (token scope `api`), dan publish Confluence lewat route publish yang sudah ada.
+- Jira hanya dibaca. Tulis ke luar hanya setelah konfirmasi: pesan Teams, membuat MR / branch rilis / cherry-pick di GitLab (token scope `api`), dan publish Confluence lewat route publish yang sudah ada.
 - Belum ada: mention Teams sungguhan (butuh ID akun Microsoft), thread checklist otomatis di MR GitLab (butuh token scope `api`), dan job CI `release-check` di repo service.
 
 ## 🛠️ Test

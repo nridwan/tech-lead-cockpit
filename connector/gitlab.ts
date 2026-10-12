@@ -163,6 +163,7 @@ interface ApiCommit {
   title: string;
   author_name: string;
   created_at: string;
+  parent_ids?: string[];
 }
 
 const user = (u: ApiUser): GitLabUser => ({ id: u.id, username: u.username, name: u.name, avatarUrl: u.avatar_url });
@@ -268,7 +269,7 @@ export class GitLabClient {
     );
     const diffs = body.diffs ?? [];
     return {
-      commits: (body.commits ?? []).map((c) => ({ id: c.id, shortId: c.short_id, title: c.title, authorName: c.author_name, createdAt: c.created_at })),
+      commits: (body.commits ?? []).map((c) => ({ id: c.id, shortId: c.short_id, title: c.title, authorName: c.author_name, createdAt: c.created_at, parentIds: c.parent_ids ?? [] })),
       changes: diffs.slice(0, MAX_FILES).map((d) => ({ oldPath: d.old_path, newPath: d.new_path, newFile: d.new_file, renamedFile: d.renamed_file, deletedFile: d.deleted_file, diff: (d.diff ?? '').length > MAX_FILE_DIFF_CHARS ? '' : (d.diff ?? ''), truncated: Boolean(d.too_large || d.collapsed || (d.diff ?? '').length > MAX_FILE_DIFF_CHARS), ...countDiffLines(d.diff ?? '') })),
       truncated: Boolean(body.compare_timeout) || diffs.length > MAX_FILES,
     };
@@ -278,6 +279,16 @@ export class GitLabClient {
   async openMrFor(projectPath: string, source: string, target: string): Promise<MrSummary | undefined> {
     const { body } = await this.get<ApiMr[]>(`/projects/${encodeURIComponent(projectPath)}/merge_requests?state=opened&source_branch=${encodeURIComponent(source)}&target_branch=${encodeURIComponent(target)}&per_page=5`);
     return body[0] ? summary(body[0]) : undefined;
+  }
+
+  /** New branch from a ref (e.g. a release branch from master). Needs scope `api`. */
+  async createBranch(projectPath: string, branch: string, ref: string): Promise<void> {
+    await this.post(`/projects/${encodeURIComponent(projectPath)}/repository/branches?branch=${encodeURIComponent(branch)}&ref=${encodeURIComponent(ref)}`, {});
+  }
+
+  /** Cherry-picks one commit onto a branch (merge commits against their first parent). Needs scope `api`. */
+  async cherryPick(projectPath: string, sha: string, branch: string): Promise<{ id: string }> {
+    return this.post<{ id: string }>(`/projects/${encodeURIComponent(projectPath)}/repository/commits/${encodeURIComponent(sha)}/cherry_pick`, { branch });
   }
 
   async createMr(projectPath: string, req: { source: string; target: string; title: string; description: string }): Promise<MrSummary> {

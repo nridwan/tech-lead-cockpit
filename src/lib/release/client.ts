@@ -41,6 +41,9 @@ export const releases = {
   /** Creates the MR in GitLab (token with scope api), or attaches the one already open. */
   createMr: (id: string, serviceId: string, req: { sourceBranch: string; title: string; description: string }) =>
     call<{ release: Release; ref: string; webUrl: string; created: boolean }>('/mr/create', { id, serviceId, ...req }),
+  /** Release branch from the target with the chosen commits cherry-picked (token with scope api). */
+  createReleaseBranch: (id: string, serviceId: string, branch: string, picks: { sha: string; title?: string }[]) =>
+    call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks }),
   sharePreview: (id: string, req: ShareRequest) => call<{ text: string; html: string }>('/share/preview', { id, ...req }),
   share: (id: string, chat: { id: string; name: string }, req: ShareRequest) => call<Release>('/share', { id, chatId: chat.id, chatName: chat.name, ...req }),
 };

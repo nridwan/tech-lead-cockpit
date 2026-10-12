@@ -1556,6 +1556,21 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string }>(req, 16 * 1024);
       return send(res, 200, await rm.mrPlan(idOf(body.id), String(body.serviceId ?? ''), body.sourceBranch ? String(body.sourceBranch) : undefined));
     }
+    if (route === 'POST /releases/mr/branch') {
+      const body = await readJson<{ id?: string; serviceId?: string; branch?: string; picks?: { sha?: string; title?: string }[] }>(req, 128 * 1024);
+      const picks = (Array.isArray(body.picks) ? body.picks : []).slice(0, 300).map((p) => ({ sha: String(p?.sha ?? ''), title: p?.title ? String(p.title).slice(0, 200) : undefined })).filter((p) => /^[0-9a-f]{7,40}$/i.test(p.sha));
+      const base = { ts: new Date().toISOString(), action: 'gitlab.branch.create' as const, spaceKey: 'GitLab', title: String(body.branch ?? '').slice(0, 100), attachments: 0 };
+      try {
+        const r = await rm.createReleaseBranch(idOf(body.id), String(body.serviceId ?? ''), { branch: String(body.branch ?? ''), picks });
+        await audit({ ...base, title: `Branch ${r.branch}: ${r.picked.length}/${picks.length} commit${r.failed ? ', berhenti di konflik' : ''}`, result: r.failed ? 'failure' : 'success', ...(r.failed ? { error: r.failed.error } : {}) }).catch(() => {});
+        return send(res, 200, r);
+      } catch (e) {
+        if (e instanceof ReleaseInputError) throw e;
+        await audit({ ...base, result: 'failure', error: (e as Error).message }).catch(() => {});
+        if (e instanceof GitLabError) return fail(res, e.status, { error: e.message, code: e.code === 'forbidden' ? 'unauthorized' : e.code });
+        throw e;
+      }
+    }
     if (route === 'POST /releases/mr/create') {
       const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; title?: string; description?: string }>(req, 128 * 1024);
       const base = { ts: new Date().toISOString(), action: 'gitlab.mr.create' as const, spaceKey: 'GitLab', title: String(body.title ?? '').slice(0, 200), attachments: 0 };
