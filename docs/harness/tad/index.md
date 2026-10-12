@@ -206,7 +206,8 @@ Fitur ini memungkinkan pengguna menyimpan perubahan TAD langsung ke Confluence s
   ```
 - **Integrasi Confluence Cloud v2 & Data Center v1** ([`connector/confluence.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/confluence.ts)):
   - Cloud v2 (`PUT /api/v2/pages/{id}`): Mengirim payload `{ id, status: "draft", title, body, version: { number: currentVersion } }`.
-  - DC v1 (`PUT /rest/api/content/{id}`): Mengirim payload `{ id, type: "page", status: "draft", title, version: { number: currentVersion }, body }`.
+  - DC v1 (`PUT /rest/api/content/{id}`): Mengirim payload `{ id, type: "page", status: "draft", title, version: { number: currentVersion }, body }` dengan parameter URL `?status=draft` serta fallback adaptif.
+  - Penanganan Attachment Draft (`upsertAttachment`): Memvalidasi lampiran diagram Mermaid pada halaman draft tanpa memicu error 404 (`status [current]`) dari API v1 legacy, dengan proteksi graceful degradation agar draft teks tidak gagal tersimpan.
   - Fallback Pencarian & Get Page: [`getPage`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/confluence.ts) dan [`findPage`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/confluence.ts) memeriksa status `current` dan melakukan fallback pengecekan `status=draft` agar draft halaman yang belum terpublikasi tetap terdeteksi.
 - **Audit Trail**: Audit event mencatat flag `isDraft` untuk transparansi riwayat aktivitas.
 

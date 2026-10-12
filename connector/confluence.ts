@@ -129,18 +129,38 @@ export class ConfluenceClient {
 
   /** Current version only (cheap: no body), to notice edits made directly in Confluence. Same v1 API on Cloud and DC. */
   async pageVersion(id: string): Promise<{ version: number; when?: string; by?: string }> {
-    const p = await this.request<{ version?: { number?: number; when?: string; by?: { displayName?: string; publicName?: string } } }>(
-      `/rest/api/content/${encodeURIComponent(id)}?expand=version`,
-    );
-    return { version: Number(p.version?.number ?? 0), when: p.version?.when, by: p.version?.by?.displayName ?? p.version?.by?.publicName };
+    try {
+      const p = await this.request<{ version?: { number?: number; when?: string; by?: { displayName?: string; publicName?: string } } }>(
+        `/rest/api/content/${encodeURIComponent(id)}?expand=version`,
+      );
+      return { version: Number(p.version?.number ?? 0), when: p.version?.when, by: p.version?.by?.displayName ?? p.version?.by?.publicName };
+    } catch (e) {
+      if (e instanceof ConfluenceError && e.status === 404) {
+        const p = await this.request<{ version?: { number?: number; when?: string; by?: { displayName?: string; publicName?: string } } }>(
+          `/rest/api/content/${encodeURIComponent(id)}?status=draft&expand=version`,
+        );
+        return { version: Number(p.version?.number ?? 0), when: p.version?.when, by: p.version?.by?.displayName ?? p.version?.by?.publicName };
+      }
+      throw e;
+    }
   }
 
   /** The page body as it was at `version` (the base for merging Confluence edits into a draft). */
   async pageAtVersion(id: string, version: number): Promise<{ version: number; storage: string }> {
-    const p = await this.request<{ version?: { number?: number }; body?: { storage?: { value?: string } } }>(
-      `/rest/api/content/${encodeURIComponent(id)}?status=historical&version=${version}&expand=body.storage,version`,
-    );
-    return { version: Number(p.version?.number ?? version), storage: p.body?.storage?.value ?? '' };
+    try {
+      const p = await this.request<{ version?: { number?: number }; body?: { storage?: { value?: string } } }>(
+        `/rest/api/content/${encodeURIComponent(id)}?status=historical&version=${version}&expand=body.storage,version`,
+      );
+      return { version: Number(p.version?.number ?? version), storage: p.body?.storage?.value ?? '' };
+    } catch (e) {
+      if (e instanceof ConfluenceError && e.status === 404) {
+        const p = await this.request<{ version?: { number?: number }; body?: { storage?: { value?: string } } }>(
+          `/rest/api/content/${encodeURIComponent(id)}?status=draft&expand=body.storage,version`,
+        );
+        return { version: Number(p.version?.number ?? version), storage: p.body?.storage?.value ?? '' };
+      }
+      throw e;
+    }
   }
 
   async findPage(spaceKey: string, title: string): Promise<PageInfo | null> {
@@ -205,11 +225,25 @@ export class ConfluenceClient {
       });
       return this.fromCloud(p, input.spaceKey);
     }
-    const p = await this.request<DcPage>(`/rest/api/content/${encodeURIComponent(input.id)}?expand=version,space`, {
-      method: 'PUT',
-      body: JSON.stringify({ id: input.id, type: 'page', status, title: input.title, version, body: { storage: { value: input.storage, representation: 'storage' } } }),
-    });
-    return this.fromDc(p);
+    const tryPut = (draftQuery: boolean) => {
+      const q = draftQuery ? '?status=draft&expand=version,space' : '?expand=version,space';
+      return this.request<DcPage>(`/rest/api/content/${encodeURIComponent(input.id)}${q}`, {
+        method: 'PUT',
+        body: JSON.stringify({ id: input.id, type: 'page', status, title: input.title, version, body: { storage: { value: input.storage, representation: 'storage' } } }),
+      });
+    };
+
+    const preferDraft = status === 'draft';
+    try {
+      const p = await tryPut(preferDraft);
+      return this.fromDc(p);
+    } catch (e) {
+      if (e instanceof ConfluenceError && e.status === 404) {
+        const p = await tryPut(!preferDraft);
+        return this.fromDc(p);
+      }
+      throw e;
+    }
   }
 
   /** Pages whose title contains `query` (CQL, same v1 endpoint on Cloud and Data Center), newest first. */
@@ -378,17 +412,37 @@ export class ConfluenceClient {
   }
 
   /** Creates the attachment, or adds a new version if one with the same filename exists. Same v1 API on Cloud and DC. */
-  async upsertAttachment(pageId: string, filename: string, data: Buffer, contentType: string): Promise<void> {
-    const existing = await this.request<{ results: { id: string }[] }>(
-      `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment?filename=${encodeURIComponent(filename)}`,
-    );
+  async upsertAttachment(pageId: string, filename: string, data: Buffer, contentType: string, isDraft = false): Promise<void> {
+    let existing: { results: { id: string }[] } = { results: [] };
+    const query = isDraft ? '?status=draft&' : '?';
+    try {
+      existing = await this.request<{ results: { id: string }[] }>(
+        `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment${query}filename=${encodeURIComponent(filename)}`,
+      );
+    } catch {
+      // Confluence Cloud often rejects querying child attachments on drafts with 404
+      // "No content found with id ... and status [current]". Fall back to treating as new attachment.
+      existing = { results: [] };
+      isDraft = true;
+    }
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(data)], { type: contentType }), filename);
     form.append('minorEdit', 'true');
-    const path = existing.results[0]
-      ? `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment/${existing.results[0].id}/data`
-      : `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment`;
-    await this.request(path, { method: 'POST', body: form, headers: { 'X-Atlassian-Token': 'no-check' } });
+    const draftQuery = isDraft ? '?status=draft' : '';
+    const path = existing.results?.[0]
+      ? `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment/${existing.results[0].id}/data${draftQuery}`
+      : `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment${draftQuery}`;
+    try {
+      await this.request(path, { method: 'POST', body: form, headers: { 'X-Atlassian-Token': 'no-check' } });
+    } catch (err) {
+      if (isDraft) {
+        // Confluence Cloud frequently restricts attachment uploads on unpublished drafts until published.
+        // Warn instead of blocking draft save.
+        console.warn(`[upsertAttachment] Gagal upload lampiran ${filename} ke draft #${pageId}:`, (err as Error).message);
+        return;
+      }
+      throw err;
+    }
   }
 
   private fromCloud(p: CloudPage, spaceKey: string, linksBase?: string): PageInfo {
