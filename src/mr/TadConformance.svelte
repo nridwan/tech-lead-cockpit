@@ -16,6 +16,9 @@
     type TaskMatch,
   } from '../lib/tad/task-links';
   import { drafts, draftTitle } from '../tad/drafts.svelte';
+  import BackgroundReviewCard from './BackgroundReviewCard.svelte';
+  import { reviews } from '../lib/review/client';
+  import { sameReviewScope, type ReviewJob } from '../lib/review/types';
 
   let {
     mr,
@@ -80,6 +83,8 @@
   let aiFor = $state('');
   let running = $state(false);
   let abort: AbortController | undefined;
+  /** When the inline check started, to tell whether it is newer than a background one. */
+  let aiAt = $state(0);
 
   // A different MR or task invalidates the AI result.
   const key = $derived(`${mr.ref}@${mr.headSha ?? ''}::${match?.draftId ?? ''}::${match?.task.title ?? ''}`);
@@ -93,6 +98,83 @@
       aiFor = '';
     }
   });
+
+  // ── Background check: runs in the connector (listed in Agent Tasks), survives leaving the page ──
+  let bgJobs = $state<ReviewJob[]>([]);
+  let bgFor = $state('');
+  let bgBusy = $state(false);
+  const bgJob = $derived(
+    match && bgFor === mr.webUrl ? bgJobs.find((j) => sameReviewScope(j, 'tad', { draftId: match.draftId, title: match.task.title })) : undefined,
+  );
+  const bgRunning = $derived(bgJob?.status === 'running');
+  /** A finished background check is shown unless an inline check of this task is newer (or running). */
+  const bgShown = $derived.by(() => {
+    if (bgJob?.status !== 'done' || !bgJob.reply) return false;
+    const inline = aiFor === key && Boolean(aiText || running);
+    return !inline || (!running && Date.parse(bgJob.finishedAt ?? bgJob.createdAt) > aiAt);
+  });
+  const resultText = $derived(bgShown ? (bgJob?.reply ?? '') : aiFor === key ? aiText : '');
+
+  async function loadBgJobs(url: string) {
+    try {
+      const list = (await reviews.list(url)).filter((j) => j.kind === 'tad');
+      if (mr.webUrl !== url) return;
+      bgJobs = list;
+      bgFor = url;
+    } catch {
+      /* connector unreachable: the inline check still works */
+    }
+  }
+
+  $effect(() => {
+    const url = mr.webUrl;
+    void loadBgJobs(url);
+  });
+
+  $effect(() => {
+    const url = mr.webUrl;
+    if (!bgRunning) return;
+    const t = setInterval(() => void loadBgJobs(url), 4000);
+    return () => clearInterval(t);
+  });
+
+  async function runInBackground() {
+    if (!match?.spec || bgRunning || bgBusy) return;
+    const m = match;
+    const draft = drafts.drafts.find((d) => d.id === m.draftId);
+    bgBusy = true;
+    try {
+      const job = await reviews.start({
+        kind: 'tad',
+        mr: { ref: mr.ref, webUrl: mr.webUrl, title: mr.title, headSha: mr.headSha, jiraKeys: mr.jiraKeys },
+        task: { draftId: m.draftId, title: m.task.title, ...(draft ? { tadTitle: draftTitle(draft) } : {}) },
+        prompt: conformancePrompt(m.spec!),
+        context: diffContext(mr),
+        ai: localAi,
+      });
+      bgJobs = [job, ...bgJobs.filter((j) => j.id !== job.id)];
+      bgFor = mr.webUrl;
+      toasts.show('Cek TAD berjalan di background. Boleh pindah halaman; hasilnya muncul di sini dan di Agent Tasks.', 'ok', 6000);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      bgBusy = false;
+    }
+  }
+
+  async function cancelBackground() {
+    const job = bgJob;
+    if (!job) return;
+    bgBusy = true;
+    try {
+      await reviews.cancel(job.id);
+      await loadBgJobs(job.mr.webUrl);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    } finally {
+      bgBusy = false;
+    }
+  }
 
   function diffContext(d: MrDetail): string {
     let body = `MR: ${d.ref} — ${d.title}\nBranch: ${d.sourceBranch} → ${d.targetBranch}\n\n`;
@@ -113,6 +195,7 @@
     running = true;
     aiText = '';
     aiFor = key;
+    aiAt = Date.now();
     conformanceCache.set(key, '');
     abort = new AbortController();
     try {
@@ -261,14 +344,21 @@
               <button class="btn btn-sm" onclick={() => abort?.abort()}><Icon name="x" size={12} /> Hentikan</button>
             {:else}
               <button class="btn btn-primary btn-sm" onclick={runAi}>
-                <Icon name="sparkles" size={13} /> {aiText && aiFor === key ? 'Cek ulang (Langsung)' : 'Bandingkan diff (Langsung)'}
+                <Icon name="sparkles" size={13} /> {resultText ? 'Cek ulang (Langsung)' : 'Bandingkan diff (Langsung)'}
               </button>
             {/if}
+            <button class="btn btn-sm" onclick={runInBackground} disabled={bgRunning || bgBusy} title="Cek dijalankan connector di background dan tercatat di Agent Tasks; boleh pindah halaman">
+              <Icon name="bot" size={13} /> {bgRunning ? 'Berjalan di background…' : 'Jalankan di background'}
+            </button>
           </div>
         </div>
         <p class="muted small">AI membandingkan diff dengan Description, Endpoint, Method, Header, Payload, dan Response task ini, lalu memberi checklist ✓ / ⚠ / ✗ beserta bukti.</p>
-        {#if aiText && aiFor === key}
-          <div class="md">{@html renderPreview(aiText).html}</div>
+        {#if bgJob}
+          <BackgroundReviewCard job={bgJob} headSha={mr.headSha} busy={bgBusy} oncancel={cancelBackground} />
+        {/if}
+        {#if resultText}
+          {#if bgShown}<p class="muted small">Hasil cek background di atas{bgJob?.ai.model ? ` (${bgJob.ai.model})` : ''}.</p>{/if}
+          <div class="md">{@html renderPreview(resultText).html}</div>
         {:else if running}
           <p class="muted">Membandingkan… (1–3 menit untuk MR besar)</p>
         {/if}

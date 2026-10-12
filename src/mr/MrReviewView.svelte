@@ -21,6 +21,9 @@
   import DiffFile from './DiffFile.svelte';
   import TadConformance from './TadConformance.svelte';
   import JiraPanel from './JiraPanel.svelte';
+  import BackgroundReviewCard from './BackgroundReviewCard.svelte';
+  import { reviews } from '../lib/review/client';
+  import type { ReviewJob } from '../lib/review/types';
   import { verdictOf, type ReviewVerdict } from '../lib/tad/task-links';
 
   const AI_KEY = 'tlc.ai.mrReview';
@@ -63,7 +66,7 @@
   /** Drives the suggested Jira move: merged MRs move on regardless of the review text. */
   const reviewVerdict = $derived.by((): ReviewVerdict | undefined => {
     if (mr?.state === 'merged') return 'merged';
-    return aiText && mr && aiFor === mr.ref ? verdictOf(aiText) : undefined;
+    return reviewText ? verdictOf(reviewText) : undefined;
   });
   let jiraBase = $state<string | undefined>();
   let fileFilter = $state('');
@@ -90,6 +93,91 @@
   let aiRunning = $state(false);
   let aiFor = $state<string | null>(null);
   let aiAbort: AbortController | undefined;
+  /** When the inline review started, to tell whether it is newer than a background one. */
+  let aiAt = $state(0);
+
+  // ── Background review: runs in the connector (listed in Agent Tasks), survives leaving the page ──
+  let bgJobs = $state<ReviewJob[]>([]);
+  let bgFor = $state('');
+  let bgBusy = $state(false);
+  const bgJob = $derived(mr && bgFor === mr.webUrl ? bgJobs.find((j) => j.kind === 'mr') : undefined);
+  const bgRunning = $derived(bgJob?.status === 'running');
+  /** A finished background review is shown unless an inline review of this MR is newer (or running). */
+  const bgShown = $derived.by(() => {
+    if (bgJob?.status !== 'done' || !bgJob.reply) return false;
+    const inline = Boolean(mr && aiFor === mr.ref && (aiText || aiRunning));
+    return !inline || (!aiRunning && Date.parse(bgJob.finishedAt ?? bgJob.createdAt) > aiAt);
+  });
+  const reviewText = $derived(bgShown ? (bgJob?.reply ?? '') : mr && aiFor === mr.ref ? aiText : '');
+
+  async function loadBgJobs(url: string) {
+    try {
+      const list = await reviews.list(url);
+      if (mr?.webUrl !== url) return;
+      const before = bgFor === url ? bgJobs.find((j) => j.kind === 'mr') : undefined;
+      const after = list.find((j) => j.kind === 'mr');
+      if (before?.status === 'running' && after?.id === before.id && after.status !== 'running') {
+        toasts.show(after.status === 'done' ? `Review background ${after.mr.ref} selesai.` : `Review background ${after.mr.ref}: ${after.error ?? after.status}`, after.status === 'done' ? 'ok' : 'err');
+      }
+      bgJobs = list;
+      bgFor = url;
+    } catch {
+      /* connector unreachable: the inline review still works */
+    }
+  }
+
+  $effect(() => {
+    const url = mr?.webUrl;
+    if (url) void loadBgJobs(url);
+  });
+
+  // Poll while this MR has a review running in the background (the TAD check polls its own).
+  $effect(() => {
+    const url = mr?.webUrl;
+    if (!url || !bgRunning) return;
+    const t = setInterval(() => void loadBgJobs(url), 4000);
+    return () => clearInterval(t);
+  });
+
+  async function runReviewInBackground() {
+    if (!mr || bgRunning || bgBusy) return;
+    const d = mr;
+    bgBusy = true;
+    try {
+      const job = await reviews.start({
+        kind: 'mr',
+        mr: { ref: d.ref, webUrl: d.webUrl, title: d.title, headSha: d.headSha, jiraKeys: d.jiraKeys },
+        prompt: buildMrReviewPrompt({ strictness, customInstruction }),
+        context: reviewContext(d),
+        strictness,
+        ai,
+      });
+      if (mr?.webUrl === d.webUrl) {
+        bgJobs = [job, ...bgJobs.filter((j) => j.id !== job.id)];
+        bgFor = d.webUrl;
+        tab = 'ai';
+      }
+      toasts.show('Review berjalan di background. Boleh pindah halaman; hasilnya muncul di sini dan di Agent Tasks.', 'ok', 6000);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      bgBusy = false;
+    }
+  }
+
+  async function cancelBackground() {
+    const job = bgJob;
+    if (!job) return;
+    bgBusy = true;
+    try {
+      await reviews.cancel(job.id);
+      await loadBgJobs(job.mr.webUrl);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    } finally {
+      bgBusy = false;
+    }
+  }
 
 
   const items = $derived.by(() => {
@@ -217,6 +305,7 @@
     aiRunning = true;
     aiText = '';
     aiFor = d.ref;
+    aiAt = Date.now();
     tab = 'ai';
     aiAbort = new AbortController();
     const prompt = buildMrReviewPrompt({ strictness, customInstruction });
@@ -268,7 +357,7 @@
   }
 
   function copyReview() {
-    void navigator.clipboard.writeText(aiText);
+    void navigator.clipboard.writeText(reviewText);
     toasts.show('Hasil review disalin.', 'ok');
   }
 
@@ -381,6 +470,9 @@
             <button class="btn btn-primary btn-sm" onclick={runReview} disabled={aiRunning} title="Tingkat ketelitian: {activeStrictnessOption.label}">
               <Icon name="sparkles" size={13} /> {aiRunning ? 'Mereview…' : `Review AI (${activeStrictnessOption.badge})`}
             </button>
+            <button class="btn btn-sm" onclick={runReviewInBackground} disabled={bgRunning || bgBusy} title="Jalankan review di background (Agent Tasks); boleh pindah halaman">
+              <Icon name="bot" size={13} /> {bgRunning ? 'Background berjalan…' : 'Background'}
+            </button>
           </div>
           <h2>{mr.title}</h2>
           <div class="meta">
@@ -416,7 +508,7 @@
           <button role="tab" class:active={tab === 'commits'} aria-selected={tab === 'commits'} onclick={() => (tab = 'commits')}>Commit ({mr.commits.length})</button>
           <button role="tab" class:active={tab === 'tad'} aria-selected={tab === 'tad'} onclick={() => (tab = 'tad')}>Kesesuaian TAD</button>
           <button role="tab" class:active={tab === 'ai'} aria-selected={tab === 'ai'} onclick={() => (tab = 'ai')}>
-            Review AI {#if aiRunning}<span class="pulse"></span>{/if}
+            Review AI {#if aiRunning || bgRunning}<span class="pulse"></span>{/if}
           </button>
         </div>
 
@@ -545,16 +637,23 @@
                 {#if aiRunning}
                   <button class="btn" onclick={stopReview}><Icon name="x" size={13} /> Hentikan</button>
                 {:else}
-                  <button class="btn btn-primary" onclick={runReview}><Icon name="sparkles" size={13} /> {aiText && aiFor === mr.ref ? 'Review ulang' : 'Mulai review'}</button>
+                  <button class="btn btn-primary" onclick={runReview}><Icon name="sparkles" size={13} /> {reviewText ? 'Review ulang' : 'Mulai review'}</button>
                 {/if}
-                {#if aiText && !aiRunning}<button class="btn" onclick={copyReview}><Icon name="copy" size={13} /> Salin</button>{/if}
+                <button class="btn" onclick={runReviewInBackground} disabled={bgRunning || bgBusy} title="Review dijalankan connector di background dan tercatat di Agent Tasks; boleh pindah halaman">
+                  <Icon name="bot" size={13} /> {bgRunning ? 'Berjalan di background…' : 'Jalankan di background'}
+                </button>
+                {#if reviewText && !aiRunning}<button class="btn" onclick={copyReview}><Icon name="copy" size={13} /> Salin</button>{/if}
               </div>
               <p class="muted small">
                 Diff dikirim ke model yang dipilih untuk dianalisis: temuan bug/keamanan, kualitas, dan <strong>task terdeteksi beserta evidence</strong>.
                 Hasilnya draft untuk kamu; tidak ada yang dikirim ke GitLab.
               </p>
-              {#if aiText && aiFor === mr.ref}
-                <div class="md review">{@html renderPreview(aiText).html}</div>
+              {#if bgJob}
+                <BackgroundReviewCard job={bgJob} headSha={mr.headSha} busy={bgBusy} oncancel={cancelBackground} />
+              {/if}
+              {#if reviewText}
+                {#if bgShown}<p class="muted small">Hasil review background di atas{bgJob?.ai.model ? ` (${bgJob.ai.model})` : ''}.</p>{/if}
+                <div class="md review">{@html renderPreview(reviewText).html}</div>
               {:else if aiRunning}
                 <p class="muted">Menganalisis diff… (bisa 1–3 menit untuk MR besar)</p>
               {/if}

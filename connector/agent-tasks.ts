@@ -25,7 +25,7 @@ export type AgentTaskPriority = (typeof AGENT_TASK_PRIORITIES)[number];
 export const AGENT_APPROVAL_POLICIES = ['review_required', 'auto_approve'] as const;
 export type AgentApprovalPolicy = (typeof AGENT_APPROVAL_POLICIES)[number];
 
-/** What the task is: a free prompt, an MR review, implementing a TAD task in code, or a code trace question. */
+/** What the task is: a free prompt, a background MR review / TAD conformance check, implementing a TAD task in code, a code trace question, or an E2E agent. */
 export const AGENT_TASK_KINDS = ['general', 'review', 'implement', 'trace', 'e2e'] as const;
 export type AgentTaskKind = (typeof AGENT_TASK_KINDS)[number];
 
@@ -52,8 +52,10 @@ export interface AgentTaskLinks {
   /** E2E pipeline agent (connector/qa) behind an `e2e` task, and its project. */
   qaJobId?: string;
   qaProjectId?: string;
+  /** Background MR review (connector/review) behind a `review` task. */
+  reviewId?: string;
 }
-const LINK_KEYS = ['draftId', 'tadTitle', 'taskTitle', 'jiraKey', 'repo', 'branch', 'mrUrl', 'coderRunId', 'traceId', 'qaJobId', 'qaProjectId'] as const;
+const LINK_KEYS = ['draftId', 'tadTitle', 'taskTitle', 'jiraKey', 'repo', 'branch', 'mrUrl', 'coderRunId', 'traceId', 'qaJobId', 'qaProjectId', 'reviewId'] as const;
 
 const TERMINAL: ReadonlySet<AgentTaskStatus> = new Set(['completed', 'failed', 'cancelled']);
 const PRIORITY_RANK: Record<AgentTaskPriority, number> = { low: 0, normal: 1, high: 2, urgent: 3 };

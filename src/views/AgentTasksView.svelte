@@ -5,6 +5,8 @@
   import AgentTaskLogViewer from '../components/AgentTaskLogViewer.svelte';
   import AiPicker from '../components/AiPicker.svelte';
   import TraceResult from './TraceResult.svelte';
+  import ReviewTaskResult from './ReviewTaskResult.svelte';
+  import { OPEN_MR_KEY } from '../lib/gitlab/client';
   import { loadAiSelection, saveAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { traces as codeTraces } from '../lib/trace/client';
@@ -37,6 +39,17 @@
   let traceAi = $state<AiSelection>(loadAiSelection('generator'));
   let tracing = $state(false);
   let openTrace = $state<string | null>(null);
+  let openReview = $state<string | null>(null);
+
+  /** Opens the MR on the MR Review page, where the background result is shown too. */
+  function openMr(url: string) {
+    try {
+      sessionStorage.setItem(OPEN_MR_KEY, url);
+    } catch {
+      /* the page still opens, without the MR preselected */
+    }
+    location.hash = '#/mr';
+  }
 
   async function startTrace(e: SubmitEvent) {
     e.preventDefault();
@@ -151,7 +164,7 @@
   async function cancel(t: AgentTask) {
     const ok = await confirmDialog({
       title: 'Batalkan run?',
-      message: `Agent coding untuk "${t.title}" akan dihentikan.`,
+      message: t.kind === 'review' ? `Review "${t.title}" akan dihentikan.` : `Agent coding untuk "${t.title}" akan dihentikan.`,
       confirmText: 'Batalkan',
       danger: true,
     });
@@ -196,7 +209,7 @@
     <div>
       <h1>Agent Tasks</h1>
       <p class="muted">
-        Semua agent lokal di satu tempat: trace logic code, agent tracing bug (analisa di background), lalu agent coding untuk task TAD dan task dari analisa bug. Diff, push, dan review
+        Semua agent lokal di satu tempat: trace logic code, review MR di background, agent tracing bug (analisa di background), lalu agent coding untuk task TAD dan task dari analisa bug. Diff, push, dan review
         tetap di tanganmu; task otomatis selesai saat MR-nya merged.
       </p>
     </div>
@@ -303,6 +316,30 @@
                 <button class="btn btn-sm btn-danger" disabled={busy[t.id]} onclick={() => cancel(t)}><Icon name="x" size={14} /> Batalkan</button>
               {/if}
             </div>
+            {:else if t.kind === 'review'}
+            <div class="actions">
+              {#if t.links?.reviewId}
+                <button class="btn btn-sm btn-primary" onclick={() => (openReview = openReview === t.id ? null : t.id)}>
+                  <Icon name="eye" size={14} /> {openReview === t.id ? 'Tutup hasil' : 'Lihat hasil review'}
+                </button>
+              {/if}
+              {#if t.links?.mrUrl}
+                {@const mrUrl = t.links.mrUrl}
+                <button class="btn btn-sm" onclick={() => openMr(mrUrl)}><Icon name="merge" size={14} /> Buka di MR Review</button>
+              {/if}
+              {#if t.status === 'queued' || t.status === 'running'}
+                <button class="btn btn-sm btn-danger" disabled={busy[t.id]} onclick={() => cancel(t)}><Icon name="x" size={14} /> Batalkan</button>
+              {/if}
+              <button class="btn btn-sm btn-ghost" onclick={() => toggleTaskLog(t.id)} title="Cek log progress review">
+                <Icon name="list" size={14} /> {expandedLogId === t.id ? 'Tutup log' : 'Log progress'}
+              </button>
+            </div>
+            {#if openReview === t.id && t.links?.reviewId}
+              <ReviewTaskResult reviewId={t.links.reviewId} onchange={refresh} />
+            {/if}
+            {#if expandedLogId === t.id}
+              <AgentTaskLogViewer taskId={t.id} task={t} />
+            {/if}
             {:else if t.kind === 'trace'}
             <div class="actions">
               {#if t.links?.traceId}

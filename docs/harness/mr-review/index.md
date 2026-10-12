@@ -59,6 +59,8 @@ sequenceDiagram
 | [`src/mr/TadConformance.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/mr/TadConformance.svelte) | Pemeriksa Kepatuhan TAD | Memvalidasi apakah file yang diubah pada MR sesuai dengan batasan scope yang telah ditetapkan pada dokumen TAD terkait. |
 | [`src/lib/gitlab/client.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/gitlab/client.ts) | GitLab Frontend Client | Wrapper komunikasi fetch dari browser ke backend Connector `/api/connector/gitlab/*`. |
 | [`src/lib/gitlab/types.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/gitlab/types.ts) | Tipe Data & Kontrak | Definisi TypeScript untuk `MrDetail`, `MrSummary`, `DiffFile`, `PipelineStatus`, `ReviewStrictness`, dan builder prompt review AI. |
+| [`src/mr/BackgroundReviewCard.svelte`](../../../src/mr/BackgroundReviewCard.svelte) | Status Review Background | Kartu status review background terakhir untuk MR/task TAD: status, model, progres, error, peringatan bila diff sudah berubah (head SHA beda), tombol Batalkan dan tautan ke Agent Tasks. |
+| [`src/lib/review/types.ts`](../../../src/lib/review/types.ts) · [`client.ts`](../../../src/lib/review/client.ts) | Kontrak Review Background | `ReviewJob`, `StartReviewRequest`, `sameReviewScope()`, dan client `/api/connector/reviews`. |
 
 ### Backend Connector (`connector/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
@@ -66,6 +68,8 @@ sequenceDiagram
 | [`connector/gitlab.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/gitlab.ts) | GitLab API Client | Client REST API GitLab v4: fetching MR list, parsing URL proyek, pagination diff, deteksi Jira issue key regex, dan penanganan timeout/retry. |
 | [`connector/gitlab-manual.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/gitlab-manual.ts) | Manual MR Store | Penyimpanan mapping manual antara Jira key dan MR URL ketika auto-detection regex gagal mendeteksi issue key. |
 | [`connector/git-review.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/git-review.ts) | Git Repo Resolver | Helper untuk menyelesaikan path repositori lokal di disk pengguna guna membaca konteks branch atau git history. |
+| [`connector/review/manager.ts`](../../../connector/review/manager.ts) | Review Background | `ReviewManager`: menjalankan review MR / cek TAD di background lewat `startProviderRun` mode teks (prompt sistem `code-review` + strictness, sama dengan review inline; timeout 15 menit), simpan job di `~/.tech-lead-cockpit/reviews/<id>.json`, batas 4 review berjalan, tolak review ganda untuk MR+scope yang sama, bisa dibatalkan, job yang tertinggal saat restart ditutup sebagai gagal. |
+| [`connector/review/agent-sync.ts`](../../../connector/review/agent-sync.ts) | Sinkronisasi Agent Tasks | `syncReviewJob()`: satu Agent Task kind `review` (runner `local`) per job, link `reviewId`/`mrUrl`/`jiraKey` (+`draftId`/`taskTitle` untuk cek TAD); ringkasan task = isi bagian Kesimpulan. |
 | [`connector/jira-transition.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/jira-transition.ts) | Guarded Jira Transition | Mesin transisi Jira dengan validasi prasyarat (verifikasi `head_sha` MR, pemeriksaan status saat ini, pencocokan nama transisi aktual dari metadata Jira). |
 
 ---
@@ -83,6 +87,16 @@ MR otomatis diberi tanda peringatan jika perubahannya menyentuh:
 - **API Contract**: Route, proto files, OpenAPI specs, GraphQL schemas yang berpotensi menyebabkan *breaking changes*.
 - **Ukuran Diff Ekstrem**: Perubahan lebih dari 500 baris atau menyentuh lebih dari 20 file.
 - **Ketiadaan Test**: Perubahan pada kode produksi tanpa disertai penambahan/modifikasi unit test atau integration test.
+
+### Review di Background (Agent Tasks)
+Selain review inline (streaming `/ai/assistant/chat`, berhenti bila halaman ditinggalkan), tab **Review AI** dan **Kesesuaian TAD** punya tombol **Jalankan di background**:
+
+1. Halaman mengirim data yang sudah dimuat (metadata MR, diff ter-batas, instruksi dari `buildMrReviewPrompt()` / `conformancePrompt()`, pilihan AI dari AiPicker) ke `POST /api/connector/reviews` → `202` + job `running`.
+2. Connector menjalankan AI tanpa terikat halaman; progres dan event (maks 200) tersimpan di job dan dicerminkan ke Agent Tasks (kind `review`).
+3. Saat MR dibuka lagi, halaman memanggil `GET /reviews?mrUrl=…` dan menampilkan kartu status; hasil yang selesai ditampilkan di tab (kecuali review inline yang lebih baru), dan dipakai untuk saran transisi Jira.
+4. Di Agent Tasks: *Lihat hasil review*, *Buka di MR Review*, *Batalkan*, dan *Log progress* (`GET /agent-tasks/:id` mengembalikan `review` + `events`). Revisi/steer tidak tersedia; review diulang dari halaman MR.
+
+Route: `GET /reviews[?mrUrl=]`, `GET /reviews/one?id=`, `POST /reviews`, `POST /reviews/cancel`. Sinkronisasi "MR merged → task selesai" mengabaikan task `review`.
 
 ### Standar Strictness AI Review
 Tersedia tiga tingkatan ketelitian review ([`ReviewStrictness`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/gitlab/types.ts)):

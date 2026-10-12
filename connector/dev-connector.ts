@@ -38,6 +38,9 @@ import { JiraLoadError, jiraCandidates, jiraLoads } from './estimate/jira-load.t
 import { BugInputError, BugManager } from './bugs/manager.ts';
 import { TraceInputError, TraceManager } from './trace/manager.ts';
 import { syncTraceTurn } from './trace/agent-sync.ts';
+import { ReviewInputError, ReviewManager } from './review/manager.ts';
+import { syncReviewJob } from './review/agent-sync.ts';
+import type { StartReviewRequest } from '../src/lib/review/types.ts';
 import { syncQaAgent } from './qa/agent-sync.ts';
 import { TaskPeakStore } from './task-peaks.ts';
 import { bugFixSpec } from './bugs/analysis.ts';
@@ -93,6 +96,8 @@ export interface ConnectorDeps {
   agentRuntime?: () => AgentRuntime;
   /** Code traces; defaults to the process-wide manager. Tests inject one with a fake AI. */
   traceManager?: (deps: ConnectorDeps) => TraceManager;
+  /** Background MR reviews; defaults to the process-wide manager. Tests inject one with a fake AI. */
+  reviewManager?: (deps: ConnectorDeps) => ReviewManager;
   /** Furthest stage per task (anti-regression); defaults to ~/.tech-lead-cockpit/task-peaks.json. */
   taskPeaks?: TaskPeakStore;
   /** E2E test manager; defaults to the process-wide singleton. */
@@ -306,6 +311,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
       if (url.pathname.startsWith(`${PREFIX}/chat/`)) return await handleGeneratorJobs(route, url, req, res);
       if (url.pathname === `${PREFIX}/bugs` || url.pathname.startsWith(`${PREFIX}/bugs/`)) return await handleBugs(route, url, req, res, env, deps);
       if (url.pathname === `${PREFIX}/traces` || url.pathname.startsWith(`${PREFIX}/traces/`)) return await handleTraces(route, url, req, res, deps);
+      if (url.pathname === `${PREFIX}/reviews` || url.pathname.startsWith(`${PREFIX}/reviews/`)) return await handleReviews(route, url, req, res, deps);
       if (route === 'GET /progress/task-peaks') return send(res, 200, await (deps.taskPeaks ?? defaultTaskPeaks).read());
       if (route === 'POST /progress/task-peaks') {
         const body = await readJson<{ peaks?: Record<string, unknown> }>(req, 512 * 1024);
@@ -1310,6 +1316,51 @@ async function handleTraces(route: string, url: URL, req: IncomingMessage, res: 
   }
 }
 
+const reviewGlobal = globalThis as typeof globalThis & { __tlcReviews?: ReviewManager; __tlcReviewsModule?: symbol };
+const REVIEWS_MODULE = Symbol('reviews-module');
+
+/** Same lifecycle as the trace manager: rebuilt after a reload unless a review is running. */
+function reviewManager(deps: ConnectorDeps): ReviewManager {
+  const existing = reviewGlobal.__tlcReviews;
+  if (existing && reviewGlobal.__tlcReviewsModule !== REVIEWS_MODULE && !(typeof existing.isBusy === 'function' && existing.isBusy())) reviewGlobal.__tlcReviews = undefined;
+  if (!reviewGlobal.__tlcReviews) reviewGlobal.__tlcReviewsModule = REVIEWS_MODULE;
+  reviewGlobal.__tlcReviews ??= new ReviewManager({
+    // Text mode, like the inline review: the diff comes from the page, the AI gets no file tools.
+    runAi: (ai, prompt, opts) => {
+      const run = startProviderRun(ai, 'text', prompt, {
+        cwd: process.cwd(),
+        timeoutMs: opts.timeoutMs,
+        systemPrompt: opts.systemPrompt,
+        onEvent: (e) => opts.onEvent(e),
+      });
+      return { done: run.done, cancel: () => (run.child ? terminateProviderProcess(run.child) : run.abort?.()) };
+    },
+    sink: (job) => syncReviewJob((deps.agentRuntime ?? (() => agentRuntime()))().store, job),
+  });
+  return reviewGlobal.__tlcReviews;
+}
+
+function reviewError(e: unknown): unknown {
+  if (e instanceof ReviewInputError) return new ConfluenceError(e.message, e.status, e.status === 404 ? 'not-found' : e.status === 409 ? 'conflict' : 'bad-request');
+  return e;
+}
+
+async function handleReviews(route: string, url: URL, req: IncomingMessage, res: ServerResponse, deps: ConnectorDeps) {
+  const reviews = (deps.reviewManager ?? reviewManager)(deps);
+  try {
+    if (route === 'GET /reviews') return send(res, 200, await reviews.list({ mrUrl: url.searchParams.get('mrUrl') ?? undefined }));
+    if (route === 'GET /reviews/one') return send(res, 200, await reviews.get(url.searchParams.get('id') ?? ''));
+    if (!route.startsWith('POST ')) return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
+    // The diff is sent along, so this body is larger than the other agent routes.
+    const body = await readJson<Record<string, unknown>>(req, 2 * 1024 * 1024);
+    if (route === 'POST /reviews') return send(res, 202, await reviews.start(body as unknown as StartReviewRequest));
+    if (route === 'POST /reviews/cancel') return send(res, 200, await reviews.cancel(String(body.id ?? '')));
+    return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
+  } catch (e) {
+    throw reviewError(e);
+  }
+}
+
 async function handleBugs(route: string, url: URL, req: IncomingMessage, res: ServerResponse, env: Env, deps: ConnectorDeps) {
   const bugs = bugManager(env);
   try {
@@ -1513,7 +1564,8 @@ async function syncMergedTasksFromGitLab(store: Pick<AgentTaskStore, 'list' | 'u
   try {
     const { client } = await loadGitLab(env);
     if (!client) return 0;
-    const tasks = await store.list({ status: ['blocked', 'running', 'queued', 'pending'] });
+    // Reviews finish on their own; a merged MR says nothing about whether its review is done.
+    const tasks = (await store.list({ status: ['blocked', 'running', 'queued', 'pending'] })).filter((t) => t.kind !== 'review');
     const jiraKeys = [...new Set(tasks.map((t) => t.links?.jiraKey).filter((k): k is string => Boolean(k)))];
     if (!jiraKeys.length) return 0;
 
@@ -1585,6 +1637,7 @@ async function handleAgents(route: string, url: URL, req: IncomingMessage, res: 
 
     const current = await requireTask();
     if (current.kind === 'trace') return await traceTaskAction(res, req, rt, current, method, action, deps);
+    if (current.kind === 'review') return await reviewTaskAction(res, req, rt, current, method, action, deps);
     if (current.kind === 'e2e') return await e2eTaskAction(res, req, rt, current, method, action, deps);
 
     // Local coding tasks are driven by coder-runs.
@@ -1648,6 +1701,31 @@ async function e2eTaskAction(res: ServerResponse, req: IncomingMessage, rt: Agen
     }
     default:
       throw new ConfluenceError('Agent E2E dikelola dari tab E2E di halaman proyek.', 409, 'conflict');
+  }
+}
+
+/** Agent Tasks actions on a background MR review: view its result and log, or cancel it. */
+async function reviewTaskAction(res: ServerResponse, req: IncomingMessage, rt: AgentRuntime, task: AgentTask, method: string, action: string | undefined, deps: ConnectorDeps) {
+  const reviews = (deps.reviewManager ?? reviewManager)(deps);
+  const reviewId = task.links?.reviewId ?? '';
+  try {
+    if (method === 'GET') {
+      // Reading it also closes a review left running by a restart, so the task follows.
+      const review = await reviews.get(reviewId).catch(() => null);
+      const events = (review?.events ?? []).map((e) => ({ at: e.at, event: `local.${e.kind}`, data: JSON.stringify(e.text) }));
+      return send(res, 200, { task: (await rt.store.get(task.id)) ?? task, events, review });
+    }
+    await readAgentBody(req);
+    switch (action) {
+      case 'cancel':
+      case 'stop':
+        await reviews.cancel(reviewId);
+        return send(res, 200, { task: (await rt.store.get(task.id)) ?? task });
+      default:
+        throw new ConfluenceError('Review MR dijalankan ulang dari halaman MR Review.', 409, 'conflict');
+    }
+  } catch (e) {
+    throw reviewError(e);
   }
 }
 

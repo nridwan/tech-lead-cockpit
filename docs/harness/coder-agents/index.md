@@ -43,7 +43,7 @@ graph TD
 ### Frontend (`src/coder/`, `src/views/`, `src/lib/coder/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
-| [`src/views/AgentTasksView.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/views/AgentTasksView.svelte) | Halaman Agent Tasks | Dashboard sentral seluruh run coding agent: status (`queued`, `running`, `completed`, `failed`), waktu eksekusi, tombol kontrol (Pause, Cancel, Review). |
+| [`src/views/AgentTasksView.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/views/AgentTasksView.svelte) | Halaman Agent Tasks | Dashboard sentral seluruh run coding agent: status (`queued`, `running`, `completed`, `failed`), waktu eksekusi, tombol kontrol (Pause, Cancel, Review). Juga menampilkan review MR / cek TAD yang berjalan di background (kind `review`, lihat [MR Review](../mr-review/index.md#review-di-background-agent-tasks)) dengan hasil via [`ReviewTaskResult.svelte`](../../../src/views/ReviewTaskResult.svelte). |
 | [`src/coder/AgentRunsPanel.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/coder/AgentRunsPanel.svelte) | Panel Antrean Agent | Menampilkan task-task yang sedang berjalan atau antre untuk dieksekusi secara paralel berdasarkan batas konkurensi. |
 | [`src/coder/StartAgentsDialog.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/coder/StartAgentsDialog.svelte) | Dialog Peluncuran Agent | Modal untuk memilih task dari TAD, memetakan repositori target, memilih profil (Backend/Frontend), dan menentukan base branch. |
 | [`src/coder/AgentDiffReviewModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/coder/AgentDiffReviewModal.svelte) | Modal Review Diff | Menampilkan perbandingan diff lengkap dari hasil kerja agent sebelum diizinkan push ke GitLab. |
