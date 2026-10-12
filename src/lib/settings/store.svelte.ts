@@ -23,7 +23,7 @@ type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]>
  */
 class SettingsState {
   value = $state<AppSettings>(DEFAULT_SETTINGS);
-  secrets = $state<Record<SecretId, boolean>>({ confluence: false, jira: false, gitlab: false, inferhub: false, ninerouter: false });
+  secrets = $state<Record<SecretId, boolean>>({ confluence: false, jira: false, gitlab: false, inferhub: false, ninerouter: false, figma: false });
   envOnly = $state<string[]>([]);
   loaded = $state(false);
   error = $state('');

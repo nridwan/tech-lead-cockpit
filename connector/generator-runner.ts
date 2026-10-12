@@ -4,7 +4,9 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { collapseEmbeddedHtml, expandEmbeddedHtml } from '../src/lib/markdown/embedded-html.ts';
+import type { FigmaFetchedSet } from '../src/lib/figma/types.ts';
 import { isPdfEncrypted } from './workspace-docs.ts';
+import { readFetchedSets } from './figma.ts';
 import { DATA_DIR } from './paths.ts';
 
 /** File tools only (no shell); edits outside the workspace are not auto-approved. */
@@ -76,6 +78,21 @@ export function isValidDraftId(id: unknown): id is string {
   return typeof id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(id);
 }
 
+/** How the AI should use the Figma screens Cockpit fetched into figma/ (images only for CLI providers). */
+export function figmaContextLine(sets: FigmaFetchedSet[], provider: RunChatOptions['provider']): string {
+  const list = sets
+    .map((s) => `figma/${s.id}/index.md (${s.title ? `${s.title}, ` : ''}${s.fileName}, ${s.screens.length} layar${s.stale ? ', desain sudah berubah sejak diambil' : ''})`)
+    .join('; ');
+  const textOnly = provider === 'inferhub' || provider === '9router';
+  return [
+    `- figma/: layar desain yang diambil Cockpit dari Figma: ${list}.`,
+    textOnly
+      ? 'Baca index.md tiap set: berisi daftar layar dan seluruh teks yang terlihat di tiap layar (judul, label field, tombol, pesan). Jangan membuka file PNG (tidak bisa dibaca sebagai teks).'
+      : 'Baca index.md tiap set (daftar layar dan seluruh teks di tiap layar), lalu buka gambar PNG layar yang relevan untuk memahami tampilan, field, state, dan alurnya.',
+    'Jadikan ini acuan task UI (slicing, field, validasi, state kosong/error) dan integrasi API, sebut nama layarnya di task terkait, dan cantumkan link Figma-nya.',
+  ].join(' ');
+}
+
 /** Writes PRD.md and TAD.md into the draft's workspace and builds the prompt for the CLI. */
 export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<PreparedWorkspace> {
   // draftId becomes a directory name; reject anything that could escape the workspaces root.
@@ -109,6 +126,7 @@ export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<P
     const body = ['# Link Figma', '', ...figma.map((f) => `- ${f.title ? `${f.title}: ` : ''}${f.url}`)].join('\n');
     await fs.promises.writeFile(path.join(workspaceDir, 'figma-links.md'), body, 'utf-8');
   }
+  const figmaSets = await readFetchedSets(path.join(workspaceDir, 'figma'));
   let docs: string[] = [];
   try {
     docs = await fs.promises.readdir(path.join(workspaceDir, 'docs'));
@@ -142,7 +160,12 @@ export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<P
     opts.existingTad
       ? '- PRD.md: requirement produk bila sudah diimpor. Jika isinya "Belum diimpor", jangan mengarang requirement di luar TAD.md dan permintaan user.'
       : '- PRD.md: requirement produk (sumber utama).',
-    figma.length ? '- figma-links.md: link desain Figma. Kamu tidak bisa membuka Figma; cantumkan link-nya pada task UI terkait dan gunakan ekspor layar di docs/ bila ada.' : '',
+    figma.length
+      ? figmaSets.length
+        ? '- figma-links.md: link desain Figma. Layar dari link yang sudah diambil ada di figma/ (lihat poin berikut); untuk link lain kamu tidak bisa membuka Figma, cukup cantumkan link-nya pada task UI terkait.'
+        : '- figma-links.md: link desain Figma. Kamu tidak bisa membuka Figma; cantumkan link-nya pada task UI terkait dan gunakan ekspor layar di docs/ bila ada.'
+      : '',
+    figmaSets.length ? figmaContextLine(figmaSets, opts.provider) : '',
     readableDocs.length ? `- docs/: dokumen pendukung (${readableDocs.join(', ')}), misalnya dokumentasi API partner atau ekspor layar Figma. Baca seluruhnya.` : '',
     encryptedDocs.length
       ? `- PERINGATAN DOKUMEN: File (${encryptedDocs.join(', ')}) di folder docs/ terenkripsi/berproteksi sandi dan tidak dapat dibaca oleh AI. JANGAN membuka atau memanggil tool view_file pada file tersebut karena akan memicu error 400 (INVALID_ARGUMENT). Sampaikan ke user di chat bahwa file tersebut perlu dibuka dengan password lewat menu Dokumen Partner di Cockpit.`

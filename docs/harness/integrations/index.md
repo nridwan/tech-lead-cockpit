@@ -1,6 +1,6 @@
 # Harness: External Integrations & AI Providers
 
-Modul ini mendokumentasikan seluruh adapter integrasi eksternal di **Tech Lead Cockpit**: Atlassian Jira, Confluence, GitLab, Microsoft Teams, AI Provider Drivers (Claude CLI, Antigravity CLI, InferHub, 9Router), dan macOS Keychain adapter.
+Modul ini mendokumentasikan seluruh adapter integrasi eksternal di **Tech Lead Cockpit**: Atlassian Jira, Confluence, GitLab, Figma, Microsoft Teams, AI Provider Drivers (Claude CLI, Antigravity CLI, InferHub, 9Router), dan macOS Keychain adapter.
 
 ---
 
@@ -54,6 +54,27 @@ graph TD
 | [`connector/gitlab.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/gitlab.ts) | GitLab API Client | Client REST API v4 GitLab: MR list, MR detail, commits, changed files, pipeline status, dan pembuatan review discussion. |
 | [`connector/teams/session.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/teams/session.ts) | MS Teams Session Manager | Mengelola autentikasi Microsoft Graph API, pembacaan user profile, dan sinkronisasi Teams channels. |
 | [`src/lib/teams/client.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/teams/client.ts) | Teams Frontend Bridge | Client komunikasi UI ke endpoint `/api/connector/teams/*`. |
+
+### Integrasi Figma (REST API, read-only)
+| File Path | Komponen | Deskripsi & Tanggung Jawab |
+|---|---|---|
+| [`connector/figma.ts`](../../../connector/figma.ts) | Figma Client & Manager | `parseFigmaUrl` (link file/design/proto/board, branch, `node-id` 1-2 atau 1:2), `FigmaClient` (header `X-Figma-Token`, retry sekali pada 429 sesuai `Retry-After`, pesan error 401/403/404 yang jelas), deteksi layar (`screenChoices`), ekstraksi teks urut baca (`extractTexts`), render PNG dengan skala sisi panjang ~1568px, dan penulisan hasil ke `workspaces/<draftId>/figma/<fileKey>_<node>/`. |
+| [`src/lib/figma/client.ts`](../../../src/lib/figma/client.ts) | Figma Frontend Bridge | Client UI ke `/api/connector/figma/*`; thumbnail diambil sebagai blob karena endpoint gambar tetap butuh header `X-TLC-Client`. |
+| [`src/lib/figma/types.ts`](../../../src/lib/figma/types.ts) | Kontrak Data | `FigmaStatus`, `FigmaScreenList`, `FigmaFetchedSet` (manifest per set, termasuk flag `stale`). |
+
+Endpoint connector (semua hanya membaca Figma, tidak ada write ke Figma):
+
+| Route | Fungsi |
+|---|---|
+| `GET /figma/status` | Status token di Keychain dan akun Figma (`/v1/me`). |
+| `POST /figma/save-token` | Memvalidasi token ke Figma dulu, baru menyimpannya ke Keychain `tech-lead-cockpit.figma`. |
+| `GET /figma/screens?url=` | Daftar layar di link (section/page/group dibuka; frame berisi ≥2 frame ≥320px dianggap kumpulan layar) beserta pilihan awal. |
+| `POST /figma/fetch` | `{ draftId, url, screenIds, title? }`, maksimal 30 layar: render PNG, unduh, tulis `index.md` (teks tiap layar) dan `manifest.json`. Fetch ulang link yang sama mengganti set lama. |
+| `GET /figma/fetched?draftId=&check=1` | Set yang sudah diambil; `check=1` membandingkan versi file Figma dan menandai `stale`. |
+| `POST /figma/fetched/delete` | Menghapus satu set dari workspace. |
+| `GET /figma/image?draftId=&set=&name=` | Menyajikan PNG untuk thumbnail (nama file divalidasi, tanpa path traversal). |
+
+Token dibuat di Figma → Settings → Security → Personal access tokens dengan scope **File content: Read-only**, lalu disimpan lewat Setup wizard (langkah Figma) atau kartu Figma di halaman Koneksi.
 
 ### AI Inference Providers & Keychain
 | File Path | Komponen | Deskripsi & Tanggung Jawab |

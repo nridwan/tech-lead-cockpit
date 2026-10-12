@@ -10,6 +10,8 @@
   import { teams } from '../lib/teams/client';
   import type { TeamsStatus } from '../lib/teams/types';
   import { toasts } from '../components/toast.svelte';
+  import { figma } from '../lib/figma/client';
+  import type { FigmaStatus } from '../lib/figma/types';
   import { gitlab } from '../lib/gitlab/client';
   import type { GitLabStatus } from '../lib/gitlab/types';
   import { appSettings } from '../lib/settings/store.svelte';
@@ -53,6 +55,27 @@
     }
   }
 
+  let figmaStatus = $state<FigmaStatus | null>(null);
+  let showFigmaSetup = $state(false);
+  let figmaToken = $state('');
+  let savingFigma = $state(false);
+
+  async function handleSaveFigma() {
+    if (!figmaToken.trim()) return;
+    savingFigma = true;
+    try {
+      const { user } = await figma.saveToken(figmaToken.trim());
+      toasts.show(`Figma terhubung sebagai ${user.handle}.`, 'ok');
+      figmaToken = '';
+      showFigmaSetup = false;
+      figmaStatus = await figma.status().catch(() => null);
+    } catch (e: any) {
+      toasts.show(`Gagal menghubungkan Figma: ${e.message}`, 'err');
+    } finally {
+      savingFigma = false;
+    }
+  }
+
   async function refresh() {
     loading = true;
     error = '';
@@ -62,6 +85,7 @@
       teamsStatus = await teams.status().catch(() => null);
       gitlabStatus = await gitlab.status().catch(() => null);
       if (gitlabStatus?.baseUrl) gitlabUrl = gitlabStatus.baseUrl;
+      figmaStatus = await figma.status().catch(() => null);
 
       if (jiraStatus?.configured && jiraStatus.user) {
         loadRecentIssues();
@@ -250,6 +274,58 @@
     {:else if !gitlabStatus?.tokenPresent}
       <div class="setup-cta">
         <p class="muted font-sm">Klik <strong>Setup Token</strong> untuk menghubungkan GitLab internal. Pastikan VPN aktif.</p>
+      </div>
+    {/if}
+  </article>
+
+  <!-- Card: Figma -->
+  <article class="card">
+    <div class="card-head">
+      <Icon name="image" size={20} />
+      <h2>Figma (opsional)</h2>
+      {#if loading}
+        <span class="chip">Mengecek…</span>
+      {:else if figmaStatus?.configured}
+        <span class="chip chip-ok"><Icon name="check" size={12} /> Terhubung</span>
+      {:else}
+        <span class="chip chip-warn">Belum terhubung</span>
+      {/if}
+      <button class="btn btn-sm btn-ghost" onclick={() => (showFigmaSetup = !showFigmaSetup)}>
+        <Icon name="edit" size={13} /> {figmaStatus?.tokenPresent ? 'Ubah Token' : 'Setup Token'}
+      </button>
+    </div>
+
+    {#if figmaStatus}
+      <dl>
+        <dt>Dipakai untuk</dt><dd>Mengambil layar desain (screenshot + teks) dari link Figma di draft TAD untuk AI generator</dd>
+        <dt>Akses</dt><dd>Read-only (Personal Access Token, scope <code>File content: Read-only</code>)</dd>
+        <dt>Token di Keychain</dt><dd>{figmaStatus.tokenPresent ? 'Ada (tech-lead-cockpit.figma)' : 'Belum ada'}</dd>
+        {#if figmaStatus.user}
+          <dt>Login sebagai</dt><dd><strong>{figmaStatus.user.handle}</strong>{figmaStatus.user.email ? ` (${figmaStatus.user.email})` : ''}</dd>
+        {/if}
+      </dl>
+      {#if figmaStatus.error && figmaStatus.tokenPresent}<p class="alert"><Icon name="alert" /> {figmaStatus.error}</p>{/if}
+    {/if}
+
+    {#if showFigmaSetup}
+      <div class="setup-form">
+        <div class="form-row">
+          <label for="fg-token">Personal Access Token</label>
+          <input id="fg-token" type="password" bind:value={figmaToken} placeholder="figd_…" autocomplete="off" />
+          <small class="form-help">
+            Buat di Figma → avatar → <strong>Settings</strong> → <strong>Security</strong> → <strong>Personal access tokens</strong>, dengan scope <strong>File content: Read-only</strong> saja. Token dicek dulu ke Figma, lalu disimpan di Keychain.
+          </small>
+        </div>
+        <div class="setup-actions">
+          <button class="btn btn-primary" onclick={handleSaveFigma} disabled={savingFigma || !figmaToken.trim()}>
+            {#if savingFigma}Mengecek…{:else}<Icon name="check" size={14} /> Simpan ke Keychain & Hubungkan{/if}
+          </button>
+          <button class="btn btn-ghost" onclick={() => (showFigmaSetup = false)}>Batal</button>
+        </div>
+      </div>
+    {:else if !figmaStatus?.tokenPresent}
+      <div class="setup-cta">
+        <p class="muted font-sm">Klik <strong>Setup Token</strong> supaya Cockpit bisa mengambil layar dari link Figma di draft TAD.</p>
       </div>
     {/if}
   </article>

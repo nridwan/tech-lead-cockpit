@@ -35,7 +35,7 @@ export interface AppSettings {
   };
 }
 
-export type SecretId = 'confluence' | 'jira' | 'gitlab' | 'inferhub' | 'ninerouter';
+export type SecretId = 'confluence' | 'jira' | 'gitlab' | 'inferhub' | 'ninerouter' | 'figma';
 
 export interface SettingsResponse {
   settings: AppSettings;

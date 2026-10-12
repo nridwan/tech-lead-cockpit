@@ -4,6 +4,7 @@
   import { toasts } from '../components/toast.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { drafts, type Draft } from './drafts.svelte';
+  import FigmaScreensPanel from './FigmaScreensPanel.svelte';
   import { uploadDoc, deleteDoc, unlockDoc, withPdfPassword } from './generator-client';
   import { syncDocumentationSection } from '../lib/tad/docs-sync';
   import { api } from '../lib/api-base';
@@ -20,6 +21,7 @@
   const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
   let activeTab = $state<'figma' | 'docs'>('figma');
+  let screensPanel = $state<ReturnType<typeof FigmaScreensPanel> | undefined>();
 
   // Figma links state
   let newFigmaUrl = $state('');
@@ -171,7 +173,7 @@
     {#if activeTab === 'figma'}
       <section class="section">
         <p class="desc">
-          Masukkan URL desain Figma untuk halaman atau flow yang terkait dengan TAD ini. Link ini akan dicatat di TAD dan disiapkan untuk AI Generator.
+          Masukkan URL desain Figma untuk halaman atau flow yang terkait dengan TAD ini. Link ini dicatat di TAD. Klik <strong>Ambil layar</strong> supaya Cockpit mengambil screenshot dan teks tiap layar untuk dibaca AI Generator.
         </p>
 
         <form class="add-form" onsubmit={(e) => { e.preventDefault(); addFigma(); }}>
@@ -215,6 +217,14 @@
                 </div>
                 <button
                   type="button"
+                  class="btn btn-sm fetch-btn"
+                  onclick={() => screensPanel?.pick(f)}
+                  title="Ambil screenshot dan teks layar dari Figma untuk AI Generator"
+                >
+                  <Icon name="download" size={13} /> {screensPanel?.setFor(f.url) ? 'Ambil ulang' : 'Ambil layar'}
+                </button>
+                <button
+                  type="button"
                   class="btn btn-ghost icon-btn delete-btn"
                   onclick={() => removeFigma(f.url)}
                   title="Hapus link Figma"
@@ -226,6 +236,8 @@
             {/each}
           {/if}
         </div>
+
+        <FigmaScreensPanel bind:this={screensPanel} draftId={draft.id} />
       </section>
     {:else}
       <section class="section">
@@ -500,6 +512,10 @@
   }
   .item-link:hover {
     text-decoration: underline;
+  }
+  .fetch-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .delete-btn {
     color: var(--text-3);

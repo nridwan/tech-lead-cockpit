@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_SETTINGS, type AppSettings, type SecretId } from '../src/lib/settings/types.ts';
-import { CONFLUENCE_SERVICE, GITLAB_SERVICE, INFERHUB_SERVICE, JIRA_SERVICE, NINEROUTER_SERVICE } from './keychain.ts';
+import { CONFLUENCE_SERVICE, FIGMA_SERVICE, GITLAB_SERVICE, INFERHUB_SERVICE, JIRA_SERVICE, NINEROUTER_SERVICE } from './keychain.ts';
 import { DATA_DIR } from './paths.ts';
 
 /**
@@ -24,6 +24,7 @@ export const SECRET_SERVICES: Record<SecretId, string> = {
   gitlab: GITLAB_SERVICE,
   inferhub: INFERHUB_SERVICE,
   ninerouter: NINEROUTER_SERVICE,
+  figma: FIGMA_SERVICE,
 };
 
 type Env = Record<string, string | undefined>;

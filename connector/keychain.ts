@@ -9,6 +9,7 @@ export const INFERHUB_SERVICE = `${KEYCHAIN_PREFIX}.inferhub`;
 export const TEAMS_SERVICE = `${KEYCHAIN_PREFIX}.teams`;
 export const GITLAB_SERVICE = `${KEYCHAIN_PREFIX}.gitlab`;
 export const NINEROUTER_SERVICE = `${KEYCHAIN_PREFIX}.9router`;
+export const FIGMA_SERVICE = `${KEYCHAIN_PREFIX}.figma`;
 
 /**
  * Reads a secret from the macOS login Keychain. Read on every call (no caching) so a

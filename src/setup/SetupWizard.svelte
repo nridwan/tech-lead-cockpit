@@ -7,6 +7,8 @@
   import type { AiSelection } from '../lib/ai/types';
   import { connector } from '../lib/confluence/client';
   import type { ConnectorStatus } from '../lib/confluence/api-types';
+  import { figma } from '../lib/figma/client';
+  import type { FigmaStatus } from '../lib/figma/types';
   import { gitlab } from '../lib/gitlab/client';
   import type { GitLabStatus } from '../lib/gitlab/types';
   import { jira } from '../lib/jira/client';
@@ -24,6 +26,7 @@
     { id: 'codebase', label: 'Codebase' },
     { id: 'atlassian', label: 'Jira & Confluence' },
     { id: 'gitlab', label: 'GitLab' },
+    { id: 'figma', label: 'Figma' },
     { id: 'ai', label: 'AI' },
     { id: 'more', label: 'Integrasi lain' },
     { id: 'done', label: 'Ringkasan' },
@@ -59,6 +62,9 @@
   let gitlabToken = $state('');
   let gitlabStatus = $state<GitLabStatus | null>(null);
 
+  let figmaToken = $state('');
+  let figmaStatus = $state<FigmaStatus | null>(null);
+
   let aiDefault = $state<AiSelection>({ provider: '9router', model: '' });
   let ihUrl = $state('');
   let ihModel = $state('');
@@ -91,10 +97,11 @@
     ihModel = v.ai.inferhub.model;
     nrUrl = v.ai.ninerouter.baseUrl;
     nrModel = v.ai.ninerouter.model;
-    cloudToken = jiraToken = confToken = gitlabToken = ihKey = nrKey = '';
+    cloudToken = jiraToken = confToken = gitlabToken = figmaToken = ihKey = nrKey = '';
     void checkServices();
     void testAtlassian(true);
     void testGitlab(true);
+    void testFigma(true);
     void aiProviders.load(true);
   }
 
@@ -190,6 +197,25 @@
       next();
     });
 
+  // Figma ---------------------------------------------------------------------------------
+
+  async function testFigma(quiet = false) {
+    figmaStatus = await figma.status().catch(() => null);
+    if (!quiet && !figmaStatus?.configured) throw new Error(figmaStatus?.error ?? 'Belum tersambung.');
+  }
+
+  const saveFigma = () =>
+    run(async () => {
+      if (figmaToken.trim()) {
+        // Validated against Figma before it replaces a working token.
+        await figma.saveToken(figmaToken.trim());
+        figmaToken = '';
+        await appSettings.load();
+      }
+      await testFigma();
+      next();
+    });
+
   // AI ------------------------------------------------------------------------------------
 
   const saveAi = () =>
@@ -213,6 +239,7 @@
     { label: 'Jira', ok: Boolean(jiraStatus?.configured), detail: jiraStatus?.configured ? `${jiraStatus.user?.displayName ?? 'tersambung'} · ${s.jira.baseUrl}${s.jira.defaultProject ? ` · project ${s.jira.defaultProject}` : ''}` : (jiraStatus?.error ?? 'belum diatur') },
     { label: 'Confluence', ok: Boolean(confStatus?.configured), detail: confStatus?.configured ? `${confStatus.user ?? 'tersambung'} · ${s.confluence.baseUrl}` : (confStatus?.error ?? 'belum diatur') },
     { label: 'GitLab', ok: Boolean(gitlabStatus?.configured), detail: gitlabStatus?.configured ? `${gitlabStatus.user?.username ?? 'tersambung'} · ${s.gitlab.baseUrl}` : (gitlabStatus?.error ?? 'belum diatur') },
+    { label: 'Figma', ok: Boolean(figmaStatus?.configured), detail: figmaStatus?.configured ? `${figmaStatus.user?.handle ?? 'tersambung'}${figmaStatus.user?.email ? ` · ${figmaStatus.user.email}` : ''}` : (figmaStatus?.error ?? 'belum diatur (opsional)') },
     { label: 'AI default', ok: Boolean(aiProviders.get(s.ai.defaultProvider)?.available), detail: `${aiProviders.get(s.ai.defaultProvider)?.label ?? s.ai.defaultProvider}${s.ai.defaultModel ? ` · ${s.ai.defaultModel}` : ''}` },
   ]);
 
@@ -251,7 +278,7 @@
       <section class="body">
         {#if step === 'welcome'}
           <h3>Selamat datang di Tech Lead Cockpit</h3>
-          <p>Wizard ini menyiapkan semua yang dibutuhkan Cockpit: folder codebase, Jira & Confluence, GitLab, dan AI. Setiap langkah bisa dites dan dilewati, dan semuanya bisa diubah lagi kapan saja dari menu <strong>Koneksi</strong>.</p>
+          <p>Wizard ini menyiapkan semua yang dibutuhkan Cockpit: folder codebase, Jira & Confluence, GitLab, Figma, dan AI. Setiap langkah bisa dites dan dilewati, dan semuanya bisa diubah lagi kapan saja dari menu <strong>Koneksi</strong>.</p>
           {#if s.jira.baseUrl || s.gitlab.baseUrl || s.confluence.baseUrl}
             <p class="note"><Icon name="check" size={13} /> Pengaturan lama dari <code>.env.local</code> sudah dipindahkan ke sini. Cukup periksa dan lengkapi.</p>
           {/if}
@@ -332,6 +359,19 @@
             <span class="pill" class:pill-ok={gitlabStatus?.configured}>GitLab: {gitlabStatus?.configured ? `@${gitlabStatus.user?.username} · v${gitlabStatus.version ?? '?'}` : (gitlabStatus?.error ?? 'belum')}</span>
           </div>
           <p class="muted small">GitLab internal biasanya hanya bisa dijangkau saat VPN aktif.</p>
+        {:else if step === 'figma'}
+          <h3>Figma (opsional)</h3>
+          <p class="muted small">Supaya Cockpit bisa <strong>mengambil layar desain</strong> dari link Figma di draft TAD: screenshot tiap layar dan seluruh teksnya disimpan ke workspace, lalu dibaca AI generator seperti dokumen biasa. Akses hanya membaca; Cockpit tidak pernah mengubah file Figma.</p>
+          <ol class="howto small">
+            <li>Buka Figma → klik avatar → <strong>Settings</strong> → tab <strong>Security</strong> → <strong>Personal access tokens</strong> → <strong>Generate new token</strong>.</li>
+            <li>Beri nama (mis. <em>Tech Lead Cockpit</em>), pilih masa berlaku, dan centang scope <code>File content: Read-only</code>. Scope lain tidak perlu.</li>
+            <li>Salin token (hanya ditampilkan sekali) lalu tempel di bawah.</li>
+          </ol>
+          <label class="field"><span>Personal access token {appSettings.secrets.figma ? '(tersimpan — kosongkan untuk tetap memakai yang lama)' : ''}</span><input class="input" type="password" bind:value={figmaToken} autocomplete="off" placeholder="figd_…" /></label>
+          <div class="status-row">
+            <span class="pill" class:pill-ok={figmaStatus?.configured}>Figma: {figmaStatus?.configured ? `${figmaStatus.user?.handle ?? 'tersambung'}${figmaStatus.user?.email ? ` · ${figmaStatus.user.email}` : ''}` : (figmaStatus?.error ?? 'belum')}</span>
+          </div>
+          <p class="muted small">Akun pemilik token harus bisa membuka file Figma yang dipakai. Saat token kedaluwarsa, buat yang baru dan simpan lagi di langkah ini.</p>
         {:else if step === 'ai'}
           <h3>AI</h3>
           <div class="providers">
@@ -391,6 +431,8 @@
             <button class="btn btn-primary btn-sm" onclick={() => saveAtlassian(true)} disabled={busy}>Simpan & lanjut</button>
           {:else if step === 'gitlab'}
             <button class="btn btn-primary btn-sm" onclick={saveGitlab} disabled={busy}>Simpan & lanjut</button>
+          {:else if step === 'figma'}
+            <button class="btn btn-primary btn-sm" onclick={saveFigma} disabled={busy}>Simpan & lanjut</button>
           {:else if step === 'ai'}
             <button class="btn btn-primary btn-sm" onclick={saveAi} disabled={busy}>Simpan & lanjut</button>
           {:else if step === 'more'}
@@ -540,6 +582,14 @@
     border-color: var(--accent);
     background: var(--accent-soft);
     font-weight: 600;
+  }
+  .howto {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--text-2);
   }
   .status-row {
     display: flex;

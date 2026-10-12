@@ -27,7 +27,8 @@ import { readEnvLocalVar } from './env-file.ts';
 import type { AppSettings, SecretId, SettingsResponse } from '../src/lib/settings/types.ts';
 import { EstimateInputError, EstimateManager } from './estimate/manager.ts';
 import type { EstimateProject, EstimateRequest } from '../src/lib/estimate/types.ts';
-import { deleteDoc, listDocs, saveDoc, unlockDoc } from './workspace-docs.ts';
+import { deleteDoc, listDocs, saveDoc, unlockDoc, workspaceDir } from './workspace-docs.ts';
+import { FigmaError, FigmaManager } from './figma.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { normalizeEditedFlow } from './qa/generator.ts';
@@ -53,7 +54,7 @@ import { isValidDraftId } from './generator-runner.ts';
 import { DraftFileError, DraftFiles } from './drafts-store.ts';
 import { renderCockpitContext, type CockpitState, type DraftForContext } from './cockpit-context.ts';
 import { ConversationError, ConversationFiles } from './conversations-store.ts';
-import { CONFLUENCE_SERVICE, JIRA_SERVICE, GITLAB_SERVICE, deleteKeychain, readKeychain, writeKeychain } from './keychain.ts';
+import { CONFLUENCE_SERVICE, FIGMA_SERVICE, JIRA_SERVICE, GITLAB_SERVICE, deleteKeychain, readKeychain, writeKeychain } from './keychain.ts';
 import { transitionWithChecks, type TransitionRequest } from './jira-transition.ts';
 import { TadTicketError, createTadTickets, ticketTemplate, validateTicketRequest } from './tad-tickets.ts';
 import { GitLabClient, GitLabError, normalizeBaseUrl, parseMrUrl } from './gitlab.ts';
@@ -98,6 +99,8 @@ export interface ConnectorDeps {
   traceManager?: (deps: ConnectorDeps) => TraceManager;
   /** Background MR reviews; defaults to the process-wide manager. Tests inject one with a fake AI. */
   reviewManager?: (deps: ConnectorDeps) => ReviewManager;
+  /** Figma (REST API, token in the Keychain); defaults to the process-wide manager. Tests inject one with a fake fetch. */
+  figma?: () => FigmaManager;
   /** Furthest stage per task (anti-regression); defaults to ~/.tech-lead-cockpit/task-peaks.json. */
   taskPeaks?: TaskPeakStore;
   /** E2E test manager; defaults to the process-wide singleton. */
@@ -324,6 +327,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
       if (route.endsWith(' /drafts') || url.pathname.startsWith(`${PREFIX}/drafts/`)) return await handleDrafts(route, req, res);
       if (url.pathname.startsWith(`${PREFIX}/assistant/conversations`)) return await handleConversations(route, url, req, res);
       if (url.pathname.startsWith(`${PREFIX}/gitlab/`)) return await handleGitLab(route, url, req, res, env);
+      if (url.pathname.startsWith(`${PREFIX}/figma/`)) return await handleFigma(route, url, req, res, (deps.figma ?? defaultFigma)());
       if (url.pathname.startsWith(`${PREFIX}/coder/`)) return await handleCoder(route, url, req, res, env, deps);
       if (route === 'GET /ai/providers') return send(res, 200, await listProviders());
       if (route === 'GET /ai/usage') return send(res, 200, await getUsage(url.searchParams.get('refresh') === '1'));
@@ -1476,6 +1480,59 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
     if (e instanceof SettingsInputError) throw new ConfluenceError(e.message, 400, 'bad-request');
+    throw e;
+  }
+}
+
+let figmaManager: FigmaManager | undefined;
+const defaultFigma = () => (figmaManager ??= new FigmaManager({ readToken: () => readKeychain(FIGMA_SERVICE), workspaceFor: workspaceDir }));
+
+/** Figma for the TAD generator: read-only, results go to the draft's AI workspace under figma/. */
+async function handleFigma(route: string, url: URL, req: IncomingMessage, res: ServerResponse, figma: FigmaManager) {
+  const draftIdOf = (v: unknown) => {
+    if (!isValidDraftId(v)) throw new FigmaError('draftId tidak valid.', 400, 'bad-request');
+    return v;
+  };
+  try {
+    if (route === 'GET /figma/status') return send(res, 200, await figma.status());
+    if (route === 'POST /figma/save-token') {
+      const body = await readJson<{ token?: string }>(req, 16 * 1024);
+      const token = String(body.token ?? '').trim();
+      if (!token) throw new FigmaError('Token tidak boleh kosong.', 400, 'bad-request');
+      // Check before saving so a typo doesn't replace a working token.
+      const user = await figma.verifyToken(token);
+      if (!(await writeKeychain(FIGMA_SERVICE, token))) throw new FigmaError('Gagal menyimpan token ke Keychain.', 500, 'upstream');
+      return send(res, 200, { ok: true, user });
+    }
+    if (route === 'GET /figma/screens') return send(res, 200, await figma.listScreens(url.searchParams.get('url') ?? ''));
+    if (route === 'POST /figma/fetch') {
+      const body = await readJson<{ draftId?: string; url?: string; title?: string; screenIds?: string[] }>(req, 64 * 1024);
+      const draftId = draftIdOf(body.draftId);
+      const set = await figma.fetchScreens({ draftId, url: String(body.url ?? ''), title: body.title, screenIds: Array.isArray(body.screenIds) ? body.screenIds : [] });
+      return send(res, 200, { set, sets: await figma.listFetched(draftId) });
+    }
+    if (route === 'GET /figma/fetched') {
+      const draftId = draftIdOf(url.searchParams.get('draftId'));
+      if (url.searchParams.get('check') === '1') {
+        // The version check needs the network and the token; without them the list still shows.
+        return send(res, 200, await figma.checkStale(draftId).catch(() => figma.listFetched(draftId)));
+      }
+      return send(res, 200, await figma.listFetched(draftId));
+    }
+    if (route === 'POST /figma/fetched/delete') {
+      const body = await readJson<{ draftId?: string; id?: string }>(req, 16 * 1024);
+      return send(res, 200, await figma.deleteFetched(draftIdOf(body.draftId), String(body.id ?? '')));
+    }
+    if (route === 'GET /figma/image') {
+      const png = await figma.image(draftIdOf(url.searchParams.get('draftId')), url.searchParams.get('set') ?? '', url.searchParams.get('name') ?? '');
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.end(png);
+    }
+    return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
+  } catch (e) {
+    if (e instanceof FigmaError) return fail(res, e.status, { error: e.message, code: e.code });
     throw e;
   }
 }

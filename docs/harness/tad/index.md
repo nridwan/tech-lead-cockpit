@@ -65,6 +65,7 @@ sequenceDiagram
 | [`src/tad/ConfluenceMergeModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/ConfluenceMergeModal.svelte) | 3-Way Merge Dialog | Modal resolusi konflik jika versi halaman di Confluence berubah sejak draft dibuat (HTTP 409 conflict). |
 | [`src/tad/WordEditor.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/WordEditor.svelte) | Dual-Mode Editor | Editor dokumen TAD: Mode Dokumen Visual (Word WYSIWYG) dan Mode Kode Markdown, dilengkapi Ribbon Toolbar, Outline navigation, Find/Search, dan real-time `@mention` trigger. |
 | [`src/tad/MentionPicker.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/MentionPicker.svelte) | Autocomplete Mention | Popover saran pengguna Atlassian (@mention) dengan query Jira/Confluence API, filter kandidat lokal dokumen, keyboard navigation, dan floating caret positioning. |
+| [`src/tad/FigmaScreensPanel.svelte`](../../../src/tad/FigmaScreensPanel.svelte) | Ambil Layar Figma | Panel di modal Dokumen Partner & Link Figma: memilih layar dari link Figma, mengambilnya ke workspace AI, thumbnail hasil, tanda desain berubah, ambil ulang, dan hapus. |
 | [`src/lib/tad/validator.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/tad/validator.ts) | Core Validator Engine | Memvalidasi integritas dokumen TAD: memastikan setiap item Scope memiliki Detail Task, mencocokkan requirement PRD, dan memeriksa sintaks nama task. |
 | [`src/lib/tad/template.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/tad/template.ts) | Template & Section Schema | Mendefinisikan 15 section wajib standar TAD v1, regex parser section, dan skema nama task. |
 | [`src/lib/confluence/storage.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/confluence/storage.ts) | Confluence Converter | Mengonversi Markdown TAD menjadi Confluence Storage Format (XHTML): Document Information (1800px), Detail Task 2-kolom (1688px), breakout code macro, Jira macro, serta konversi user mention spans ke `<ac:link><ri:user ri:account-id="..." /></ac:link>`. |
@@ -78,6 +79,7 @@ sequenceDiagram
 | [`connector/generator-runner.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/generator-runner.ts) | Runner Eksekusi AI | Mempersiapkan direktori kerja `workspaces/<draftId>`, menyusun prompt, dan menjalankan provider AI (`claude`, `antigravity`, `inferhub`, `9router`). |
 | [`connector/drafts-store.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/drafts-store.ts) | File Store Draft | Operasi I/O untuk file draft, metadata, riwayat commit revisi lokal, dan snapshot di bawah `DATA_DIR/workspaces/`. |
 | [`connector/workspace-docs.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/workspace-docs.ts) | Attachment Manager | Mengelola file pendukung dalam subdirektori `docs/` pada draft (PDF, gambar layar Figma, spesifikasi partner). |
+| [`connector/figma.ts`](../../../connector/figma.ts) | Figma Fetcher | Mengambil screenshot dan teks layar Figma lewat REST API ke `figma/<set>/` di workspace draft. Detail di harness Integrations. |
 | [`connector/pdf-unlock.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/pdf-unlock.ts) | PDF Unlock Utility | Membuka kunci PDF yang dilindungi password (menggunakan qpdf) sebelum dianalisis oleh AI. |
 | [`connector/tad-tickets.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/tad-tickets.ts) | Jira Ticket Bridge | Mengurai tabel Detail Task dari Markdown TAD dan memanggil Jira API untuk membuat batch tiket dan subtask. |
 
@@ -210,6 +212,18 @@ Fitur ini memungkinkan pengguna menyimpan perubahan TAD langsung ke Confluence s
   - Penanganan Attachment Draft (`upsertAttachment`): Memvalidasi lampiran diagram Mermaid pada halaman draft tanpa memicu error 404 (`status [current]`) dari API v1 legacy, dengan proteksi graceful degradation agar draft teks tidak gagal tersimpan.
   - Fallback Pencarian & Get Page: [`getPage`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/confluence.ts) dan [`findPage`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/confluence.ts) memeriksa status `current` dan melakukan fallback pengecekan `status=draft` agar draft halaman yang belum terpublikasi tetap terdeteksi.
 - **Audit Trail**: Audit event mencatat flag `isDraft` untuk transparansi riwayat aktivitas.
+
+---
+
+## 🎨 Layar Figma untuk AI Generator
+
+AI generator berjalan headless, sehingga tidak bisa meminta izin tool Figma. Karena itu Cockpit sendiri yang membaca Figma, lalu AI cukup membaca file biasa:
+
+1. User menyimpan token Figma (Setup → Figma, atau Koneksi → Figma).
+2. Di modal **Dokumen Partner & Link Figma**, tombol **Ambil layar** pada sebuah link membuka daftar layar ([`FigmaScreensPanel.svelte`](../../../src/tad/FigmaScreensPanel.svelte)). User memilih layar (maks. 30).
+3. Connector menulis `workspaces/<draftId>/figma/<fileKey>_<node>/`: `NN-<nama-layar>.png`, `index.md` (daftar layar + seluruh teks yang terlihat, urut atas ke bawah), dan `manifest.json`.
+4. [`prepareGeneratorWorkspace`](../../../connector/generator-runner.ts) membaca manifest dan menambahkan instruksi `figmaContextLine`: provider CLI (Claude, Antigravity) diminta membaca `index.md` lalu membuka PNG yang relevan; InferHub/9Router hanya membaca `index.md` karena tool baca mereka berbasis teks. Kalimat lama "Kamu tidak bisa membuka Figma" hanya dipakai bila belum ada layar yang diambil.
+5. Saat modal dibuka, versi file Figma dicek ulang; set dari file yang berubah diberi tanda **Desain sudah berubah di Figma** dan bisa diambil ulang.
 
 ---
 

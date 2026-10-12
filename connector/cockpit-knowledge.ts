@@ -28,7 +28,7 @@ Berjalan di laptop user: versi browser (\`npm run dev\`, http://127.0.0.1:5173) 
 - [TAD](#/tad): workspace Technical Analysis Document, lihat bagian TAD di bawah.
 - [Teams](#/teams): login Microsoft (device code), daftar chat/grup/channel, filter (Direct/Grup/Channel/Ada MR), deteksi link MR otomatis, balas cepat, draft balasan AI dengan instruksi, kirim ke Teams.
 - [WhatsApp](#/whatsapp): ditautkan lewat QR (perangkat tertaut, seperti WhatsApp Web). Daftar chat, draft balasan AI per audiens (Tim, PM, Klien, Teman) atau dari template, lalu kirim manual. Default model: Gemini Flash (Antigravity). Batas kirim: jeda 3 detik, maks 15/menit. Tidak ada auto-send dan tidak mengirim read receipt.
-- [Koneksi](#/connections): token GitLab (Personal Access Token scope read_api), token Jira dan Confluence (Atlassian), semuanya di Keychain; status Teams, status dan limit Claude CLI, Antigravity CLI, dan InferHub.
+- [Koneksi](#/connections): token GitLab (Personal Access Token scope read_api), token Jira dan Confluence (Atlassian), token Figma (scope File content: Read-only, opsional), semuanya di Keychain; status Teams, status dan limit Claude CLI, Antigravity CLI, dan InferHub.
 - [Audit log](#/audit): catatan setiap aksi tulis (metadata saja).
 - Rail kiri: tema terang/gelap. Saat dibuka, aplikasi dikunci PIN/Touch ID.
 
@@ -42,6 +42,7 @@ Berjalan di laptop user: versi browser (\`npm run dev\`, http://127.0.0.1:5173) 
   4. **Generate** TAD lengkap.
 - Saat menentukan service terdampak, AI membaca kode di folder Services (lokasi dan jumlah repo ada di snapshot; diatur lewat Setup wizard). User tidak perlu menginput service.
 - Semua repo service harus berada dalam SATU folder (satu subfolder per repo, hasil git clone). Repo di luar folder itu tidak ikut dipindai AI; kalau user bertanya kenapa sebuah service tidak terbaca, sarankan memindahkan/clone repo-nya ke folder Services lalu cek ulang di Setup.
+- **Layar Figma untuk AI**: di modal Dokumen Partner & Link Figma, tombol "Ambil layar" pada link Figma membuka daftar layar; pilih layar (maks. 30) lalu Ambil. Cockpit menyimpan screenshot dan seluruh teks tiap layar ke workspace TAD, dan AI generator membacanya seperti dokumen. Butuh token Figma (Setup → Figma). AI generator sendiri tidak bisa membuka Figma langsung, jadi kalau AI bilang butuh izin tool Figma, arahkan user ke tombol Ambil layar. Kalau desain berubah, muncul tanda "Desain sudah berubah di Figma" dan layar bisa diambil ulang.
 - **Chat AI Generator** (di dalam TAD) untuk mengedit TAD lewat chat. Bisa pilih Claude CLI atau Antigravity CLI beserta modelnya. Percakapan berlanjut per provider.
 - **Mode review**: perubahan AI tidak langsung masuk. Muncul diff per bagian; user mencentang bagian yang diterima ("Terima semua" / "Terapkan N bagian" / "Tolak semua").
 - **Revisi & rollback**: setiap perubahan (AI, manual, import) jadi revisi yang bisa dikembalikan.
@@ -67,7 +68,7 @@ Berjalan di laptop user: versi browser (\`npm run dev\`, http://127.0.0.1:5173) 
 - \`~/.tech-lead-cockpit/workspaces/\`: workspace AI per draft (PRD, TAD, SCOPE, dokumen pendukung).
 - \`~/.tech-lead-cockpit/whatsapp-auth/\`: sesi WhatsApp tertaut. \`whatsapp.lock\` mencegah dua instance memakai sesi yang sama.
 - \`~/.tech-lead-cockpit/audit.jsonl\`: audit log.
-- \`~/.tech-lead-cockpit/settings.json\`: pengaturan dari Setup wizard (organisasi, folder codebase, URL Jira/Confluence/GitLab, AI default). Token disimpan di macOS Keychain, bukan di file. \`.env.local\` lama dipindahkan otomatis saat pertama dibuka.
+- \`~/.tech-lead-cockpit/settings.json\`: pengaturan dari Setup wizard (organisasi, folder codebase, URL Jira/Confluence/GitLab, AI default; token Figma juga diisi di wizard). Token disimpan di macOS Keychain, bukan di file. \`.env.local\` lama dipindahkan otomatis saat pertama dibuka.
 - \`~/.tech-lead-cockpit/logs/connector.log\`: log connector aplikasi Mac.
 
 ## Troubleshooting umum
