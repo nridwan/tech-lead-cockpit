@@ -31,6 +31,9 @@ import { deleteDoc, listDocs, saveDoc, unlockDoc, workspaceDir } from './workspa
 import { FigmaError, FigmaManager } from './figma.ts';
 import { RosterInputError, RosterStore } from './roster/store.ts';
 import { DEFAULT_DAYS, GitActivity } from './roster/git-activity.ts';
+import { ReleaseManager } from './releases/manager.ts';
+import { RELEASES_DIR, ReleaseInputError, ReleaseStore } from './releases/store.ts';
+import { repoProjectPaths } from './releases/repos.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { normalizeEditedFlow } from './qa/generator.ts';
@@ -105,6 +108,8 @@ export interface ConnectorDeps {
   figma?: () => FigmaManager;
   /** Team roster and git activity; defaults to ~/.tech-lead-cockpit/team-roster.json and real `git log`. */
   roster?: () => { store: RosterStore; git: GitActivity; resolveRoot: (input?: string) => Promise<string> };
+  /** Release management; defaults to ~/.tech-lead-cockpit/releases with the real GitLab, Jira and Teams. */
+  releases?: () => ReleaseManager;
   /** Furthest stage per task (anti-regression); defaults to ~/.tech-lead-cockpit/task-peaks.json. */
   taskPeaks?: TaskPeakStore;
   /** E2E test manager; defaults to the process-wide singleton. */
@@ -333,6 +338,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
       if (url.pathname.startsWith(`${PREFIX}/gitlab/`)) return await handleGitLab(route, url, req, res, env);
       if (url.pathname.startsWith(`${PREFIX}/figma/`)) return await handleFigma(route, url, req, res, (deps.figma ?? defaultFigma)());
       if (url.pathname === `${PREFIX}/roster` || url.pathname.startsWith(`${PREFIX}/roster/`)) return await handleRoster(route, url, req, res, (deps.roster ?? defaultRoster)());
+      if (url.pathname === `${PREFIX}/releases` || url.pathname.startsWith(`${PREFIX}/releases/`)) return await handleReleases(route, url, req, res, (deps.releases ?? (() => releasesFor(env)))(), deps.appendAudit);
       if (url.pathname.startsWith(`${PREFIX}/coder/`)) return await handleCoder(route, url, req, res, env, deps);
       if (route === 'GET /ai/providers') return send(res, 200, await listProviders());
       if (route === 'GET /ai/usage') return send(res, 200, await getUsage(url.searchParams.get('refresh') === '1'));
@@ -1485,6 +1491,91 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
     if (e instanceof SettingsInputError) throw new ConfluenceError(e.message, 400, 'bad-request');
+    throw e;
+  }
+}
+
+let releaseManager: ReleaseManager | undefined;
+function releasesFor(env: Env): ReleaseManager {
+  return (releaseManager ??= new ReleaseManager({
+    store: new ReleaseStore(),
+    reportDir: path.join(RELEASES_DIR, 'reports'),
+    gitlab: async () => (await loadGitLab(env)).client ?? null,
+    jiraSearch: async (jql, limit) => {
+      const { cfg } = await loadJiraConfig(env);
+      if (!cfg) throw new Error('Jira belum dikonfigurasi.');
+      return new JiraClient(cfg).searchIssues(jql, limit);
+    },
+    projects: () => estimateManager().listProjects(),
+    drafts: async () => (await draftFiles.list()) as { id: string; markdown: string; scopePlan?: string }[],
+    repoPaths: async () => {
+      const { baseUrl } = await loadGitLab(env);
+      if (!baseUrl) return {};
+      return repoProjectPaths(await resolveServicesRoot(undefined), baseUrl);
+    },
+    teamsSend: async (chatId, html) => {
+      const { teamsSession } = await import('./teams/session.ts');
+      await teamsSession.sendMessage(chatId, '', undefined, { html });
+    },
+  }));
+}
+
+/** Release management: read GitLab/Jira, write only the confirmed Teams message (audited). */
+async function handleReleases(route: string, url: URL, req: IncomingMessage, res: ServerResponse, rm: ReleaseManager, audit: ConnectorDeps['appendAudit']) {
+  const idOf = (v: unknown) => String(v ?? '');
+  try {
+    if (route === 'GET /releases') return send(res, 200, await rm.store.list());
+    if (route === 'GET /releases/one') return send(res, 200, await rm.get(idOf(url.searchParams.get('id'))));
+    if (route === 'GET /releases/report') return send(res, 200, { report: await rm.report(idOf(url.searchParams.get('id'))) });
+    if (route === 'GET /releases/codenames') return send(res, 200, await rm.codenames(await rm.get(idOf(url.searchParams.get('id')))));
+    if (route === 'POST /releases') {
+      const body = await readJson<{ release?: Record<string, unknown> }>(req, 2 * 1024 * 1024);
+      return send(res, 200, await rm.store.save(body.release ?? {}));
+    }
+    if (route === 'POST /releases/delete') {
+      const body = await readJson<{ id?: string }>(req, 16 * 1024);
+      await rm.store.remove(idOf(body.id));
+      return send(res, 200, await rm.store.list());
+    }
+    if (route === 'POST /releases/discover') {
+      const body = await readJson<{ id?: string }>(req, 16 * 1024);
+      return send(res, 200, await rm.discover(idOf(body.id)));
+    }
+    if (route === 'POST /releases/check') {
+      const body = await readJson<{ id?: string }>(req, 16 * 1024);
+      return send(res, 200, await rm.check(idOf(body.id)));
+    }
+    if (route === 'POST /releases/import') {
+      const body = await readJson<{ id?: string; markdown?: string; source?: { kind?: string; title?: string; pageId?: string; version?: number; url?: string } }>(req, 2 * 1024 * 1024);
+      const s = body.source ?? {};
+      const source = { kind: s.kind === 'confluence' ? ('confluence' as const) : ('markdown' as const), title: String(s.title ?? 'Dokumen rilis').slice(0, 200), ...(s.pageId ? { pageId: String(s.pageId) } : {}), ...(Number.isInteger(s.version) ? { version: Number(s.version) } : {}), ...(s.url ? { url: String(s.url).slice(0, 500) } : {}) };
+      return send(res, 200, await rm.importDoc(idOf(body.id), String(body.markdown ?? ''), source));
+    }
+    if (route === 'POST /releases/share/preview' || route === 'POST /releases/share') {
+      const body = await readJson<{ id?: string; chatId?: string; chatName?: string; mrRefs?: string[]; deadline?: string; reviewers?: string[]; note?: string; reminder?: boolean }>(req, 64 * 1024);
+      const opts = {
+        mrRefs: Array.isArray(body.mrRefs) ? body.mrRefs.map(String) : [],
+        deadline: body.deadline ? String(body.deadline).slice(0, 80) : undefined,
+        reviewers: Array.isArray(body.reviewers) ? body.reviewers.map((r) => String(r).slice(0, 80)).slice(0, 20) : undefined,
+        note: body.note ? String(body.note).slice(0, 2_000) : undefined,
+        reminder: body.reminder === true,
+      };
+      if (route === 'POST /releases/share/preview') return send(res, 200, await rm.sharePreview(idOf(body.id), opts));
+      const chat = { id: String(body.chatId ?? ''), name: String(body.chatName ?? '').slice(0, 200) };
+      const base = { ts: new Date().toISOString(), action: 'teams.send' as const, spaceKey: 'Microsoft Teams', title: `Review MR rilis → ${chat.name || chat.id}`, attachments: 0 };
+      try {
+        const saved = await rm.share(idOf(body.id), chat, opts);
+        await audit({ ...base, result: 'success' }).catch(() => {});
+        return send(res, 200, saved);
+      } catch (e) {
+        if (e instanceof ReleaseInputError) throw e;
+        await audit({ ...base, result: 'failure', error: (e as Error).message }).catch(() => {});
+        throw new ConfluenceError(`Gagal mengirim ke Teams: ${(e as Error).message}`, 502, 'upstream');
+      }
+    }
+    return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
+  } catch (e) {
+    if (e instanceof ReleaseInputError) return fail(res, 400, { error: e.message, code: 'bad-request' });
     throw e;
   }
 }

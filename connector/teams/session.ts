@@ -837,7 +837,11 @@ class TeamsSessionManager {
       });
   }
 
-  async sendMessage(chatId: string, content: string, attachment?: TeamsAttachmentInput): Promise<{ ok: true; id: string }> {
+  /**
+   * `opts.html` sends ready-made HTML instead of the escaped text; only for HTML the connector
+   * built itself from data (every value escaped), never for text typed by a user or an AI.
+   */
+  async sendMessage(chatId: string, content: string, attachment?: TeamsAttachmentInput, opts: { html?: string } = {}): Promise<{ ok: true; id: string }> {
     this.invalidateChats(); // the chat's last message changes
     const token = await this.getAccessToken();
     if (!token) throw new Error('Microsoft Teams belum terhubung.');
@@ -859,6 +863,7 @@ class TeamsSessionManager {
         htmlContent = content.trim() ? `<p>${escaped}</p>${docCard}` : docCard;
       }
     }
+    if (opts.html) htmlContent = opts.html;
 
     if (chatId.startsWith('channel:')) {
       const parts = chatId.split(':');

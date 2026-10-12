@@ -265,6 +265,21 @@ export class GitLabClient {
     return out;
   }
 
+  /**
+   * MRs into a branch (e.g. master) across all projects the token can see, updated in the last
+   * `days`, open and merged: the candidates for a release.
+   */
+  async mrsToBranch(targetBranch: string, days = 30): Promise<(MrSummary & { description: string })[]> {
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const out: (MrSummary & { description: string })[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const { body, headers } = await this.get<ApiMr[]>(`/merge_requests?scope=all&state=all&target_branch=${encodeURIComponent(targetBranch)}&updated_after=${since}&order_by=updated_at&per_page=100&page=${page}`);
+      for (const mr of body) if (mr.state === 'opened' || mr.state === 'merged') out.push({ ...summary(mr), description: mr.description ?? '' });
+      if (!headers.get('x-next-page')) break;
+    }
+    return out;
+  }
+
   /** One MR's summary (state, branches, pipeline), e.g. to refresh an MR linked by hand. */
   async mrSummary(projectPath: string, iid: number): Promise<MrSummary> {
     const { body } = await this.get<ApiMr>(`/projects/${encodeURIComponent(projectPath)}/merge_requests/${iid}`);

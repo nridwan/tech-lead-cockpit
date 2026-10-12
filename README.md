@@ -13,6 +13,7 @@ Rencana lengkap: [docs/PLAN.md](docs/PLAN.md).
 | Template & Validator Format TAD | ✅ Validasi Scope ↔ Detail Task, coverage PRD, tipe task (BACKEND, MOBILE-FE, WEB-FE) |
 | Confluence Converter (Gaya tadgen) | ✅ Tabel Document Info (1800px), tabel 2-kolom Detail Task (1688px), Jira macro, wide code macro |
 | Ambil layar Figma untuk AI | ✅ Token Figma di Keychain (Setup → Figma), pilih layar dari link Figma, screenshot + teks tiap layar disimpan ke workspace TAD dan dibaca AI generator |
+| Release Management | ✅ MR ke master per service, cek env/migrasi/query, cakupan tiket (TAD + codename), import/publish dokumen rilis, share review MR ke grup Teams |
 | Publish ke Confluence (create/update + version check + audit) | ✅ via connector lokal (token di Keychain, conflict protection 409) |
 | Balas WhatsApp (AI + template) | ✅ Tautkan via QR (linked device), draft AI lewat Claude CLI, template per audiens, kirim manual dengan konfirmasi |
 | MR Review, Jira Automation, Dashboard | Tahap lanjutan (Phase 1, 4, 5) |

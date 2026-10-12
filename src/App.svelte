@@ -3,6 +3,7 @@
   import Toasts from './components/Toasts.svelte';
   import TadWorkspace from './tad/TadWorkspace.svelte';
   import ProjectsView from './projects/ProjectsView.svelte';
+  import ReleasesView from './releases/ReleasesView.svelte';
   import BugsView from './bugs/BugsView.svelte';
   import BugTraceWatcher from './bugs/BugTraceWatcher.svelte';
   import SetupWizard from './setup/SetupWizard.svelte';
@@ -30,7 +31,7 @@
   // Keeps the VPS copy of the scheduled progress report fresh while the app is open.
   reportSync.start();
 
-  type View = 'dashboard' | 'assistant' | 'agents' | 'mr' | 'tad' | 'projects' | 'bugs' | 'teams' | 'whatsapp' | 'connections' | 'audit';
+  type View = 'dashboard' | 'assistant' | 'agents' | 'mr' | 'tad' | 'projects' | 'releases' | 'bugs' | 'teams' | 'whatsapp' | 'connections' | 'audit';
 
   // Main views live in the top pill bar; settings-like views in the side rail.
   const NAV: { id: View; label: string; icon: IconName; soon?: string; rail?: boolean }[] = [
@@ -40,6 +41,7 @@
     { id: 'mr', label: 'MR Review', icon: 'merge' },
     { id: 'tad', label: 'TAD', icon: 'doc' },
     { id: 'projects', label: 'Proyek', icon: 'list' },
+    { id: 'releases', label: 'Rilis', icon: 'send' },
     { id: 'bugs', label: 'Bug Tracing', icon: 'bug' },
     { id: 'teams', label: 'Teams', icon: 'teams' },
     { id: 'whatsapp', label: 'WhatsApp', icon: 'chat' },
@@ -170,6 +172,8 @@
           <TadWorkspace />
         {:else if view === 'projects'}
           <ProjectsView />
+        {:else if view === 'releases'}
+          <ReleasesView />
         {:else if view === 'bugs'}
           <BugsView />
         {:else if view === 'teams'}
