@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deploymentStorage, deploymentTitle, parseDeploymentStorage, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
 import { releaseMarkdown } from './document';
-import { mergeReleaseDoc } from './import';
+import { importPreview, mergeReleaseDoc, removeServices, resetDocumentData, servicesOutsideScope } from './import';
 import type { MrCheck, Release } from './types';
 
 // A generic page with the same layout as the team's deployment pages.
@@ -86,39 +86,76 @@ describe('reading a deployment page', () => {
     expect(parseDeploymentStorage('<h1>PRD</h1><p>Isi biasa</p><table><tbody><tr><th>A</th><td>B</td></tr></tbody></table>')).toBeNull();
   });
 
-  it('merges into a release: services in deploy order, env and SQL per service, deploy info', () => {
+  it('merges only into the release: its services get the details, release data is never replaced', () => {
     const existing = release({ services: [{ id: 's', name: 'core-report', mrs: [], order: 1, commitId: '1111111' }], items: [{ id: 'i', kind: 'env', label: 'OTP_KEY', source: 'check', done: false }] });
-    const r = mergeReleaseDoc(existing, parseDeploymentStorage(PAGE, 'Deployment 12 Agustus 2026')!, '', { kind: 'confluence', title: 'Deployment 12 Agustus 2026' });
-    expect(r.services.map((s) => [s.order, s.name])).toEqual([
-      [1, 'core-auth'],
-      [2, 'core-report'],
-      [3, 'edge-gateway'],
-    ]);
-    // A commit id typed in Cockpit wins over the imported one.
-    expect(r.services[1].commitId).toBe('1111111');
-    expect(r.items.map((i) => [i.kind, i.label, i.service, i.done])).toEqual([
-      ['env', 'OTP_KEY', 'core-auth', true],
-      ['env', 'OTP_URL', 'core-auth', true],
+    const doc = parseDeploymentStorage(PAGE, 'Deployment 12 Agustus 2026')!;
+    expect(importPreview(existing, doc)).toMatchObject({ matched: [{ doc: 'core-report', release: 'core-report' }], notInRelease: ['core-auth', 'edge-gateway'] });
+
+    const plain = mergeReleaseDoc(existing, doc, '', { kind: 'confluence', title: 'x' });
+    // Services of another release are not added; the release's own service gets its details.
+    expect(plain.services.map((s) => [s.name, s.commitId])).toEqual([['core-report', '1111111']]);
+    expect(plain.items.map((i) => [i.kind, i.label, i.service ?? '', i.done])).toEqual([
+      ['env', 'OTP_KEY', '', false],
       ['sql', 'Update Table', 'core-report', false],
     ]);
-    expect(r.deploy).toMatchObject({ targetTime: '06:00', changeLog: [{ details: 'OTP via WhatsApp' }] });
-    expect(r.date).toBe('2026-08-12');
+    // People and fixed info come over; change log, release list, evidence and status do not.
+    expect(plain.deploy).toEqual({ roles: doc.deploy.roles, changeLog: [], testEvidence: [], targetTime: '06:00', impact: '-', room: 'Ruang Deploy' });
+    expect(plain.date).toBe('2026-08-12');
+
+    const chosen = mergeReleaseDoc(existing, doc, '', { kind: 'confluence', title: 'x' }, undefined, { addServices: ['core-auth'] });
+    expect(chosen.services.map((s) => [s.order, s.name, s.commitId ?? ''])).toEqual([
+      [1, 'core-report', '1111111'],
+      [2, 'core-auth', ''],
+    ]);
+    // Done marks of the other page do not carry over.
+    expect(chosen.items.filter((i) => i.service === 'core-auth').map((i) => [i.label, i.done])).toEqual([
+      ['OTP_KEY', false],
+      ['OTP_URL', false],
+    ]);
+    expect(chosen.services[1]).toMatchObject({ postDeploy: ['Restart worker OTP'], failover: 'Rollback Instance Template', updatedBy: { accountId: 'acc-dev' } });
+  });
+
+  it('finds leftover services, removes them with their items, and resets document data', () => {
+    const r = release({
+      services: [
+        { id: 'a', name: 'core-auth', mrs: [{ ref: 'g/core-auth!1', projectPath: 'g/core-auth', iid: 1, webUrl: 'u', via: 'auto' }], order: 1, commitId: 'abc1234' },
+        { id: 'b', name: 'core-qr', mrs: [], order: 2 },
+        { id: 'c', name: 'core-report', mrs: [], order: 3 },
+      ],
+      items: [{ id: 'i', kind: 'env', label: 'QR_KEY', service: 'core-qr', source: 'import', done: false }],
+      deploy: { roles: [{ label: 'QA', people: [{ name: 'Qa' }] }], changeLog: [{ details: 'lama' }], testEvidence: [{ title: 't', url: 'https://x' }], releaseList: { jql: 'fixVersion = 1' }, statusTitle: 'DONE', room: 'Ruang' },
+    });
+    expect(servicesOutsideScope(r, null)).toEqual([]);
+    const outside = servicesOutsideScope(r, { tickets: [{ service: 'CORE-REPORT' }] });
+    expect(outside.map((s) => s.name)).toEqual(['core-qr']);
+    const cleaned = removeServices(r, outside.map((s) => s.id));
+    expect(cleaned.services.map((s) => [s.order, s.name])).toEqual([
+      [1, 'core-auth'],
+      [2, 'core-report'],
+    ]);
+    expect(cleaned.items).toEqual([]);
+    const reset = resetDocumentData(cleaned);
+    expect(reset.services[0].commitId).toBeUndefined();
+    expect(reset.deploy).toEqual({ roles: [{ label: 'QA', people: [{ name: 'Qa' }] }], changeLog: [], testEvidence: [], room: 'Ruang' });
   });
 });
 
 describe('writing a deployment page', () => {
-  const imported = mergeReleaseDoc(release(), parseDeploymentStorage(PAGE, 'x')!, '', { kind: 'confluence', title: 'x' });
+  const imported = mergeReleaseDoc(release(), parseDeploymentStorage(PAGE, 'x')!, '', { kind: 'confluence', title: 'x' }, undefined, { addServices: ['core-auth', 'core-report', 'edge-gateway'] });
 
   it('round-trips: what Cockpit writes reads back the same', () => {
     const xhtml = deploymentStorage(imported, null, { jiraBaseUrl: 'https://jira.example.com' });
     const again = parseDeploymentStorage(xhtml, 'x')!;
-    expect(again.serviceDetails.map((s) => [s.order, s.name, s.commitId, s.envNames, s.sql.length, s.postDeploy])).toEqual([
-      [1, 'core-auth', '5f794d713b8303e52af3456a6bf768ba57b03ae7', ['OTP_URL', 'OTP_KEY'], 0, ['Restart worker OTP']],
-      [2, 'core-report', 'abbc55d617761b1b6d21a81c4ec948e187ef46b4', [], 1, []],
-      [3, 'edge-gateway', '504b8d680c91ecdd87982341c8a6ae94843970d2', [], 0, []],
+    // Commit ids come from the release's MRs, not from the imported page (none here: TBA).
+    expect(again.serviceDetails.map((s) => [s.name, s.commitId, s.envNames, s.sql.length, s.postDeploy])).toEqual([
+      ['core-auth', undefined, ['OTP_URL', 'OTP_KEY'], 0, ['Restart worker OTP']],
+      ['core-report', undefined, [], 1, []],
+      ['edge-gateway', undefined, [], 0, []],
     ]);
     expect(again.serviceDetails[0].envBlock).toBe(imported.services[0].envBlock);
-    expect(again.deploy).toMatchObject({ targetTime: '06:00', statusTitle: 'DOCUMENT APPROVAL', changeLog: [{ details: 'OTP via WhatsApp', notes: 'Fitur login baru' }], releaseList: { jql: 'fixVersion IN (12094) ORDER BY created ASC' } });
+    // Change Log and status follow the release; the imported page's ones are not carried over.
+    expect(again.deploy).toMatchObject({ targetTime: '06:00', statusTitle: 'DOCUMENT APPROVAL', changeLog: [{ details: 'Rilis Agustus' }] });
+    expect(again.deploy.releaseList).toBeUndefined();
     expect(again.deploy.roles.map((r) => [r.label, r.people.map((p) => p.accountId ?? p.name)])).toEqual([
       ['Supervisor', ['acc-sup']],
       ['QA', ['acc-qa', 'Qa Dua']],
@@ -150,6 +187,21 @@ describe('writing a deployment page', () => {
     expect(back.deploy.roles.map((x) => x.label)).toEqual(['Supervisor', 'Tech Lead', 'QA', 'Cloud Platform Team', 'Product Lead']);
     expect(xhtml).toContain('https://jira.example.com/issues/?jql=key%20in%20(MU-1)%20ORDER%20BY%20created%20ASC');
     expect(xhtml).toContain('<time datetime="2026-10-20" />');
+  });
+
+  it('prefers the MR commit over a typed one, and renders a Confluence-like preview', async () => {
+    const svc = { id: 's1', name: 'core-payment', mrs: [{ ref: 'p/core!1', projectPath: 'p/core', iid: 1, webUrl: 'u', via: 'auto' as const }], order: 1, commitId: 'old0000' };
+    expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'opened', commitSha: 'head1234' } as unknown as MrCheck])).toBe('head1234');
+    expect(serviceCommit(svc, [])).toBe('old0000');
+    const { storageToPreviewHtml } = await import('./preview');
+    const html = storageToPreviewHtml(deploymentStorage(imported), new Map([['acc-sup', 'Super Visor']]));
+    expect(html).toContain('<span class="lozenge lz-blue">DOCUMENT APPROVAL</span>');
+    expect(html).toContain('<span class="mention">@Super Visor</span>');
+    expect(html).toContain('<li class="task"><span class="box">☐</span> Update .env</li>');
+    expect(html).toContain('<span class="date">');
+    expect(html).toMatch(/<pre><code[^>]*>-- tambah kolom/);
+    expect(html).not.toMatch(/<\/?ac:|<\/?ri:/);
+    expect(storageToPreviewHtml('<p>x</p><script>alert(1)</script><img src=x onerror=alert(1)>')).not.toMatch(/script|onerror/);
   });
 
   it('escapes text, keeps CDATA safe, and names the page by date', () => {

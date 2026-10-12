@@ -7,7 +7,7 @@ import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/bran
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
 import { buildReport, codeKeys, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
-import { mergeReleaseDoc, parseReleaseDoc, serviceForPath } from '../../src/lib/release/import.ts';
+import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
 import type { MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
@@ -268,11 +268,11 @@ export class ReleaseManager {
   }
 
   /** A Confluence page's storage, when given, is read as a deployment page first (exact layout). */
-  async importDoc(id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, storage?: string): Promise<Release> {
+  async importDoc(id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, storage?: string, opts: ImportOptions = {}): Promise<Release> {
     const release = await this.get(id);
     if (!markdown.trim() && !storage?.trim()) throw new ReleaseInputError('Dokumen rilis kosong.');
     const doc = (storage && parseDeploymentStorage(storage, source.title)) || parseReleaseDoc(markdown);
-    return this.deps.store.save(mergeReleaseDoc(release, doc, markdown, source, this.now()));
+    return this.deps.store.save(mergeReleaseDoc(release, doc, markdown, source, this.now(), opts));
   }
 
   async sharePreview(id: string, opts: ShareOptions): Promise<{ text: string; html: string }> {

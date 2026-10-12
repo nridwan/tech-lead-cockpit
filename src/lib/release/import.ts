@@ -1,4 +1,5 @@
 import { JIRA_KEY } from './checks';
+import { sameService } from './coverage';
 import type { Release, ReleaseItem, ReleaseMrRef, ReleaseService, ReleaseSource, ReleaseStep } from './types';
 
 /**
@@ -152,46 +153,90 @@ export function serviceForPath(services: ReleaseService[], projectPath: string):
   return services.find((s) => s.gitlabPath === projectPath) ?? services.find((s) => norm(s.name) === repo);
 }
 
+export interface ImportOptions {
+  /** Services of the document that are not in the release and that the user chose to add. */
+  addServices?: string[];
+  /** Add the document's Jira keys to the release scope. */
+  addKeys?: boolean;
+}
+
+export interface ImportPreview {
+  /** Document services that are release services (they get the document's details). */
+  matched: { doc: string; release: string }[];
+  /** Document services the release does not have (left out unless chosen). */
+  notInRelease: string[];
+  /** Jira keys in the document that are not in the release's extra keys. */
+  keys: string[];
+}
+
+const docServiceNames = (doc: ParsedReleaseDoc) => {
+  const dep = doc as Partial<import('./deployment').ParsedDeploymentDoc>;
+  return [...new Set([...doc.services.map((s) => s.name), ...(dep.serviceDetails ?? []).map((s) => s.name)])];
+};
+
+/** What an import would do to a release, for the confirmation in the import dialog. */
+export function importPreview(release: Release, doc: ParsedReleaseDoc): ImportPreview {
+  const matched: ImportPreview['matched'] = [];
+  const notInRelease: string[] = [];
+  for (const name of docServiceNames(doc)) {
+    const svc = release.services.find((s) => sameService(s.name, name));
+    if (svc) matched.push({ doc: name, release: svc.name });
+    else notInRelease.push(name);
+  }
+  return { matched, notInRelease, keys: doc.jiraKeys.filter((k) => !release.jiraKeys.includes(k)) };
+}
+
 /**
- * Merges a parsed document into a release without losing what is there: new services, MRs,
- * env/SQL items and steps are added; existing ones stay (and keep their done marks).
+ * Merges a document into a release. The document follows the release, not the other way round:
+ * release data (services in scope, MRs and their commits, Change Log, Release List, status) is
+ * never replaced by the document. Taken from the document: what Cockpit cannot derive — the
+ * people per role, deployment room and release time (when empty), and, for services that are in
+ * the release, their env block, pre/post-deploy notes, failover and "updated by". Services and
+ * tickets the release does not have are added only when chosen (`opts`).
  */
-export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, now = new Date().toISOString()): Release {
+export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, now = new Date().toISOString(), opts: ImportOptions = {}): Release {
   const services = release.services.map((s) => ({ ...s, mrs: [...s.mrs] }));
-  const byName = (name: string) => services.find((s) => norm(s.name) === norm(name));
-  const addService = (name: string, extra: Partial<ReleaseService> = {}) => {
-    const s: ReleaseService = { id: newId(), name, mrs: [], order: services.length + 1, ...extra };
+  const chosen = new Set((opts.addServices ?? []).map(norm));
+  const target = (name: string): ReleaseService | undefined => {
+    const existing = services.find((s) => sameService(s.name, name));
+    if (existing) return existing;
+    if (!chosen.has(norm(name))) return undefined;
+    const s: ReleaseService = { id: newId(), name, mrs: [], order: services.length + 1 };
     services.push(s);
     return s;
   };
+
   for (const s of doc.services) {
-    const existing = byName(s.name);
-    if (existing) {
-      existing.pic ??= s.pic;
-      if (s.order && existing.order > services.length) existing.order = s.order;
-    } else addService(s.name, { pic: s.pic, ...(s.order ? { order: s.order } : {}) });
+    const svc = target(s.name);
+    if (svc && s.pic) svc.pic ??= s.pic;
   }
   for (const m of doc.mrs) {
     const ref = `${m.projectPath}!${m.iid}`;
     if (services.some((s) => s.mrs.some((x) => x.ref === ref))) continue;
     const row = doc.services.find((s) => s.mrUrls.some((u) => mrRefFromUrl(u)?.iid === m.iid && mrRefFromUrl(u)?.projectPath === m.projectPath));
-    const target = (row && byName(row.name)) ?? serviceForPath(services, m.projectPath) ?? addService(m.projectPath.split('/').pop() ?? m.projectPath, { gitlabPath: m.projectPath });
-    target.gitlabPath ??= m.projectPath;
+    const svc = (row && target(row.name)) ?? serviceForPath(services, m.projectPath) ?? target(m.projectPath.split('/').pop() ?? m.projectPath);
+    if (!svc) continue;
+    svc.gitlabPath ??= m.projectPath;
     const mr: ReleaseMrRef = { ref, projectPath: m.projectPath, iid: m.iid, webUrl: m.webUrl, via: 'import' };
-    target.mrs.push(mr);
+    svc.mrs.push(mr);
   }
+
   const items: ReleaseItem[] = [...release.items];
-  const hasItem = (kind: ReleaseItem['kind'], label: string) => items.some((i) => i.kind === kind && i.label === label);
-  for (const e of doc.env) if (!hasItem('env', e)) items.push({ id: newId(), kind: 'env', label: e, source: 'import', done: false });
-  for (const q of doc.sql) if (!items.some((i) => i.kind === 'sql' && i.detail === q.text)) items.push({ id: newId(), kind: 'sql', label: q.label, detail: q.text, source: 'import', done: false });
   const steps: ReleaseStep[] = [...release.steps];
-  const addSteps = (kind: ReleaseStep['kind'], texts: string[]) => {
-    for (const text of texts) if (!steps.some((s) => s.kind === kind && norm(s.text) === norm(text))) steps.push({ id: newId(), kind, text, done: false });
-  };
-  addSteps('deploy', doc.deploySteps);
-  addSteps('rollback', doc.rollbackSteps);
-  // A deployment page (see deployment.ts): release info and per-service details.
   const dep = doc as Partial<import('./deployment').ParsedDeploymentDoc>;
+  if (!dep.serviceDetails) {
+    // A free-form document: its env, queries and steps belong to this release.
+    const hasItem = (kind: ReleaseItem['kind'], label: string) => items.some((i) => i.kind === kind && i.label === label);
+    for (const e of doc.env) if (!hasItem('env', e)) items.push({ id: newId(), kind: 'env', label: e, source: 'import', done: false });
+    for (const q of doc.sql) if (!items.some((i) => i.kind === 'sql' && i.detail === q.text)) items.push({ id: newId(), kind: 'sql', label: q.label, detail: q.text, source: 'import', done: false });
+    const addSteps = (kind: ReleaseStep['kind'], texts: string[]) => {
+      for (const text of texts) if (!steps.some((s) => s.kind === kind && norm(s.text) === norm(text))) steps.push({ id: newId(), kind, text, done: false });
+    };
+    addSteps('deploy', doc.deploySteps);
+    addSteps('rollback', doc.rollbackSteps);
+  }
+
+  // A deployment page: people and fixed info, then details of the release's own services.
   let deploy = release.deploy;
   if (dep.deploy) {
     const cur = release.deploy ?? { roles: [], changeLog: [], testEvidence: [] };
@@ -199,43 +244,30 @@ export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdow
     deploy = {
       ...cur,
       targetTime: cur.targetTime ?? d.targetTime,
-      actual: d.actual ?? cur.actual,
-      statusTitle: d.statusTitle ?? cur.statusTitle,
-      statusColour: d.statusColour ?? cur.statusColour,
-      impact: d.impact ?? cur.impact,
+      impact: cur.impact ?? d.impact,
       room: cur.room ?? d.room,
-      issueLink: cur.issueLink ?? d.issueLink,
-      roles: d.roles.length ? d.roles.map((r) => ({ ...r, people: r.people.length ? r.people : (cur.roles.find((x) => x.label === r.label)?.people ?? []) })) : cur.roles,
-      changeLog: [...cur.changeLog, ...d.changeLog.filter((c) => !cur.changeLog.some((x) => norm(x.details) === norm(c.details)))],
-      releaseList: d.releaseList ?? cur.releaseList,
-      testEvidence: [...cur.testEvidence, ...d.testEvidence.filter((e) => !cur.testEvidence.some((x) => x.url === e.url))],
+      roles: d.roles.length ? d.roles.map((r) => ({ label: r.label, people: r.people.length ? r.people : (cur.roles.find((x) => x.label === r.label)?.people ?? []) })) : cur.roles,
     };
   }
   for (const s of dep.serviceDetails ?? []) {
-    const target = byName(s.name) ?? addService(s.name);
-    if (s.order) target.order = s.order;
-    target.commitId ??= s.commitId;
-    target.envBlock ??= s.envBlock;
-    target.failover ??= s.failover;
-    target.updatedBy ??= s.updatedBy;
-    target.preDeploy = [...new Set([...(target.preDeploy ?? []), ...s.preDeploy])];
-    target.postDeploy = [...new Set([...(target.postDeploy ?? []), ...s.postDeploy])];
+    const svc = target(s.name);
+    if (!svc) continue;
+    svc.envBlock ??= s.envBlock;
+    svc.failover ??= s.failover;
+    svc.updatedBy ??= s.updatedBy;
+    if (s.preDeploy.length) svc.preDeploy = [...new Set([...(svc.preDeploy ?? []), ...s.preDeploy])];
+    if (s.postDeploy.length) svc.postDeploy = [...new Set([...(svc.postDeploy ?? []), ...s.postDeploy])];
+    // Done marks of another page say nothing about this release: imported items start open.
     for (const e of s.envNames) {
-      const it = items.find((i) => i.kind === 'env' && i.label === e && (!i.service || i.service === s.name));
-      if (it) {
-        it.service ??= s.name;
-        if (s.envDone) it.done = true;
-      } else items.push({ id: newId(), kind: 'env', label: e, service: s.name, source: 'import', done: s.envDone });
+      const it = items.find((i) => i.kind === 'env' && i.label === e && (!i.service || i.service === svc.name));
+      if (it) it.service ??= svc.name;
+      else items.push({ id: newId(), kind: 'env', label: e, service: svc.name, source: 'import', done: false });
     }
     for (const q of s.sql) {
       const it = items.find((i) => i.kind === 'sql' && i.detail === q.text);
-      if (it) it.service ??= s.name;
-      else items.push({ id: newId(), kind: 'sql', label: q.label, detail: q.text, service: s.name, source: 'import', done: q.done });
+      if (it) it.service ??= svc.name;
+      else items.push({ id: newId(), kind: 'sql', label: q.label, detail: q.text, service: svc.name, source: 'import', done: false });
     }
-  }
-  // Generic SQL/env from a deployment page are already tied to a service above.
-  if (dep.serviceDetails?.length) {
-    for (let i = items.length - 1; i >= 0; i--) if (items[i].source === 'import' && !items[i].service && !release.items.some((x) => x.id === items[i].id)) items.splice(i, 1);
   }
 
   return {
@@ -244,11 +276,46 @@ export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdow
     name: release.name || doc.title || release.name,
     version: release.version || doc.version || '',
     date: release.date ?? doc.date,
-    jiraKeys: [...new Set([...release.jiraKeys, ...doc.jiraKeys])],
+    jiraKeys: opts.addKeys ? [...new Set([...release.jiraKeys, ...doc.jiraKeys])] : release.jiraKeys,
     services: services.sort((a, b) => a.order - b.order).map((s, i) => ({ ...s, order: i + 1 })),
     items,
     steps,
     docMarkdown: markdown,
     source: { ...source, importedAt: now },
+  };
+}
+
+/**
+ * Services with no release MR that no scope ticket points to (needs a report): what an older
+ * import (or a typo) left behind.
+ */
+export function servicesOutsideScope(release: Release, report: { tickets: { service?: string }[] } | null | undefined): ReleaseService[] {
+  if (!report) return [];
+  return release.services.filter((s) => !s.mrs.length && !report.tickets.some((t) => t.service && sameService(t.service, s.name)));
+}
+
+/** Removes services (and their checklist items) from a release. */
+export function removeServices(release: Release, ids: string[]): Release {
+  const gone = new Set(ids);
+  const names = new Set(release.services.filter((s) => gone.has(s.id)).map((s) => s.name));
+  return {
+    ...release,
+    services: release.services.filter((s) => !gone.has(s.id)).map((s, i) => ({ ...s, order: i + 1 })),
+    items: release.items.filter((i) => !i.service || !names.has(i.service)),
+    steps: release.steps.filter((x) => !x.service || !names.has(x.service)),
+  };
+}
+
+/**
+ * Clears what a deployment page of another release may have put in: Change Log, Release List,
+ * test evidence, status, actual time, issue link and typed commit ids. The document then follows
+ * the release again. People per role and the deployment room stay.
+ */
+export function resetDocumentData(release: Release): Release {
+  const d = release.deploy;
+  return {
+    ...release,
+    services: release.services.map(({ commitId: _c, ...s }) => s),
+    ...(d ? { deploy: { roles: d.roles, changeLog: [], testEvidence: [], ...(d.room ? { room: d.room } : {}), ...(d.targetTime ? { targetTime: d.targetTime } : {}), ...(d.impact ? { impact: d.impact } : {}) } } : {}),
   };
 }

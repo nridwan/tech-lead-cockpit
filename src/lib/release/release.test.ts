@@ -4,7 +4,7 @@ import { planReleaseBranch, releaseBranchCommands, releaseBranchName } from './b
 import { checkMr, envAddedIn, envReadsIn, isMigration, jiraKeysIn } from './checks';
 import { buildReport, codeKeys, matchesCodename, sameService, ticketService, ticketTags, type ReleaseTicket } from './coverage';
 import { releaseMarkdown } from './document';
-import { mergeReleaseDoc, mrRefFromUrl, parseReleaseDoc } from './import';
+import { importPreview, mergeReleaseDoc, mrRefFromUrl, parseReleaseDoc } from './import';
 import { shareMessageHtml, shareMessageText } from './share';
 import type { MrCheck, Release } from './types';
 
@@ -179,15 +179,24 @@ describe('release document import', () => {
     expect(mrRefFromUrl('https://gitlab.example.com/a/b/c/-/merge_requests/3.')).toEqual({ projectPath: 'a/b/c', iid: 3, webUrl: 'https://gitlab.example.com/a/b/c/-/merge_requests/3' });
   });
 
-  it('merges into a release without losing existing work', () => {
+  it('merges into a release without losing existing work, adding only chosen services', () => {
     const existing = release({
       version: '',
       services: [{ id: 's1', name: 'Core Payment', mrs: [], order: 1, pic: 'Andi' }],
       items: [{ id: 'i1', kind: 'env', label: 'SWITCH_URL', source: 'check', done: true }],
       steps: [{ id: 'st1', kind: 'deploy', text: 'Deploy core-payment', done: true }],
     });
-    const merged = mergeReleaseDoc(existing, parseReleaseDoc(DOC), DOC, { kind: 'confluence', title: 'Rilis', pageId: '123' }, '2026-10-12T05:00:00Z');
+    const doc = parseReleaseDoc(DOC);
+    expect(importPreview(existing, doc)).toEqual({ matched: [{ doc: 'core-payment', release: 'Core Payment' }], notInRelease: ['Mobile App'], keys: ['MU-12', 'MU-13'] });
+    // Not chosen: Mobile App and the document's tickets stay out.
+    const plain = mergeReleaseDoc(existing, doc, DOC, { kind: 'markdown', title: 'Rilis' });
+    expect(plain.services.map((s) => s.name)).toEqual(['Core Payment']);
+    expect(plain.services[0].mrs.map((m) => m.ref)).toEqual(['payments/core-payment!12']);
+    expect(plain.jiraKeys).toEqual([]);
+
+    const merged = mergeReleaseDoc(existing, doc, DOC, { kind: 'confluence', title: 'Rilis', pageId: '123' }, '2026-10-12T05:00:00Z', { addServices: ['Mobile App'], addKeys: true });
     expect(merged.version).toBe('2.4.0');
+    expect(merged.jiraKeys).toEqual(['MU-12', 'MU-13']);
     expect(merged.services.map((s) => [s.name, s.pic, s.mrs.map((m) => m.ref)])).toEqual([
       ['Core Payment', 'Andi', ['payments/core-payment!12']],
       ['Mobile App', 'Dewi', ['mobile/app!7']],
@@ -201,7 +210,7 @@ describe('release document import', () => {
     ]);
     expect(merged.source).toMatchObject({ kind: 'confluence', pageId: '123', importedAt: '2026-10-12T05:00:00Z' });
     // Importing again adds nothing twice.
-    const again = mergeReleaseDoc(merged, parseReleaseDoc(DOC), DOC, { kind: 'confluence', title: 'Rilis' });
+    const again = mergeReleaseDoc(merged, doc, DOC, { kind: 'confluence', title: 'Rilis' });
     expect(again.items).toHaveLength(merged.items.length);
     expect(again.services.flatMap((s) => s.mrs)).toHaveLength(2);
   });

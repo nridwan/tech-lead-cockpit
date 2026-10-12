@@ -273,12 +273,21 @@ function code(body: string, language?: string): string {
   return `<ac:structured-macro ac:name="code" ac:schema-version="1">${language ? `<ac:parameter ac:name="language">${esc(language)}</ac:parameter>` : ''}<ac:parameter ac:name="wrap">true</ac:parameter><ac:plain-text-body>${cdata(body)}</ac:plain-text-body></ac:structured-macro>`;
 }
 
-/** Commit id for a service: typed in or imported, else the merged (or open) release MR's commit. */
+/**
+ * Commit id for a service, from the release data: the merged (else open) release MR's commit.
+ * A commit id typed in only counts when the release has no checked MR for the service.
+ */
 export function serviceCommit(service: ReleaseService, checks: MrCheck[]): string | undefined {
-  if (service.commitId) return service.commitId;
   const mine = checks.filter((c) => service.mrs.some((m) => m.ref === c.ref) && !c.error && c.state !== 'closed');
   const merged = mine.find((c) => c.state === 'merged' && c.commitSha);
-  return (merged ?? mine.find((c) => c.commitSha))?.commitSha;
+  return (merged ?? mine.find((c) => c.commitSha))?.commitSha ?? service.commitId;
+}
+
+/** Change Log rows from the release itself when none were written: one row for the release. */
+export function changeLogRows(release: Release): { details: string; notes?: string }[] {
+  const rows = release.deploy?.changeLog.filter((c) => c.details.trim() || c.notes?.trim()) ?? [];
+  if (rows.length) return rows;
+  return [{ details: release.name, notes: [release.version, release.codenames.join(', ')].filter(Boolean).join(' · ') || undefined }];
 }
 
 /** The env block for a service: the page's own block, plus `KEY=` for env found by the checks. */
@@ -328,7 +337,7 @@ export function deploymentStorage(release: Release, report?: ReleaseReport | nul
     '<h2><ac:emoticon ac:name="dart" ac:emoji-shortname=":dart:" ac:emoji-id="1f3af" ac:emoji-fallback="🎯" /> Change Log</h2>',
     '<table data-table-width="760" data-layout="default"><colgroup><col style="width: 92.0px;" /><col style="width: 342.0px;" /><col style="width: 324.0px;" /></colgroup><tbody>',
     '<tr><th><p><strong>No.</strong></p></th><th><p><strong>Details</strong></p></th><th><p><strong>Notes</strong></p></th></tr>',
-    ...(d.changeLog.length ? d.changeLog : [{ details: '', notes: '' }]).map((c, i) => `<tr><td><p>${i + 1}</p></td><td><p>${esc(c.details)}</p></td><td><p>${esc(c.notes ?? '')}</p></td></tr>`),
+    ...changeLogRows(release).map((c, i) => `<tr><td><p>${i + 1}</p></td><td><p>${esc(c.details)}</p></td><td><p>${esc(c.notes ?? '')}</p></td></tr>`),
     '</tbody></table>',
   );
 

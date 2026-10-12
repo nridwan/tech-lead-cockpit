@@ -7,7 +7,7 @@
   import { extractPageId } from '../lib/prd/confluence-prd';
   import { releases } from '../lib/release/client';
   import { parseDeploymentStorage } from '../lib/release/deployment';
-  import { parseReleaseDoc, type ParsedReleaseDoc } from '../lib/release/import';
+  import { importPreview, parseReleaseDoc, type ParsedReleaseDoc } from '../lib/release/import';
   import type { Release, ReleaseSource } from '../lib/release/types';
 
   /** Imports a release document (Confluence page, .md file or pasted text) into a release, like TAD import. */
@@ -25,6 +25,10 @@
 
   const deployment = $derived(storage ? parseDeploymentStorage(storage, source?.title) : null);
   const parsed = $derived<ParsedReleaseDoc | null>(deployment ?? (markdown.trim() ? parseReleaseDoc(markdown) : null));
+  const preview = $derived(parsed ? importPreview(release, parsed) : null);
+  /** Document services not in the release that the user ticks to add. */
+  let addServices = $state<string[]>([]);
+  let addKeys = $state(false);
 
   $effect(() => {
     if (open) {
@@ -65,7 +69,9 @@
     if (!markdown.trim()) return;
     saving = true;
     try {
-      const r = await releases.importDoc(release.id, markdown, source ?? { kind: 'markdown', title: 'Teks yang ditempel' }, storage || undefined);
+      const r = await releases.importDoc(release.id, markdown, source ?? { kind: 'markdown', title: 'Teks yang ditempel' }, storage || undefined, { addServices: [...addServices], addKeys });
+      addServices = [];
+      addKeys = false;
       onimported(r);
       toasts.show('Dokumen rilis diimport. Service, MR, env, query, dan langkah yang terbaca sudah masuk.', 'ok', 4000);
       open = false;
@@ -125,6 +131,25 @@
         </ul>
         <p class="muted small">Tabel service dikenali dari judul kolom (Service, Repo, Aplikasi, Project, Modul). Langkah dikenali dari judul bagian (Deploy, Langkah, Runbook, Rollback).</p>
       </section>
+
+      {#if preview}
+        <section class="summary plan">
+          <h4>Yang akan masuk ke rilis</h4>
+          <p class="small">Dokumen mengikuti data rilis. Diambil: {deployment ? 'orang per peran, Deployment Room, jam rilis (kalau kosong), dan untuk service yang ada di rilis: blok .env, catatan pre/post-deploy, failover, updated by' : 'env, query, dan langkah dari dokumen'}. Tidak diambil: commit id, Change Log, Release List, bukti test, dan status (disusun dari rilis).</p>
+          <p class="small"><strong>Service yang cocok dengan rilis ({preview.matched.length}):</strong> {preview.matched.map((m) => (m.doc === m.release ? m.release : `${m.doc} → ${m.release}`)).join(', ') || 'tidak ada'}</p>
+          {#if preview.notInRelease.length}
+            <p class="small"><strong>Ada di dokumen tapi tidak di rilis ({preview.notInRelease.length})</strong> — tidak ditambahkan kecuali dicentang:</p>
+            <div class="checks">
+              {#each preview.notInRelease as name (name)}
+                <label class="small"><input type="checkbox" checked={addServices.includes(name)} onchange={(e) => (addServices = e.currentTarget.checked ? [...addServices, name] : addServices.filter((x) => x !== name))} /> {name}</label>
+              {/each}
+            </div>
+          {/if}
+          {#if preview.keys.length}
+            <label class="small"><input type="checkbox" bind:checked={addKeys} /> Tambahkan {preview.keys.length} tiket Jira dari dokumen ke scope rilis ({preview.keys.slice(0, 8).join(', ')}{preview.keys.length > 8 ? ', …' : ''})</label>
+          {/if}
+        </section>
+      {/if}
     {/if}
 
     <div class="actions">
@@ -191,6 +216,19 @@
   }
   .hidden {
     display: none;
+  }
+  .plan {
+    border: 1px solid var(--accent);
+  }
+  .checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+  }
+  .plan label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

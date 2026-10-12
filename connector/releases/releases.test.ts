@@ -255,7 +255,10 @@ describe('ReleaseManager', () => {
   it('imports a document and shares only release MRs to Teams', async () => {
     const m = manager();
     const r = await m.store.save({ name: 'Rilis' } as never);
-    const imported = await m.importDoc(r.id, `# Rilis v2.4.0\n\n| Service | MR |\n| --- | --- |\n| core-payment | ${GL}/payments/core-payment/-/merge_requests/12 |\n`, { kind: 'markdown', title: 'rilis.md' });
+    const doc = `# Rilis v2.4.0\n\n| Service | MR |\n| --- | --- |\n| core-payment | ${GL}/payments/core-payment/-/merge_requests/12 |\n`;
+    // A service the release does not have is left out unless chosen.
+    expect((await m.importDoc(r.id, doc, { kind: 'markdown', title: 'rilis.md' })).services).toEqual([]);
+    const imported = await m.importDoc(r.id, doc, { kind: 'markdown', title: 'rilis.md' }, undefined, { addServices: ['core-payment'] });
     expect(imported.services[0].mrs[0].ref).toBe('payments/core-payment!12');
     await expect(m.importDoc(r.id, '  ', { kind: 'markdown', title: 'x' })).rejects.toThrow(/kosong/);
 
@@ -313,7 +316,7 @@ describe('connector /releases routes', () => {
     expect((await call('/releases', { release: { name: '' } })).status).toBe(400);
     const r = await (await call('/releases', { release: { name: 'Rilis Oktober' } })).json();
     expect((await call('/releases/one?id=nope')).status).toBe(400);
-    const imported = await (await call('/releases/import', { id: r.id, markdown: `| Service | MR |\n| --- | --- |\n| core | ${GL}/a/core/-/merge_requests/2 |`, source: { kind: 'markdown', title: 'doc.md' } })).json();
+    const imported = await (await call('/releases/import', { id: r.id, markdown: `| Service | MR |\n| --- | --- |\n| core | ${GL}/a/core/-/merge_requests/2 |`, source: { kind: 'markdown', title: 'doc.md' }, addServices: ['core'] })).json();
     expect(imported.services[0].mrs[0].ref).toBe('a/core!2');
     expect(await (await call('/releases/report?id=' + r.id)).json()).toEqual({ report: null });
 

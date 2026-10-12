@@ -9,7 +9,11 @@
   import { renderPreview } from '../lib/markdown/preview';
   import { releases } from '../lib/release/client';
   import { releaseMarkdown } from '../lib/release/document';
-  import { mrRefFromUrl, serviceForPath } from '../lib/release/import';
+  import { deploymentStorage, deploymentTitle } from '../lib/release/deployment';
+  import { storageToPreviewHtml } from '../lib/release/preview';
+  import { appSettings } from '../lib/settings/store.svelte';
+  import PreviewPane from '../tad/PreviewPane.svelte';
+  import { mrRefFromUrl, removeServices, resetDocumentData, serviceForPath, servicesOutsideScope } from '../lib/release/import';
   import { DEFAULT_MR_TITLE, mrTitle } from '../lib/release/mr';
   import { bringsSummary } from '../lib/release/share';
   import { RELEASE_STATUSES, RELEASE_STATUS_LABELS, type MrCheck, type Release, type ReleaseItem, type ReleaseReport, type ReleaseService } from '../lib/release/types';
@@ -55,6 +59,16 @@
   const allMrs = $derived(current ? current.services.flatMap((s) => s.mrs) : []);
   const pendingItems = $derived(current ? current.items.filter((i) => !i.done).length : 0);
   const docMd = $derived(current ? releaseMarkdown(current, report) : '');
+  const outside = $derived(current ? servicesOutsideScope(current, report) : []);
+  /** The page that will be published, rendered like the TAD preview. */
+  const previewHtml = $derived.by(() => {
+    if (!current || tab !== 'doc') return '';
+    const people = new Map<string, string>();
+    for (const r of current.deploy?.roles ?? []) for (const p of r.people) if (p.accountId) people.set(p.accountId, p.name);
+    for (const s of current.services) if (s.updatedBy?.accountId) people.set(s.updatedBy.accountId, s.updatedBy.name);
+    const body = deploymentStorage($state.snapshot(current) as Release, report, { jiraBaseUrl: appSettings.value.jira.baseUrl });
+    return `<h1>${deploymentTitle(current).replace(/</g, '&lt;')}</h1>${storageToPreviewHtml(body, people)}`;
+  });
 
   function idFromHash(): string | undefined {
     const m = location.hash.match(/^#\/releases\/([A-Za-z0-9_-]+)/);
@@ -245,6 +259,27 @@
     const other = serviceForPath(current.services, ref.projectPath);
     if (other && other.id !== s.id) toasts.show(`Catatan: repo MR ini tampak milik service ${other.name}.`, 'info', 4000);
   }
+  async function removeOutside() {
+    if (!current || !outside.length) return;
+    const ok = await confirmDialog({ title: 'Hapus service di luar scope?', message: `${outside.map((s) => s.name).join(', ')} tidak punya tiket scope dan tidak punya MR. Service ini dan item checklist-nya dihapus dari rilis.`, confirmText: 'Hapus', danger: true });
+    if (!ok) return;
+    const next = removeServices($state.snapshot(current) as Release, outside.map((s) => s.id));
+    current.services = next.services;
+    current.items = next.items;
+    current.steps = next.steps;
+    toasts.show(`${outside.length} service dihapus dari rilis.`, 'ok', 2500);
+  }
+
+  async function resetDoc() {
+    if (!current) return;
+    const ok = await confirmDialog({ title: 'Susun ulang dokumen dari data rilis?', message: 'Change Log, Release List, bukti test, status, actual, link, dan commit id manual dikosongkan, lalu dokumen disusun dari rilis (commit dari MR, tiket dari scope). Orang per peran, Deployment Room, jam rilis, dan isian per service lain tetap.', confirmText: 'Kosongkan' });
+    if (!ok) return;
+    const next = resetDocumentData($state.snapshot(current) as Release);
+    current.services = next.services;
+    current.deploy = next.deploy;
+    toasts.show('Dokumen sekarang mengikuti data rilis.', 'ok', 2500);
+  }
+
   /** Opens an MR in MR Review (diff per file, AI review incl. background, TAD conformance). */
   async function reviewMr(webUrl: string) {
     await flush();
@@ -403,12 +438,19 @@
 
       <div class="body">
         {#if tab === 'board'}
+          {#if outside.length}
+            <div class="outside">
+              <Icon name="alert" size={13} />
+              <span class="small">{outside.length} service tidak punya tiket scope dan tidak punya MR: <strong>{outside.map((s) => s.name).join(', ')}</strong>. Biasanya sisa import dokumen lama.</span>
+              <button class="btn btn-sm" onclick={removeOutside}><Icon name="trash" size={12} /> Hapus dari rilis</button>
+            </div>
+          {/if}
           {#if !current.services.length}
             <p class="muted">Belum ada service. Pilih proyek atau codename di atas lalu klik <strong>Cari service & MR</strong>, import dokumen rilis, atau tambah manual.</p>
           {/if}
           {#each [...current.services].sort((a, b) => a.order - b.order) as s (s.id)}
             {@const noMr = report?.servicesWithoutMr.some((x) => x.toLowerCase() === s.name.toLowerCase())}
-            <div class="svc" class:missing={noMr || !s.mrs.length}>
+            <div class="svc" class:missing={noMr || !s.mrs.length} class:faded={outside.some((o) => o.id === s.id)}>
               <div class="svc-head">
                 <span class="order">{s.order}</span>
                 <span class="mv">
@@ -416,6 +458,7 @@
                   <button class="icon-btn" onclick={() => move(s, 1)} aria-label="Turunkan urutan">▼</button>
                 </span>
                 <input class="input svc-name" bind:value={s.name} aria-label="Nama service" />
+                {#if outside.some((o) => o.id === s.id)}<span class="badge b-err">di luar scope</span>{/if}
                 <input class="input mono path" bind:value={s.gitlabPath} placeholder="group/repo di GitLab" aria-label="Path GitLab" />
                 <input class="input mono src" value={s.sourceBranch ?? ''} oninput={(e) => (s.sourceBranch = e.currentTarget.value.trim() || undefined)} placeholder={current.sourceBranch ?? 'staging'} title="Branch sumber MR rilis untuk service ini (kosong = {current.sourceBranch ?? 'staging'})" aria-label="Branch sumber" />
                 <input class="input pic" bind:value={s.pic} placeholder="PIC" aria-label="PIC" />
@@ -580,12 +623,13 @@
             {/if}
             {#if current.published}<span class="small">Dipublish ke Confluence versi {current.published.version} {#if current.published.url}<a href={current.published.url} target="_blank" rel="noreferrer">Buka <Icon name="external" size={11} /></a>{/if}</span>{/if}
             <button class="btn btn-sm" onclick={copyDoc}><Icon name="copy" size={12} /> Salin Markdown</button>
+            <button class="btn btn-sm btn-ghost" onclick={resetDoc} title="Kosongkan isi dokumen lama (Change Log, Release List, bukti test, status, commit id manual) supaya dokumen mengikuti data rilis"><Icon name="refresh" size={12} /> Susun ulang dari data rilis</button>
           </div>
           <DeployInfoForm release={current} />
           <div class="docs">
-            <article class="doc">
-              <h4>Pratinjau dokumen Deployment</h4>
-              <div class="md">{@html renderPreview(docMd).html}</div>
+            <article class="doc rich">
+              <h4>Pratinjau dokumen Deployment (seperti di Confluence)</h4>
+              <div class="release-preview"><PreviewPane html={previewHtml} embedded /></div>
             </article>
             {#if current.docMarkdown}
               <article class="doc">
@@ -832,6 +876,18 @@
   .svc.missing {
     border-color: var(--err);
   }
+  .svc.faded {
+    opacity: 0.6;
+  }
+  .outside {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--warn-soft);
+  }
   .svc-head {
     display: flex;
     align-items: center;
@@ -1051,6 +1107,75 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .doc.rich {
+    grid-column: 1 / -1;
+    max-height: none;
+  }
+  .release-preview :global(.lozenge) {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    background: #dfe1e6;
+    color: #42526e;
+  }
+  .release-preview :global(.lz-blue) {
+    background: #deebff;
+    color: #0747a6;
+  }
+  .release-preview :global(.lz-green) {
+    background: #e3fcef;
+    color: #006644;
+  }
+  .release-preview :global(.lz-yellow) {
+    background: #fff0b3;
+    color: #172b4d;
+  }
+  .release-preview :global(.lz-red) {
+    background: #ffebe6;
+    color: #bf2600;
+  }
+  .release-preview :global(.lz-purple) {
+    background: #eae6ff;
+    color: #403294;
+  }
+  .release-preview :global(ul.tasks) {
+    list-style: none;
+    padding-left: 0;
+    margin: 2px 0;
+  }
+  .release-preview :global(li.task .box) {
+    font-size: 15px;
+  }
+  .release-preview :global(li.task.done) {
+    color: var(--text-3);
+    text-decoration: line-through;
+  }
+  .release-preview :global(.panel) {
+    margin: 8px 0;
+    padding: 10px 14px;
+    border-radius: 4px;
+    background: #deebff;
+    color: #172b4d;
+  }
+  .release-preview :global(.panel-note) {
+    background: #eae6ff;
+  }
+  .release-preview :global(.mention) {
+    padding: 0 6px;
+    border-radius: 10px;
+    background: #dfe1e6;
+    color: #172b4d;
+    font-size: 12.5px;
+  }
+  .release-preview :global(th.numberingColumn),
+  .release-preview :global(td.numberingColumn) {
+    width: 32px;
+    text-align: center;
+    color: var(--text-3);
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

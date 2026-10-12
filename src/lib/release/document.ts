@@ -1,4 +1,4 @@
-import { DEFAULT_FAILOVER, DEFAULT_ROLES, deploymentTitle, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
+import { DEFAULT_FAILOVER, DEFAULT_ROLES, changeLogRows, deploymentTitle, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
 import { RELEASE_STATUS_LABELS, type Release, type ReleaseReport } from './types';
 
 /**
@@ -24,7 +24,7 @@ export function releaseMarkdown(r: Release, report?: ReleaseReport | null): stri
   lines.push(`| Issue/Request Link (if any) | ${cell(d.issueLink ?? '-')} |`, '');
 
   lines.push('## 🎯 Change Log', '', '| No. | Details | Notes |', '| --- | --- | --- |');
-  (d.changeLog.length ? d.changeLog : [{ details: '-', notes: '' }]).forEach((c, i) => lines.push(`| ${i + 1} | ${cell(c.details)} | ${cell(c.notes ?? '')} |`));
+  changeLogRows(r).forEach((c, i) => lines.push(`| ${i + 1} | ${cell(c.details)} | ${cell(c.notes ?? '')} |`));
   lines.push('');
 
   const services = [...r.services].sort((a, b) => a.order - b.order);
