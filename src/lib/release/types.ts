@@ -359,7 +359,7 @@ export interface AiPick {
 export interface ReleaseAiJob {
   id: string;
   releaseId: string;
-  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch';
+  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover';
   serviceId?: string;
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */

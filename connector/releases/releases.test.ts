@@ -299,8 +299,6 @@ describe('ReleaseManager', () => {
       throw new Error('job did not finish');
     };
 
-    // Step one: the AI looks for services and MRs (nothing to add here).
-    replies.push(JSON.stringify({ services: [], mrs: [] }));
     replies.push(
       JSON.stringify({
         tickets: [{ key: 'MU-12', verdict: 'ada', files: ['api/refund.go'], reason: 'RefundApi' }],
@@ -315,9 +313,8 @@ describe('ReleaseManager', () => {
     );
     expect((await m.aiStart(r.id, 'tickets', { ai })).status).toBe('running');
     expect((await settle('tickets')).status).toBe('done');
-    expect(prompts[0]).toContain('Tentukan service (repo) dan MR');
-    expect(prompts[1]).toContain('MU-12');
-    expect(prompts[1]).toContain('+func RefundApi()');
+    expect(prompts[0]).toContain('MU-12');
+    expect(prompts[0]).toContain('+func RefundApi()');
     const report = (await m.report(r.id))!;
     expect(report.ai?.model).toBe('claude/x');
     expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: ['payments/core-payment!12'], ai: { verdict: 'ada' } });
@@ -330,7 +327,6 @@ describe('ReleaseManager', () => {
     expect(report.sources?.[0].aiRisks).toEqual([{ path: 'api/promo.go', reason: 'kredensial di kode' }]);
 
     // A second check replaces what the AI wrote before instead of piling up.
-    replies.push(JSON.stringify({ services: [], mrs: [] }));
     replies.push(JSON.stringify({ tickets: [{ key: 'MU-12', verdict: 'ada', files: [], reason: 'x' }], needs: [{ kind: 'other', when: 'post', label: 'Cek log refund', files: [] }] }));
     await m.aiStart(r.id, 'tickets', { ai });
     await settle('tickets');
@@ -338,14 +334,14 @@ describe('ReleaseManager', () => {
     expect(again.services[0].postDeploy).toEqual(['Cek log refund']);
     expect(again.items.filter((i) => i.source === 'ai')).toEqual([]);
     expect(again.services[0].envBlock).toContain('REFUND_MAX=');
-    prompts.splice(1, 2);
+    prompts.splice(1, 1);
 
     replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));
     await m.aiStart(r.id, 'picks', { ai, serviceId: 's1', sourceBranch: 'staging' });
     const picks = await settle('picks', 's1');
     expect(picks.picks?.map((p) => [p.sha, p.include])).toEqual([['c1c1c1c1aa', true], ['c2c2c2c2bb', false]]);
     // Each commit is read against its first parent.
-    expect(prompts[2]).toContain('+func Promo() {}');
+    expect(prompts[1]).toContain('+func Promo() {}');
 
     replies.push(JSON.stringify({ services: [{ name: 'core-payment', envBlock: 'REFUND_MAX=' }], summary: ['REFUND_MAX ditambah'] }));
     // A document fix is only a proposal: the release does not change until the user applies it.
@@ -354,12 +350,11 @@ describe('ReleaseManager', () => {
     await m.aiStart(r.id, 'document', { ai, instruction: 'lengkapi .env' });
     const doc = await settle('document');
     expect(doc.fixes).toEqual([{ serviceId: 's1', name: 'core-payment', envBlock: 'REFUND_MAX=' }]);
-    expect(prompts[3]).toContain('Instruksi Tech Lead: lengkapi .env');
+    expect(prompts[2]).toContain('Instruksi Tech Lead: lengkapi .env');
     expect((await m.get(r.id)).services[0]).toEqual(before);
   });
 
   it('keeps the document empty for a service without a release MR (preview only)', async () => {
-    // No tickets and no MR candidates: the discovery step asks no AI.
     const replies = [JSON.stringify({ tickets: [], needs: [{ kind: 'env', when: 'pre', label: 'X_KEY', files: [] }, { kind: 'other', when: 'post', label: 'Restart worker', files: [] }] })];
     const m = manager({
       runAi: () => ({ done: Promise.resolve({ reply: replies.shift() ?? '{}' }), cancel: () => {} }),
@@ -419,6 +414,35 @@ describe('ReleaseManager', () => {
     expect(content.endpoints.map((e: { endpoint: string }) => e.endpoint)).toEqual(['/v1/a', '/v1/topup/{id}']);
     expect(made.release.services[0].sourceBranch).toBe('release/switching');
     await expect(m.createPatchBranch(r.id, 's1', { branch: 'master', sourceBranch: 'staging', hunks: chosen })).rejects.toThrow(/tidak valid/);
+  });
+
+  it('finds services and MRs with AI, only adding, never a service the user removed', async () => {
+    let prompt = '';
+    const m = manager({
+      runAi: (_ai, p) => {
+        prompt = p;
+        return {
+          done: Promise.resolve({
+            reply: JSON.stringify({
+              services: [{ name: 'core-payment', gitlabPath: 'payments/core-payment', reason: 'MU-12' }, { name: 'core-old', gitlabPath: 'payments/core-old', reason: 'x' }, { name: 'tidak-ada', gitlabPath: 'nowhere/repo', reason: 'x' }],
+              mrs: [{ ref: 'payments/core-payment!12', service: 'core-payment', reason: 'refund' }, { ref: 'other/repo!1', service: 'x', reason: 'x' }],
+            }),
+          }),
+          cancel: () => {},
+        };
+      },
+      repoPaths: async () => ({ 'core-payment': 'payments/core-payment', 'core-old': 'payments/core-old' }),
+    });
+    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], ignoredServices: ['core-old'], createdAt: '2026-10-10T00:00:00Z' } as never);
+    await m.aiStart(r.id, 'discover', { ai: { provider: 'claude', model: 'x' } });
+    let job = await m.aiJob(r.id, 'discover');
+    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'discover'));
+    expect(job?.status).toBe('done');
+    expect(prompt).toContain('SUDAH DIHAPUS user dari rilis, jangan diusulkan lagi: core-old');
+    const saved = await m.get(r.id);
+    // core-old was removed by the user; a repo not in the Services folder is dropped.
+    expect(saved.services.map((s) => [s.name, s.gitlabPath, s.mrs.map((x) => x.ref)])).toEqual([['core-payment', 'payments/core-payment', ['payments/core-payment!12']]]);
+    expect(job?.notes?.[0]).toBe('AI menambah 1 service dan 1 MR.');
   });
 
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {

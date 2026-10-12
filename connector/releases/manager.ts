@@ -620,7 +620,7 @@ export class ReleaseManager {
   async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string }): Promise<ReleaseAiJob> {
     const release = await this.get(id);
     if (!this.deps.runAi) throw new ReleaseInputError('AI belum tersedia di connector ini.');
-    if (!['tickets', 'picks', 'document', 'mr', 'patch'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
+    if (!['tickets', 'picks', 'document', 'mr', 'patch', 'discover'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
     if (!isAiSelection(opts.ai)) throw new ReleaseInputError('Pilihan AI tidak valid.');
     if (kind === 'picks' || kind === 'mr' || kind === 'patch') this.service(release, opts.serviceId ?? '');
     const instruction = (opts.instruction ?? '').trim().slice(0, 4000);
@@ -651,6 +651,7 @@ export class ReleaseManager {
     const job = live.job;
     try {
       if (job.kind === 'tickets') await this.aiTickets(live, ai);
+      else if (job.kind === 'discover') live.job.notes = await this.aiDiscover(live, ai);
       else if (job.kind === 'picks') await this.aiPicks(live, ai, instruction);
       else if (job.kind === 'mr') await this.aiMr(live, ai);
       else if (job.kind === 'patch') await this.aiPatch(live, ai, instruction);
@@ -704,7 +705,7 @@ export class ReleaseManager {
   }
 
   /**
-   * Step one of the check: the AI picks the services (repos) and MRs of the release from the
+   * "Cari service & MR": the AI picks the services (repos) and MRs of the release from the
    * tickets, the repos and the MRs into the target. Only additions; services the user removed
    * are never added back. Falls back to the plain search when the AI fails.
    */
@@ -734,7 +735,7 @@ export class ReleaseManager {
       .filter((m) => !ignored.some((n) => sameService(n, m.projectPath.split('/').pop() ?? '')))
       .filter((m) => paths.has(m.projectPath) || names.some((n) => sameService(n, m.projectPath.split('/').pop() ?? '')) || jiraKeysIn(`${m.title} ${m.sourceBranch}`).some((k) => keys.has(k)))
       .slice(0, 80);
-    if (!tickets.length && !candidates.length) return notes;
+    if (!tickets.length && !candidates.length) return [...notes, 'Tidak ada tiket maupun MR kandidat: tentukan proyek, codename, atau tiket tambahan dulu.'];
     const out = await this.ask(
       live,
       ai,
@@ -776,15 +777,12 @@ export class ReleaseManager {
       svc.mrs.push({ ref: mr.ref, projectPath: mr.projectPath, iid: mr.iid, webUrl: mr.webUrl, title: mr.title, via: 'auto' });
       addedMrs++;
     }
-    if (added || addedMrs) {
-      await this.deps.store.save({ ...fresh, services });
-      notes.push(`AI menambah ${added} service dan ${addedMrs} MR.`);
-    }
+    if (added || addedMrs) await this.deps.store.save({ ...fresh, services });
+    notes.unshift(`AI menambah ${added} service dan ${addedMrs} MR.`);
     return notes;
   }
 
   private async aiTickets(live: AiLive, ai: AiSelection) {
-    const discovered = await this.aiDiscover(live, ai);
     const release = await this.get(live.job.releaseId);
     live.job.progress = 'Membaca kode semua service dari GitLab…';
     const code = await this.readCode(release);
@@ -851,9 +849,8 @@ export class ReleaseManager {
     }
     if (live.cancelled) return;
     live.job.progress = 'Menyusun laporan…';
-    read.errors.unshift(...discovered.filter((n) => !n.startsWith('AI menambah')));
     await this.finishCheck(release, code, items, read);
-    live.job.notes = [...discovered.filter((n) => n.startsWith('AI menambah')), ...read.errors];
+    live.job.notes = read.errors;
   }
 
   private async aiPicks(live: AiLive, ai: AiSelection, instruction: string) {

@@ -66,6 +66,22 @@
     } else if (job.status === 'error') toasts.show(`Cek AI gagal: ${job.error}`, 'err', 6000);
   });
   const aiDoc = new AiJobWatch(() => current?.id, 'document');
+  // "Cari service & MR" with AI: adds services and MRs; the release comes back when it is done.
+  const aiFind = new AiJobWatch(() => current?.id, 'discover', undefined, async (job) => {
+    if (!current || job.releaseId !== current.id) return;
+    if (job.status === 'done') {
+      const fresh = await releases.get(current.id).catch(() => null);
+      if (fresh) setCurrent(fresh);
+      derivedCodenames = await releases.codenames(current.id).catch(() => derivedCodenames);
+      toasts.show(job.notes?.join(' ') || 'Pencarian service & MR selesai.', 'ok', 6000);
+    } else if (job.status === 'error') toasts.show(`Cari service & MR gagal: ${job.error}`, 'err', 6000);
+  });
+
+  async function startAiFind() {
+    await flush();
+    await aiFind.start(ai);
+    if (aiFind.error) toasts.show(aiFind.error, 'err');
+  }
 
   function pickAi(v: typeof ai) {
     ai = v;
@@ -153,10 +169,13 @@
     report = await releases.report(id).catch(() => null);
     aiCheck.stop();
     aiDoc.stop();
+    aiFind.stop();
     aiCheck.job = null;
     aiDoc.job = null;
+    aiFind.job = null;
     void aiCheck.load();
     void aiDoc.load();
+    void aiFind.load();
     derivedCodenames = await releases.codenames(id).catch(() => []);
   }
 
@@ -422,17 +441,25 @@
           </div>
         </div>
         <div class="actions">
+          {#if aiFind.running}
+            <button class="btn btn-sm" onclick={() => aiFind.cancel()}><Icon name="x" size={13} /> Batalkan pencarian</button>
+          {:else}
+            <button class="btn btn-sm btn-primary" onclick={startAiFind} disabled={aiCheck.running} title="AI mencari service (repo) dan MR ke branch target dari tiket rilis, daftar repo, dan MR di GitLab. Hanya menambah; service yang pernah dihapus tidak ditambah lagi."><Icon name="search" size={13} /> Cari service & MR</button>
+          {/if}
           {#if aiCheck.running}
             <button class="btn btn-sm" onclick={() => aiCheck.cancel()}><Icon name="x" size={13} /> Batalkan cek</button>
           {:else}
-            <button class="btn btn-sm btn-primary" onclick={startAiCheck} title="AI mencari service & MR rilis, lalu membaca seluruh diff tiap service: status MR, tiket ada/sebagian/tidak, env, query (CREATE/ALTER/INSERT), migrasi, langkah deploy lain, dan perubahan di luar scope. Berjalan di background."><Icon name="sparkles" size={13} /> Jalankan cek</button>
+            <button class="btn btn-sm btn-primary" onclick={startAiCheck} disabled={aiFind.running || !current.services.length} title="AI membaca seluruh diff tiap service: status MR, tiket ada/sebagian/tidak, env, query (CREATE/ALTER/INSERT), migrasi, langkah deploy lain, dan perubahan di luar scope. Berjalan di background."><Icon name="sparkles" size={13} /> Jalankan cek</button>
           {/if}
-          <span class="ai-pick" title="Model AI untuk cek rilis"><AiPicker value={ai} onchange={pickAi} disabled={aiCheck.running} /></span>
+          <span class="ai-pick" title="Model AI untuk cek rilis"><AiPicker value={ai} onchange={pickAi} disabled={aiCheck.running || aiFind.running} /></span>
           <button class="btn btn-sm" onclick={() => (importOpen = true)}><Icon name="upload" size={13} /> Import dokumen</button>
           <button class="btn btn-sm" onclick={async () => { await flush(); shareOpen = true; }} disabled={!allMrs.length}><Icon name="teams" size={13} /> Share MR ke Teams</button>
           <button class="btn btn-sm" onclick={async () => { await flush(); publishOpen = true; }}><Icon name="confluence" size={13} /> Publish ke Confluence</button>
           {#if report}<span class="muted small">Cek terakhir {fmt(report.checkedAt)}{report.ai ? ` · dengan AI (${report.ai.model})` : ''}</span>{/if}
         </div>
+        {#if aiFind.running}
+          <p class="small ai-status"><Icon name="search" size={12} /> {aiFind.job?.progress ?? 'AI mencari service & MR…'}</p>
+        {/if}
         {#if aiCheck.running}
           <p class="small ai-status"><Icon name="sparkles" size={12} /> {aiCheck.job?.progress ?? 'AI berjalan…'} <span class="muted">· boleh pindah halaman, cek tetap jalan</span></p>
         {:else if aiCheck.job?.status === 'error'}
@@ -476,7 +503,7 @@
             </div>
           {/if}
           {#if !current.services.length}
-            <p class="muted">Belum ada service. Pilih proyek atau codename di atas lalu klik <strong>Jalankan cek</strong> (AI mencari service dan MR), import dokumen rilis, atau tambah manual.</p>
+            <p class="muted">Belum ada service. Pilih proyek atau codename di atas lalu klik <strong>Cari service & MR</strong>, import dokumen rilis, atau tambah manual.</p>
           {/if}
           {#each [...current.services].sort((a, b) => a.order - b.order) as s (s.id)}
             {@const noMr = report?.servicesWithoutMr.some((x) => x.toLowerCase() === s.name.toLowerCase())}
@@ -542,7 +569,7 @@
           <button class="btn btn-sm" onclick={addService}><Icon name="plus" size={12} /> Service</button>
         {:else if tab === 'tickets'}
           {#if !report}
-            <p class="muted">Klik <strong>Jalankan cek</strong>: AI mencari service & MR, lalu memeriksa tiap tiket rilis (dari TAD, codename, dan tiket tambahan) di kode yang akan dirilis.</p>
+            <p class="muted">Klik <strong>Cari service & MR</strong>, lalu <strong>Jalankan cek</strong>: AI memeriksa tiap tiket rilis (dari TAD, codename, dan tiket tambahan) di kode yang akan dirilis.</p>
           {:else}
             <p class="muted small">Tiket dicari di <strong>isi kode</strong> yang akan dirilis (diff MR, atau compare branch sumber dengan {current.targetBranch} kalau belum ada MR): endpoint dari Detail Task TAD, atau nama tiket di nama fungsi, struct, route, dan path file. Jira key di commit hanya pendukung.</p>
             {#if report.sources?.length}
