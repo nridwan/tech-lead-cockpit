@@ -17,20 +17,130 @@ export const RELEASE_AI_SYSTEM = [
   'Alasan ditulis singkat dalam Bahasa Indonesia dan menyebut nama file/fungsi/route yang jadi bukti.',
 ].join('\n');
 
-/** Diffs as text within a budget: whole files first, the rest by name only. */
-export function diffText(changes: MrFileChange[], budget = AI_DIFF_BUDGET, label = ''): { text: string; omitted: number } {
+/**
+ * A diff without context lines and without lines that only moved or changed formatting (removed
+ * and added again with the same text once spaces are ignored): a reformatted file shrinks to
+ * what is really new, e.g. the endpoint blocks it adds.
+ */
+export function compactDiff(diff: string): string {
+  const lines = diff.split('\n');
+  const key = (l: string) => l.slice(1).replace(/\s+/g, '');
+  const count = (sign: string) => {
+    const m = new Map<string, number>();
+    for (const l of lines) if (l.startsWith(sign) && !l.startsWith(sign.repeat(3))) m.set(key(l), (m.get(key(l)) ?? 0) + 1);
+    return m;
+  };
+  const removed = count('-');
+  const added = count('+');
+  const out: string[] = [];
+  let header = '';
+  for (const l of lines) {
+    if (l.startsWith('@@')) {
+      header = l;
+      continue;
+    }
+    const sign = l[0];
+    if ((sign !== '+' && sign !== '-') || l.startsWith('+++') || l.startsWith('---')) continue;
+    const k = key(l);
+    if (!k) continue;
+    const other = sign === '+' ? removed : added;
+    const n = other.get(k) ?? 0;
+    if (n > 0) {
+      // The same text on the other side: moved or reformatted, not a change.
+      other.set(k, n - 1);
+      continue;
+    }
+    if (header) {
+      out.push(header);
+      header = '';
+    }
+    out.push(l);
+  }
+  return out.join('\n');
+}
+
+/**
+ * Lines really added and removed between two versions of a file, when GitLab gives no diff
+ * (too big). Spaces are ignored, so a reformat drops out; consecutive lines are grouped with
+ * their line number, so the AI sees where they are.
+ */
+export function fileDelta(before: string | undefined, after: string | undefined): string {
+  const a = (before ?? '').split('\n');
+  const b = (after ?? '').split('\n');
+  const key = (l: string) => l.replace(/\s+/g, '');
+  const tally = (lines: string[]) => {
+    const m = new Map<string, number>();
+    for (const l of lines) if (key(l)) m.set(key(l), (m.get(key(l)) ?? 0) + 1);
+    return m;
+  };
+  const inA = tally(a);
+  const inB = tally(b);
+  const pick = (lines: string[], other: Map<string, number>, sign: string) => {
+    const left = new Map(other);
+    const out: string[] = [];
+    let last = -2;
+    lines.forEach((l, i) => {
+      const k = key(l);
+      if (!k) return;
+      const n = left.get(k) ?? 0;
+      if (n > 0) {
+        left.set(k, n - 1);
+        return;
+      }
+      if (i !== last + 1) out.push(`@@ ${sign === '+' ? 'baru' : 'lama'} baris ${i + 1} @@`);
+      out.push(`${sign}${l}`);
+      last = i;
+    });
+    return out;
+  };
+  return [...pick(b, inA, '+'), ...pick(a, inB, '-')].join('\n');
+}
+
+/** Hunks of a diff, the ones naming a focus word first (endpoints, ticket words, the instruction). */
+function focusHunks(diff: string, focus: string[]): string {
+  if (!focus.length) return diff;
+  const hunks = diff.split(/\n(?=@@)/);
+  const hit = (h: string) => focus.some((f) => h.toLowerCase().includes(f));
+  return [...hunks.filter(hit), ...hunks.filter((h) => !hit(h))].join('\n');
+}
+
+/** Words worth finding in a big diff: paths and identifiers from tickets, endpoints and the instruction. */
+export function focusTerms(texts: string[]): string[] {
+  const out = new Set<string>();
+  for (const t of texts) {
+    for (const m of t.matchAll(/\/[A-Za-z0-9_\-{}:.]+(?:\/[A-Za-z0-9_\-{}:.]+)+/g)) {
+      // A path, without its parameters: /v1/x/{id} → /v1/x/
+      out.add(m[0].replace(/\{[^}]*\}|:[A-Za-z_]+/g, '').toLowerCase());
+    }
+  }
+  return [...out].filter((x) => x.length >= 5).slice(0, 30);
+}
+
+/**
+ * Diffs as text within a budget: whole files first; a file too big is compacted (no context, no
+ * reformat noise) and its focus hunks come first; what still does not fit is listed by name.
+ */
+export function diffText(changes: MrFileChange[], budget = AI_DIFF_BUDGET, label = '', focus: string[] = []): { text: string; omitted: number } {
   const parts: string[] = [];
   const names: string[] = [];
   let left = budget;
   for (const c of changes) {
     const kind = c.newFile ? ' (file baru)' : c.deletedFile ? ' (dihapus)' : c.renamedFile ? ` (rename dari ${c.oldPath})` : '';
-    const body = c.diff.length > FILE_CAP ? `${c.diff.slice(0, FILE_CAP)}\n… (diff dipotong)` : c.diff;
+    let body = c.diff;
+    let note = '';
+    if (body.length > Math.min(FILE_CAP, left)) {
+      body = focusHunks(compactDiff(body), focus);
+      note = ' (dipadatkan: tanpa konteks dan tanpa baris yang hanya pindah/berubah format)';
+    }
+    const cap = Math.min(FILE_CAP * 3, left);
+    const cut = '\n… (diff dipotong)';
+    if (body.length > cap && cap > 2_000) body = `${body.slice(0, cap - cut.length)}${cut}`;
     if (!body || body.length > left) {
       names.push(`- ${c.newPath}${kind}${c.diff ? '' : ' (diff tidak tersedia)'}`);
       continue;
     }
     left -= body.length;
-    parts.push(`### ${label}${c.newPath}${kind}\n${body}`);
+    parts.push(`### ${label}${c.newPath}${kind}${note}\n${body}`);
   }
   const rest = names.length ? `\n\nFile lain yang berubah (diff tidak dimuat):\n${names.join('\n')}` : '';
   return { text: parts.join('\n\n') + rest, omitted: names.length };

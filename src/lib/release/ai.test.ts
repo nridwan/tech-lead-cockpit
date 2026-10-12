@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MrFileChange } from '../gitlab/types';
-import { diffText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
+import { compactDiff, diffText, fileDelta, focusTerms, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
 
 const change = (path: string, diff: string): MrFileChange => ({ oldPath: path, newPath: path, newFile: false, renamedFile: false, deletedFile: false, diff, additions: 1, deletions: 0 });
 
@@ -11,6 +11,31 @@ describe('release AI prompts and answers', () => {
     expect(text).toContain('- b.go');
     expect(text).toContain('- c.bin (diff tidak tersedia)');
     expect(omitted).toBe(2);
+  });
+
+  it('compacts a reformat down to what is really new', () => {
+    const diff = ['@@ -1,4 +1,8 @@', ' {', '-  "a": [1, 2],', '+  "a": [', '+    1, 2', '+  ],', '+  "endpoint": "/v1/topup/{id}",', '   "b": 1', '-  "x": 1', '+  "x":   1'].join('\n');
+    // "a": [1, 2] became three lines: not equal line by line, so those stay; "x" only changed spaces.
+    const c = compactDiff(diff);
+    expect(c).toContain('+  "endpoint": "/v1/topup/{id}",');
+    expect(c).not.toContain('"x"');
+    expect(c).not.toContain('"b": 1');
+  });
+
+  it('computes added and removed lines from two file versions, ignoring formatting', () => {
+    const before = ['{', '  "endpoints": [', '    {"endpoint": "/v1/a"},', '  ]', '}'].join('\n');
+    const after = ['{', '  "endpoints": [', '    { "endpoint": "/v1/a" },', '    {"endpoint": "/v1/topup/{id}"}', '  ]', '}'].join('\n');
+    const d = fileDelta(before, after);
+    expect(d).toContain('@@ baru baris 4 @@\n+    {"endpoint": "/v1/topup/{id}"}');
+    expect(fileDelta('a\n b', 'a\nb')).toBe('');
+  });
+
+  it('puts hunks naming a focus path first when a big file is compacted', () => {
+    expect(focusTerms(['ambil /v1/topup/mobile/{id} juga', 'GET /v1/x/y/:id'])).toEqual(['/v1/topup/mobile/', '/v1/x/y/']);
+    const big = ['@@ -1 +1 @@', ...Array.from({ length: 400 }, (_, i) => `+"route_${i}": "/v1/other/${i}"`), '@@ -900 +900 @@', '+"endpoint": "/v1/topup/mobile/{id}"'].join('\n');
+    const text = diffText([{ oldPath: 'k.json', newPath: 'k.json', newFile: false, renamedFile: false, deletedFile: false, diff: big, additions: 401, deletions: 0 }], 5_000, '', ['/v1/topup/mobile/']).text;
+    expect(text).toContain('/v1/topup/mobile/{id}');
+    expect(text).toContain('dipadatkan');
   });
 
   it('asks for every ticket and every deploy need', () => {

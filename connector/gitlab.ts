@@ -277,6 +277,26 @@ export class GitLabClient {
     };
   }
 
+  /**
+   * A file's content at a ref (read only), for diffs GitLab leaves out because they are too big.
+   * Undefined when the file does not exist there or is larger than `max` characters.
+   */
+  async rawFile(projectPath: string, filePath: string, ref: string, max = 2_000_000): Promise<string | undefined> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.cfg.baseUrl}/api/v4/projects/${encodeURIComponent(projectPath)}/repository/files/${encodeURIComponent(filePath)}/raw?ref=${encodeURIComponent(ref)}`, {
+        headers: { 'PRIVATE-TOKEN': this.cfg.token },
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      throw new GitLabError(`GitLab tidak terjangkau (${(e as Error).message}). Pastikan VPN aktif.`, 502, 'network');
+    }
+    if (res.status === 404) return undefined;
+    if (!res.ok) throw new GitLabError(`GitLab membalas HTTP ${res.status}.`, 502, 'upstream');
+    const text = await res.text();
+    return text.length > max ? undefined : text;
+  }
+
   /** The open MR from `source` into `target`, if there is one. */
   async openMrFor(projectPath: string, source: string, target: string): Promise<MrSummary | undefined> {
     const { body } = await this.get<ApiMr[]>(`/projects/${encodeURIComponent(projectPath)}/merge_requests?state=opened&source_branch=${encodeURIComponent(source)}&target_branch=${encodeURIComponent(target)}&per_page=5`);
