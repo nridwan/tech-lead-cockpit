@@ -110,6 +110,7 @@ export function validateRelease(raw: Partial<Release>): Release {
     status: (RELEASE_STATUSES as readonly string[]).includes(String(raw.status)) ? raw.status! : 'draft',
     targetBranch,
     sourceBranch: BRANCH.test(text(raw.sourceBranch, 100)) ? text(raw.sourceBranch, 100) : 'staging',
+    ...(text(raw.mrTitleTemplate, 150) ? { mrTitleTemplate: text(raw.mrTitleTemplate, 150) } : {}),
     minApprovals: Math.min(5, Math.max(0, Math.floor(Number(raw.minApprovals ?? 1)) || 0)),
     projectIds: [...new Set(arr<string>(raw.projectIds, 20).map(String).filter((p) => ID.test(p)))],
     codenames: [...new Set(arr<string>(raw.codenames, 20).map((c) => text(c, 40).toUpperCase()).filter((c) => /^[A-Z0-9][A-Z0-9_-]{0,39}$/.test(c)))],

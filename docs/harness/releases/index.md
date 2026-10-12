@@ -40,7 +40,7 @@ Rilis dianggap **scope sesuai** hanya bila: semua tiket scope ada di kode MR ril
 
 ## 🔀 Buat MR
 
-Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service yang belum ada di commit, dan tiket di luar scope yang akan terbawa. Judul dan deskripsi (tiket, checklist server, commit) bisa diedit.
+Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service yang belum ada di commit, dan tiket di luar scope yang akan terbawa. Judul mengikuti format tim `[{TARGET}] - {RELEASE}` (mis. `[MASTER] - Cashin Toko`), bisa diganti per rilis lewat `mrTitleTemplate` (placeholder `{TARGET}` `{RELEASE}` `{VERSION}` `{SERVICE}` `{CODENAME}`, kolom "Judul MR" di header rilis). Judul dan deskripsi (tiket, checklist server, commit) tetap bisa diedit sebelum dibuat.
 - **Buat MR**: lewat API, butuh token scope `api` (dicek dari `/personal_access_tokens/self`), selalu dikonfirmasi, audit `gitlab.mr.create`. MR terbuka untuk branch yang sama ditautkan, bukan dibuat dua kali.
 - **Buka form di GitLab**: form "new merge request" GitLab yang sudah terisi; tidak butuh scope tulis.
 - **Branch sumber per service**: `ReleaseService.sourceBranch` (kosong = default rilis). Branch yang dipakai saat membuat MR atau branch rilis diingat per service.

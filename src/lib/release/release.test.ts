@@ -313,6 +313,19 @@ describe('scope check against the code', () => {
   });
 });
 
+describe('release MR title', () => {
+  it("follows the team's format and a per-release template", async () => {
+    const { mrTitle } = await import('./mr');
+    const svc = { id: 's', name: 'core-auth', mrs: [], order: 1 };
+    expect(mrTitle(release({ name: 'Cashin Toko' }), svc)).toBe('[MASTER] - Cashin Toko');
+    expect(mrTitle(release({ name: 'Cashin Toko', targetBranch: 'main' }), svc)).toBe('[MAIN] - Cashin Toko');
+    expect(mrTitle(release({ name: 'Cashin Toko', version: 'v2.4.0', codenames: ['CASHIN-TOKO'], mrTitleTemplate: '[{TARGET}][{SERVICE}] {CODENAME} {VERSION}' }), svc)).toBe('[MASTER][core-auth] CASHIN-TOKO v2.4.0');
+    // An empty placeholder at the end leaves no dangling separator.
+    expect(mrTitle(release({ name: 'Cashin Toko', version: '', mrTitleTemplate: '[{TARGET}] - {RELEASE} - {VERSION}' }), svc)).toBe('[MASTER] - Cashin Toko');
+    expect(mrTitle(release({ name: 'Cashin Toko', mrTitleTemplate: '[{TARGET}] - {RELEASE} - {VERSION}' }), svc)).toBe('[MASTER] - Cashin Toko - v2.4.0');
+  });
+});
+
 describe('release branch plan', () => {
   // staging (first parent, oldest → newest):
   //   m1 = merge feature/MU-12 (commits f1 "refund api", f2 "fix") → in scope

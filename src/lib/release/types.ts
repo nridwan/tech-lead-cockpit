@@ -127,6 +127,8 @@ export interface Release {
   targetBranch: string;
   /** Branch a new release MR comes from (e.g. staging), per service unless changed in the dialog. */
   sourceBranch: string;
+  /** Title of new release MRs; placeholders {TARGET} {RELEASE} {VERSION} {SERVICE} {CODENAME}. Default "[{TARGET}] - {RELEASE}". */
+  mrTitleTemplate?: string;
   /** Approvals an MR needs before the release counts as ready. */
   minApprovals: number;
   /** Cockpit projects in this release (their TAD tasks and codenames). */

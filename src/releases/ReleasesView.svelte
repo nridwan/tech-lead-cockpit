@@ -9,6 +9,7 @@
   import { releases } from '../lib/release/client';
   import { releaseMarkdown } from '../lib/release/document';
   import { mrRefFromUrl, serviceForPath } from '../lib/release/import';
+  import { DEFAULT_MR_TITLE, mrTitle } from '../lib/release/mr';
   import { bringsSummary } from '../lib/release/share';
   import { RELEASE_STATUSES, RELEASE_STATUS_LABELS, type MrCheck, type Release, type ReleaseItem, type ReleaseReport, type ReleaseService } from '../lib/release/types';
   import PublishReleaseModal from './PublishReleaseModal.svelte';
@@ -325,6 +326,8 @@
         <div class="meta-row">
           <label class="inline small" title="Branch asal MR rilis baru">Branch sumber <input class="input tiny mono" value={current.sourceBranch ?? 'staging'} oninput={(e) => current && (current.sourceBranch = e.currentTarget.value.trim() || 'staging')} /></label>
           <label class="inline small">Branch target <input class="input tiny mono" bind:value={current.targetBranch} /></label>
+          <label class="inline small" title="Placeholder: {'{TARGET}'} {'{RELEASE}'} {'{VERSION}'} {'{SERVICE}'} {'{CODENAME}'}">Judul MR <input class="input mono tmpl" value={current.mrTitleTemplate ?? ''} oninput={(e) => current && (current.mrTitleTemplate = e.currentTarget.value || undefined)} placeholder={DEFAULT_MR_TITLE} /></label>
+          {#if current.services[0]}<span class="muted small">contoh: {mrTitle(current, current.services[0])}</span>{/if}
           <label class="inline small" title="Approval minimal per MR sebelum rilis dianggap siap">Approval minimal <input class="input tiny" type="number" min="0" max="5" bind:value={current.minApprovals} /></label>
           {#if saveError}<span class="err small">Gagal menyimpan: {saveError}</span>{/if}
         </div>
@@ -716,6 +719,9 @@
   }
   .tiny {
     width: 90px;
+  }
+  .tmpl {
+    width: 200px;
   }
   .tiny-select {
     width: auto;
