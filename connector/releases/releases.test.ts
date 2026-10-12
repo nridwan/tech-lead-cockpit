@@ -49,7 +49,11 @@ const detail = (s: MrSummary, over: Partial<MrDetail> = {}): MrDetail =>
     assignees: [],
     labels: [],
     // Each fake MR's commit carries the Jira key of its title (MU-12 by default).
-    commits: [{ id: '1', shortId: '1', title: /MU-\d+/.test(s.title) ? s.title : 'MU-12 refund api', authorName: 'Budi', createdAt: '' }],
+    commits: [
+      { id: '1', shortId: '1', title: /MU-\d+/.test(s.title) ? s.title : 'MU-12 refund api', authorName: 'Budi', createdAt: '' },
+      // core-payment also carries an older SWITCHING ticket and an unrelated one.
+      ...(s.projectPath === 'payments/core-payment' ? [{ id: '2', shortId: '2', title: 'MU-88 retry refund', authorName: 'Budi', createdAt: '' }, { id: '3', shortId: '3', title: 'MU-77 banner promo', authorName: 'Budi', createdAt: '' }] : []),
+    ],
     changes: [{ oldPath: '.env.example', newPath: '.env.example', newFile: false, renamedFile: false, deletedFile: false, diff: '+REFUND_LIMIT=5', additions: 1, deletions: 0 }],
     totals: { files: 1, additions: 1, deletions: 0 },
     jiraKeys: [],
@@ -119,7 +123,10 @@ describe('ReleaseManager', () => {
       gitlab: async () => ({ mrsToBranch: async () => mrs, mr: async (path, iid) => detail(mrs.find((m) => m.projectPath === path && m.iid === iid)!) }),
       jiraSearch: async (q) => {
         jql.push(q);
-        if (q.startsWith('key in')) return [issue('MU-12', '[BACKEND][CORE-PAYMENT][SWITCHING] - Refund API')];
+        if (q.startsWith('key in')) {
+          const all = [issue('MU-12', '[BACKEND][CORE-PAYMENT][SWITCHING] - Refund API'), issue('MU-88', '[BACKEND][CORE-PAYMENT][SWITCHING] - Retry refund'), issue('MU-77', '[WEB-FE][PORTAL][PROMO] - Banner', 'In Progress')];
+          return all.filter((i) => q.includes(i.key));
+        }
         return [issue('MU-13', '[MOBILE-FE][MOBILE-APP][SWITCHING] - Layar refund', 'In Progress'), issue('MU-99', 'switching tanpa format')];
       },
       projects: async () => [project],
@@ -155,10 +162,14 @@ describe('ReleaseManager', () => {
     expect(jql.some((q) => q.includes('summary ~ "SWITCHING"'))).toBe(true);
 
     const { release, report } = await m.check(r.id);
+    // MU-88 is older than the codename search but has the release CODENAME: it joins the scope.
     expect(report.tickets.map((t) => [t.key, t.from, t.inMrs])).toEqual([
       ['MU-12', 'tad', ['payments/core-payment!12']],
       ['MU-13', 'codename', ['mobile/app!7']],
+      ['MU-88', 'codename', ['payments/core-payment!12']],
     ]);
+    expect(report.outOfScope).toEqual([{ key: 'MU-77', summary: '[WEB-FE][PORTAL][PROMO] - Banner', status: 'In Progress', codename: 'PROMO', mrs: ['payments/core-payment!12'], commits: ['MU-77 banner promo'] }]);
+    expect(report.scope).toMatchObject({ tickets: 3, inCode: 3, carried: 1, matched: false });
     expect(report.mrs[0]).toMatchObject({ envAdded: ['REFUND_LIMIT'], approvals: { count: 1 } });
     expect(release.items.map((i) => [i.kind, i.label, i.service])).toEqual([
       ['env', 'REFUND_LIMIT', 'core-payment'],
@@ -170,6 +181,42 @@ describe('ReleaseManager', () => {
     expect((await m.discover(r.id)).addedMrs).toBe(0);
     await m.store.save({ ...release, items: release.items.map((i) => ({ ...i, done: true })) });
     expect((await m.check(r.id)).release.items.every((i) => i.done)).toBe(true);
+  });
+
+  it('plans a release MR: compare, findings, tickets, carried keys and the GitLab form', async () => {
+    const m = manager({
+      gitlabBaseUrl: async () => GL,
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        tokenScopes: async () => ['read_api'],
+        branchExists: async (_p, b) => b !== 'nope',
+        openMrFor: async () => undefined,
+        compare: async () => ({
+          commits: [
+            { id: '1', shortId: 'a1', title: 'MU-12 refund api', authorName: 'Budi', createdAt: '' },
+            { id: '2', shortId: 'b2', title: 'MU-77 banner promo', authorName: 'Budi', createdAt: '' },
+          ],
+          changes: [{ oldPath: '.env.example', newPath: '.env.example', newFile: false, renamedFile: false, deletedFile: false, diff: '+REFUND_LIMIT=5', additions: 1, deletions: 0 }],
+          truncated: false,
+        }),
+        createMr: async (path, req) => summary(path, 40, { title: req.title, sourceBranch: req.source }),
+      }),
+    });
+    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    const plan = await m.mrPlan(r.id, 's1');
+    expect(plan).toMatchObject({ sourceBranch: 'staging', targetBranch: 'master', canCreate: false, files: 1, findings: { envAdded: ['REFUND_LIMIT'] }, tickets: [{ key: 'MU-12', inSource: true }] });
+    expect(plan.outOfScope.map((o) => o.key)).toEqual(['MU-77']);
+    expect(plan.warnings.some((w) => w.includes('MU-77'))).toBe(true);
+    expect(plan.formUrl).toContain(`${GL}/payments/core-payment/-/merge_requests/new?`);
+    expect(decodeURIComponent(plan.formUrl)).toContain('merge_request[target_branch]=master');
+    expect(plan.description).toContain('- [ ] Env baru `REFUND_LIMIT` sudah diset di server');
+
+    expect((await m.mrPlan(r.id, 's1', 'nope')).warnings).toContain('Branch nope tidak ada di payments/core-payment.');
+    await expect(m.createMr(r.id, 's1', { sourceBranch: 'master', title: 'x', description: '' })).rejects.toThrow(/sama dengan branch target/);
+    const created = await m.createMr(r.id, 's1', { sourceBranch: 'staging', title: plan.title, description: plan.description });
+    expect(created).toMatchObject({ created: true, ref: 'payments/core-payment!40' });
+    expect(created.release.services[0].mrs.map((x) => x.ref)).toEqual(['payments/core-payment!40']);
   });
 
   it('reports a missing GitLab connection instead of failing', async () => {

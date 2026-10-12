@@ -14,6 +14,7 @@
   import PublishReleaseModal from './PublishReleaseModal.svelte';
   import ReleaseImportDialog from './ReleaseImportDialog.svelte';
   import ShareMrModal from './ShareMrModal.svelte';
+  import CreateMrModal from './CreateMrModal.svelte';
 
   /**
    * Release management: the MRs into the production branch of every service in a release, what
@@ -38,6 +39,7 @@
   let importOpen = $state(false);
   let shareOpen = $state(false);
   let publishOpen = $state(false);
+  let mrFor = $state<ReleaseService | null>(null);
   let mrInput = $state<Record<string, string>>({});
   let newItem = $state<{ kind: ReleaseItem['kind']; label: string; service: string }>({ kind: 'env', label: '', service: '' });
   let newStep = $state<{ kind: 'deploy' | 'rollback'; text: string }>({ kind: 'deploy', text: '' });
@@ -119,7 +121,7 @@
     await flush();
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const r = await releases.save({ name: `Rilis ${today}`, version: '', targetBranch: 'master', minApprovals: 1, projectIds: [], codenames: [], jiraKeys: [], services: [], items: [], steps: [], shares: [], status: 'draft' });
+      const r = await releases.save({ name: `Rilis ${today}`, version: '', targetBranch: 'master', sourceBranch: 'staging', minApprovals: 1, projectIds: [], codenames: [], jiraKeys: [], services: [], items: [], steps: [], shares: [], accepted: [], status: 'draft' });
       setCurrent(r);
       report = null;
       derivedCodenames = [];
@@ -161,6 +163,38 @@
     } finally {
       busy = '';
     }
+  }
+
+  /** Ready/released while the code does not match the scope needs a second look. */
+  async function changeStatus(el: HTMLSelectElement) {
+    if (!current) return;
+    const next = el.value as Release['status'];
+    if ((next === 'ready' || next === 'released') && (!report || !report.scope?.matched)) {
+      const why = !report ? 'Cek rilis belum dijalankan.' : `Scope belum sesuai: ${report.scope.missing} tiket belum ada di kode, ${report.scope.carried} tiket di luar scope terbawa, ${report.scope.commitsWithoutKey} commit tanpa Jira key.`;
+      const ok = await confirmDialog({ title: `Tandai "${RELEASE_STATUS_LABELS[next]}"?`, message: `${why} Tetap ubah status?`, confirmText: 'Tetap ubah', danger: true });
+      if (!ok) {
+        el.value = current.status;
+        return;
+      }
+    }
+    current.status = next;
+  }
+
+  let acceptNote = $state<Record<string, string>>({});
+  function includeInScope(key: string) {
+    if (!current || current.jiraKeys.includes(key)) return;
+    current.jiraKeys = [...current.jiraKeys, key];
+    keysText = current.jiraKeys.join(', ');
+    toasts.show(`${key} masuk scope. Jalankan cek lagi untuk memperbarui status.`, 'info', 3500);
+  }
+  function acceptCarried(key: string) {
+    if (!current) return;
+    current.accepted = [...(current.accepted ?? []).filter((a) => a.key !== key), { key, ...(acceptNote[key]?.trim() ? { note: acceptNote[key].trim() } : {}), at: new Date().toISOString() }];
+    toasts.show(`${key} ditandai sengaja ikut. Jalankan cek lagi untuk memperbarui status.`, 'info', 3500);
+  }
+  function unaccept(key: string) {
+    if (!current) return;
+    current.accepted = (current.accepted ?? []).filter((a) => a.key !== key);
   }
 
   function applyCodenames() {
@@ -280,12 +314,13 @@
           <input class="input name" bind:value={current.name} aria-label="Nama rilis" />
           <input class="input ver" bind:value={current.version} placeholder="versi, mis. v2.4.0" aria-label="Versi" />
           <input class="input date" type="date" bind:value={current.date} aria-label="Tanggal rilis" />
-          <select class="input status" bind:value={current.status} aria-label="Status">
+          <select class="input status" value={current.status} onchange={(e) => changeStatus(e.currentTarget)} aria-label="Status">
             {#each RELEASE_STATUSES as s (s)}<option value={s}>{RELEASE_STATUS_LABELS[s]}</option>{/each}
           </select>
           <button class="btn btn-ghost btn-sm danger" onclick={remove} title="Hapus rilis"><Icon name="trash" size={14} /></button>
         </div>
         <div class="meta-row">
+          <label class="inline small" title="Branch asal MR rilis baru">Branch sumber <input class="input tiny mono" value={current.sourceBranch ?? 'staging'} oninput={(e) => current && (current.sourceBranch = e.currentTarget.value.trim() || 'staging')} /></label>
           <label class="inline small">Branch target <input class="input tiny mono" bind:value={current.targetBranch} /></label>
           <label class="inline small" title="Approval minimal per MR sebelum rilis dianggap siap">Approval minimal <input class="input tiny" type="number" min="0" max="5" bind:value={current.minApprovals} /></label>
           {#if saveError}<span class="err small">Gagal menyimpan: {saveError}</span>{/if}
@@ -327,6 +362,20 @@
         </div>
       {/if}
 
+      {#if report?.scope}
+        {@const sc = report.scope}
+        <div class="scope-card" class:ok={sc.matched}>
+          <strong><Icon name={sc.matched ? 'check' : 'alert'} size={14} /> {sc.matched ? 'Scope sesuai: kode di MR rilis sama dengan scope rilis.' : 'Scope belum sesuai dengan kode yang akan dirilis.'}</strong>
+          <span class="small">
+            {sc.inCode}/{sc.tickets} tiket scope ada di kode ·
+            <span class:bad={sc.missing}>{sc.missing} belum ada di kode</span> ·
+            <span class:bad={sc.carried}>{sc.carried} di luar scope terbawa</span> ·
+            <span class:bad={sc.commitsWithoutKey}>{sc.commitsWithoutKey} commit tanpa Jira key</span>{sc.accepted ? ` · ${sc.accepted} sengaja ikut` : ''}
+          </span>
+          {#if !sc.matched}<button class="link-btn small" onclick={() => (tab = 'tickets')}>Lihat detail</button>{/if}
+        </div>
+      {/if}
+
       <div class="tabs">
         <button class:active={tab === 'board'} onclick={() => (tab = 'board')}><Icon name="dashboard" size={14} /> Papan ({current.services.length})</button>
         <button class:active={tab === 'checklist'} onclick={() => (tab = 'checklist')}><Icon name="list" size={14} /> Checklist {pendingItems ? `(${pendingItems} belum)` : ''}</button>
@@ -354,7 +403,7 @@
                 <button class="btn btn-ghost btn-sm" onclick={() => removeService(s)} aria-label="Hapus service {s.name}"><Icon name="trash" size={12} /></button>
               </div>
               {#if !s.mrs.length}
-                <p class="err small"><Icon name="alert" size={12} /> Belum ada MR ke {current.targetBranch}.</p>
+                <p class="err small no-mr"><Icon name="alert" size={12} /> Belum ada MR ke {current.targetBranch}. <button class="btn btn-sm btn-primary" onclick={async () => { await flush(); mrFor = s; }} disabled={!s.gitlabPath} title={s.gitlabPath ? `Buat MR ${current.sourceBranch ?? 'staging'} ke ${current.targetBranch}` : 'Isi path GitLab dulu'}><Icon name="merge" size={12} /> Buat MR</button></p>
               {/if}
               {#each s.mrs as m (m.ref)}
                 {@const c = checkOf(m.ref)}
@@ -379,6 +428,9 @@
                       {#if c.sqlOutside.length}<span class="warn-text"><strong>SQL di luar folder migrasi:</strong> <span class="mono">{c.sqlOutside.join(', ')}</span></span>{/if}
                       {#if c.modelWithoutMigration.length}<span class="warn-text"><strong>Model berubah tanpa migrasi:</strong> <span class="mono">{c.modelWithoutMigration.join(', ')}</span></span>{/if}
                       {#if c.commitsWithoutKey.length}<span class="warn-text"><strong>{c.commitsWithoutKey.length} commit tanpa Jira key</strong> <span class="muted">({c.commitsWithoutKey.slice(0, 3).join('; ')}{c.commitsWithoutKey.length > 3 ? '; …' : ''})</span></span>{/if}
+                      {#each report?.outOfScope.filter((o) => o.mrs.includes(m.ref)) ?? [] as o (o.key)}
+                        <span class="err-text"><strong>Di luar scope:</strong> <span class="mono">{o.key}</span> {o.summary ?? ''}{o.commits[0] ? ` · ${o.commits[0]}` : ''}</span>
+                      {/each}
                       {#if c.diffTruncated}<span class="muted">Diff terpotong: cek env secara manual.</span>{/if}
                       {#if !bringsSummary(c) && !c.envReadInCode.length && !c.commitsWithoutKey.length && !c.modelWithoutMigration.length}<span class="muted">Tidak membawa env, migrasi, atau query.</span>{/if}
                     </div>
@@ -390,6 +442,7 @@
               <div class="add-mr">
                 <input class="input mono" value={mrInput[s.id] ?? ''} oninput={(e) => (mrInput[s.id] = e.currentTarget.value)} placeholder="Tempel link MR ke {current.targetBranch}" aria-label="Link MR" onkeydown={(e) => e.key === 'Enter' && addMr(s)} />
                 <button class="btn btn-sm" onclick={() => addMr(s)}><Icon name="plus" size={12} /> MR</button>
+                {#if s.mrs.length}<button class="btn btn-sm btn-ghost" onclick={async () => { await flush(); mrFor = s; }} disabled={!s.gitlabPath}><Icon name="merge" size={12} /> Buat MR lain</button>{/if}
               </div>
             </div>
           {/each}
@@ -463,6 +516,35 @@
                 {/each}
               </tbody>
             </table>
+            <h4 class:err-text={report.outOfScope.length}>Di luar scope, ikut terbawa di kode ({report.outOfScope.length})</h4>
+            {#if report.outOfScope.length}
+              <p class="muted small">Jira key ini ada di commit MR rilis tapi bukan bagian dari scope (TAD, codename, tiket tambahan). Keluarkan commit-nya dari branch rilis, masukkan tiketnya ke scope, atau tandai sengaja ikut.</p>
+              <table class="tbl">
+                <thead><tr><th>Tiket</th><th>Judul</th><th>Status</th><th>MR</th><th>Commit</th><th></th></tr></thead>
+                <tbody>
+                  {#each report.outOfScope as o (o.key)}
+                    <tr class="missing">
+                      <td class="mono">{o.key}</td>
+                      <td>{o.summary ?? 'tidak termuat dari Jira'}{o.codename ? ` · codename ${o.codename}` : ''}</td>
+                      <td class="small">{o.status ?? '-'}</td>
+                      <td class="small">{o.mrs.join(', ')}</td>
+                      <td class="small">{o.commits.slice(0, 2).join('; ')}</td>
+                      <td class="acts">
+                        <button class="btn btn-sm" onclick={() => includeInScope(o.key)}>Masukkan ke scope</button>
+                        <input class="input tiny-note" placeholder="alasan (opsional)" value={acceptNote[o.key] ?? ''} oninput={(e) => (acceptNote[o.key] = e.currentTarget.value)} />
+                        <button class="btn btn-sm btn-ghost" onclick={() => acceptCarried(o.key)}>Sengaja ikut</button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <p class="muted small">Tidak ada tiket di luar scope di kode MR rilis.</p>
+            {/if}
+            {#if current.accepted?.length}
+              <h4>Ditandai sengaja ikut</h4>
+              <ul class="small">{#each current.accepted as a (a.key)}<li><span class="mono">{a.key}</span>{a.note ? ` · ${a.note}` : ''} <button class="link-btn" onclick={() => unaccept(a.key)}>batalkan</button></li>{/each}</ul>
+            {/if}
             {#if report.badTitles.length}
               <h4>Judul tiket tidak mengikuti format [TYPE][SERVICE][CODENAME] - Nama</h4>
               <ul class="small">{#each report.badTitles as b (b.key)}<li><span class="mono">{b.key}</span> {b.summary}</li>{/each}</ul>
@@ -500,6 +582,9 @@
   <ReleaseImportDialog bind:open={importOpen} release={current} onimported={onImported} />
   <ShareMrModal bind:open={shareOpen} release={current} {report} onshared={(r) => setCurrent(r)} />
   <PublishReleaseModal bind:open={publishOpen} release={current} markdown={docMd} onpublished={(r) => setCurrent(r)} />
+  {#if mrFor}
+    <CreateMrModal release={current} service={mrFor} onclose={() => (mrFor = null)} oncreated={(r) => { setCurrent(r); mrFor = null; }} />
+  {/if}
 {/if}
 
 <style>
@@ -740,6 +825,12 @@
   .pic {
     flex: 0 1 140px;
   }
+  .no-mr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .order {
     display: grid;
     place-items: center;
@@ -807,6 +898,50 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .scope-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--err);
+    border-radius: var(--radius-sm);
+    background: var(--err-soft);
+  }
+  .scope-card.ok {
+    border-color: var(--ok, #16a34a);
+    background: var(--ok-soft);
+  }
+  .scope-card strong {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+  }
+  .bad,
+  .err-text {
+    color: var(--err);
+    font-weight: 600;
+  }
+  .link-btn {
+    border: none;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
+  }
+  .acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+  }
+  .tiny-note {
+    width: 140px;
+    padding: 2px 6px;
+    font-size: 12px;
   }
   .warn-text {
     color: var(--warn, #b45309);

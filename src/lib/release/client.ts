@@ -1,5 +1,5 @@
 import { api, connectorDownMessage } from '../api-base';
-import type { Release, ReleaseReport, ReleaseSource } from './types';
+import type { MrPlan, Release, ReleaseReport, ReleaseSource } from './types';
 
 async function call<T>(path: string, body?: unknown): Promise<T> {
   let res: Response;
@@ -36,6 +36,11 @@ export const releases = {
   report: (id: string) => call<{ report: ReleaseReport | null }>(`/report?id=${encodeURIComponent(id)}`).then((r) => r.report),
   codenames: (id: string) => call<string[]>(`/codenames?id=${encodeURIComponent(id)}`),
   importDoc: (id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>) => call<Release>('/import', { id, markdown, source }),
+  /** What a new MR for one service would contain (reads GitLab only). */
+  mrPlan: (id: string, serviceId: string, sourceBranch?: string) => call<MrPlan>('/mr/plan', { id, serviceId, sourceBranch }),
+  /** Creates the MR in GitLab (token with scope api), or attaches the one already open. */
+  createMr: (id: string, serviceId: string, req: { sourceBranch: string; title: string; description: string }) =>
+    call<{ release: Release; ref: string; webUrl: string; created: boolean }>('/mr/create', { id, serviceId, ...req }),
   sharePreview: (id: string, req: ShareRequest) => call<{ text: string; html: string }>('/share/preview', { id, ...req }),
   share: (id: string, chat: { id: string; name: string }, req: ShareRequest) => call<Release>('/share', { id, chatId: chat.id, chatName: chat.name, ...req }),
 };

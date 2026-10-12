@@ -78,6 +78,13 @@ export function checkMr(mr: MrDetail): MrCheck {
   const modelWithoutMigration = migrations.length ? [] : live.filter((c) => MODEL_PATH.test(c.newPath) && !TEST_DIR.test(c.newPath)).map((c) => c.newPath).slice(0, 10);
   const commitsWithoutKey = mr.commits.filter((c) => !/^Merge\b/i.test(c.title) && !jiraKeysIn(c.title).length).map((c) => c.title);
   const jiraKeys = jiraKeysIn([mr.title, mr.sourceBranch, mr.description ?? '', ...mr.commits.map((c) => c.title)].join('\n'));
+  const keyCommits: Record<string, string[]> = {};
+  for (const c of mr.commits) {
+    for (const k of jiraKeysIn(c.title)) {
+      const list = (keyCommits[k] ??= []);
+      if (list.length < 5) list.push(c.title);
+    }
+  }
   return {
     ref: mr.ref,
     title: mr.title,
@@ -97,6 +104,7 @@ export function checkMr(mr: MrDetail): MrCheck {
     modelWithoutMigration,
     commitsWithoutKey,
     jiraKeys,
+    keyCommits,
     diffTruncated: mr.diffTruncated || mr.changes.some((c) => c.truncated),
   };
 }

@@ -30,6 +30,20 @@ Modul **Rilis** mengelola satu rilis lintas service: MR ke branch produksi (defa
 
 Diff yang terpotong (GitLab atau batas Cockpit) ditandai supaya env dicek manual.
 
+## 🎯 Scope vs kode
+
+Rilis dianggap **scope sesuai** hanya bila: semua tiket scope ada di kode MR rilis, tidak ada tiket di luar scope yang terbawa, dan tidak ada commit tanpa Jira key. "Kode" = Jira key di judul commit (termasuk merge commit dari branch fitur) dan nama branch sumber (`codeKeys`); judul/deskripsi MR tidak dihitung (deskripsi MR buatan Cockpit memuat daftar tiket).
+
+- Tiket di kode yang bukan scope (`outOfScope`) diambil judul/statusnya dari Jira. Yang codename-nya milik rilis (lebih tua dari jangkauan pencarian codename) otomatis masuk scope.
+- Aksi di tab Tiket: **Masukkan ke scope** (ke `jiraKeys`) atau **Sengaja ikut** (ke `accepted`, dengan alasan) supaya tidak terus jadi peringatan.
+- Kartu status scope di atas tab; mengubah status ke Siap rilis/Dirilis saat belum sesuai meminta konfirmasi.
+
+## 🔀 Buat MR
+
+Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service yang belum ada di commit, dan tiket di luar scope yang akan terbawa. Judul dan deskripsi (tiket, checklist server, commit) bisa diedit.
+- **Buat MR**: lewat API, butuh token scope `api` (dicek dari `/personal_access_tokens/self`), selalu dikonfirmasi, audit `gitlab.mr.create`. MR terbuka untuk branch yang sama ditautkan, bukan dibuat dua kali.
+- **Buka form di GitLab**: form "new merge request" GitLab yang sudah terisi; tidak butuh scope tulis.
+
 ## 🧾 Cakupan tiket ([`src/lib/release/coverage.ts`](../../../src/lib/release/coverage.ts))
 
 - Tiket dari TAD, codename (dicari longgar `summary ~ "CODE"` lalu dicocokkan persis dengan `parseTaskTitle`), dan tiket tambahan.
@@ -59,13 +73,15 @@ HTML dibangun dari data dengan semua nilai di-escape; hanya `p`, `b`, `a` (http/
 | [`connector/releases/store.ts`](../../../connector/releases/store.ts) | `~/.tech-lead-cockpit/releases/<id>.json` (0600), validasi |
 | [`connector/releases/manager.ts`](../../../connector/releases/manager.ts) | Tiket, discover, check (laporan di `releases/reports/`), import, share |
 | [`connector/releases/repos.ts`](../../../connector/releases/repos.ts) | `git remote get-url origin` per repo di folder Services → path project GitLab |
-| [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch(target, days)` |
+| [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch`, `compare`, `branchExists`, `openMrFor`, `tokenScopes`, `createMr` (satu-satunya tulis, butuh scope `api`) |
+| [`src/releases/CreateMrModal.svelte`](../../../src/releases/CreateMrModal.svelte) | Buat MR per service: perbandingan, temuan, scope, judul/deskripsi, API atau form GitLab |
+| [`src/lib/release/mr.ts`](../../../src/lib/release/mr.ts) | Judul, deskripsi, dan URL form MR GitLab |
 
-Route: `GET /releases`, `GET /releases/one`, `GET /releases/report`, `GET /releases/codenames`, `POST /releases`, `POST /releases/delete`, `POST /releases/discover`, `POST /releases/check`, `POST /releases/import`, `POST /releases/share/preview`, `POST /releases/share`.
+Route: `GET /releases`, `GET /releases/one`, `GET /releases/report`, `GET /releases/codenames`, `POST /releases`, `POST /releases/delete`, `POST /releases/discover`, `POST /releases/check`, `POST /releases/import`, `POST /releases/mr/plan`, `POST /releases/mr/create`, `POST /releases/share/preview`, `POST /releases/share`.
 
 ## 🔒 Batas
 
-- GitLab dan Jira hanya dibaca. Satu-satunya tulis ke luar adalah pesan Teams yang dikonfirmasi (dan publish Confluence lewat route publish yang sudah ada).
+- Jira hanya dibaca. Tulis ke luar hanya setelah konfirmasi: pesan Teams, membuat MR di GitLab (token scope `api`), dan publish Confluence lewat route publish yang sudah ada.
 - Belum ada: mention Teams sungguhan (butuh ID akun Microsoft), thread checklist otomatis di MR GitLab (butuh token scope `api`), dan job CI `release-check` di repo service.
 
 ## 🛠️ Test

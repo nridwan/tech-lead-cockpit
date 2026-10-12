@@ -1501,6 +1501,7 @@ function releasesFor(env: Env): ReleaseManager {
     store: new ReleaseStore(),
     reportDir: path.join(RELEASES_DIR, 'reports'),
     gitlab: async () => (await loadGitLab(env)).client ?? null,
+    gitlabBaseUrl: async () => (await loadGitLab(env)).baseUrl,
     jiraSearch: async (jql, limit) => {
       const { cfg } = await loadJiraConfig(env);
       if (!cfg) throw new Error('Jira belum dikonfigurasi.');
@@ -1551,6 +1552,24 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       const source = { kind: s.kind === 'confluence' ? ('confluence' as const) : ('markdown' as const), title: String(s.title ?? 'Dokumen rilis').slice(0, 200), ...(s.pageId ? { pageId: String(s.pageId) } : {}), ...(Number.isInteger(s.version) ? { version: Number(s.version) } : {}), ...(s.url ? { url: String(s.url).slice(0, 500) } : {}) };
       return send(res, 200, await rm.importDoc(idOf(body.id), String(body.markdown ?? ''), source));
     }
+    if (route === 'POST /releases/mr/plan') {
+      const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string }>(req, 16 * 1024);
+      return send(res, 200, await rm.mrPlan(idOf(body.id), String(body.serviceId ?? ''), body.sourceBranch ? String(body.sourceBranch) : undefined));
+    }
+    if (route === 'POST /releases/mr/create') {
+      const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; title?: string; description?: string }>(req, 128 * 1024);
+      const base = { ts: new Date().toISOString(), action: 'gitlab.mr.create' as const, spaceKey: 'GitLab', title: String(body.title ?? '').slice(0, 200), attachments: 0 };
+      try {
+        const r = await rm.createMr(idOf(body.id), String(body.serviceId ?? ''), { sourceBranch: String(body.sourceBranch ?? ''), title: String(body.title ?? ''), description: String(body.description ?? '') });
+        await audit({ ...base, title: `${r.created ? 'Buat' : 'Tautkan'} MR ${r.ref}`, result: 'success' }).catch(() => {});
+        return send(res, 200, r);
+      } catch (e) {
+        if (e instanceof ReleaseInputError) throw e;
+        await audit({ ...base, result: 'failure', error: (e as Error).message }).catch(() => {});
+        if (e instanceof GitLabError) return fail(res, e.status, { error: e.message, code: e.code === 'forbidden' ? 'unauthorized' : e.code });
+        throw e;
+      }
+    }
     if (route === 'POST /releases/share/preview' || route === 'POST /releases/share') {
       const body = await readJson<{ id?: string; chatId?: string; chatName?: string; mrRefs?: string[]; deadline?: string; reviewers?: string[]; note?: string; reminder?: boolean }>(req, 64 * 1024);
       const opts = {
@@ -1576,6 +1595,7 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
     if (e instanceof ReleaseInputError) return fail(res, 400, { error: e.message, code: 'bad-request' });
+    if (e instanceof GitLabError) return fail(res, e.status, { error: e.message, code: e.code === 'forbidden' ? 'unauthorized' : e.code });
     throw e;
   }
 }

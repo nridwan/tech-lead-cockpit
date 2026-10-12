@@ -87,6 +87,8 @@ export interface Release {
   status: ReleaseStatus;
   /** Branch the release MRs go into. */
   targetBranch: string;
+  /** Branch a new release MR comes from (e.g. staging), per service unless changed in the dialog. */
+  sourceBranch: string;
   /** Approvals an MR needs before the release counts as ready. */
   minApprovals: number;
   /** Cockpit projects in this release (their TAD tasks and codenames). */
@@ -104,6 +106,8 @@ export interface Release {
   /** Last Teams chat used to ask for review. */
   teamsChat?: { id: string; name: string };
   shares: ReleaseShare[];
+  /** Tickets outside the scope that may ride along on purpose (decided by the user), with why. */
+  accepted: { key: string; note?: string; at: string }[];
   /** Confluence page this release was published to. */
   published?: { pageId: string; version: number; url?: string; at: string };
   notes?: string;
@@ -136,6 +140,8 @@ export interface MrCheck {
   /** Commit titles without a Jira key. */
   commitsWithoutKey: string[];
   jiraKeys: string[];
+  /** Commit titles per Jira key (at most 5 each), to show what a key brought in. */
+  keyCommits: Record<string, string[]>;
   /** The diff was cut by GitLab or Cockpit: env lines may be missing. */
   diffTruncated: boolean;
   error?: string;
@@ -154,6 +160,35 @@ export interface TicketCoverage {
   devDone: boolean;
 }
 
+/** A ticket whose commits ride along in a release MR without being in the release. */
+export interface OutOfScope {
+  key: string;
+  summary?: string;
+  status?: string;
+  /** CODENAME of its title, when it follows the naming rule. */
+  codename?: string;
+  /** Release MRs that carry it. */
+  mrs: string[];
+  commits: string[];
+}
+
+export interface ScopeSummary {
+  /** Tickets in the release scope. */
+  tickets: number;
+  /** Scope tickets found in the release MRs' code. */
+  inCode: number;
+  /** Scope tickets not in any release MR. */
+  missing: number;
+  /** Tickets in the code that are not in the scope (not accepted). */
+  carried: number;
+  /** Carried tickets the user accepted on purpose. */
+  accepted: number;
+  /** Commits without a Jira key: their scope cannot be told. */
+  commitsWithoutKey: number;
+  /** Nothing missing, nothing carried, no unknown commits. */
+  matched: boolean;
+}
+
 export interface ReleaseReport {
   releaseId: string;
   checkedAt: string;
@@ -163,5 +198,36 @@ export interface ReleaseReport {
   servicesWithoutMr: string[];
   /** Tickets whose title does not follow [TYPE][SERVICE][CODENAME] - Name. */
   badTitles: { key: string; summary: string }[];
+  /** Jira keys in release MRs that are not part of the release: changes carried along. */
+  outOfScope: OutOfScope[];
+  /** Does the code in the release MRs match the release scope? */
+  scope: ScopeSummary;
+  warnings: string[];
+}
+
+/** What creating a release MR for one service would do (shown before anything is written). */
+export interface MrPlan {
+  serviceId: string;
+  projectPath: string;
+  sourceBranch: string;
+  targetBranch: string;
+  sourceExists: boolean;
+  targetExists: boolean;
+  /** An MR from source into target is already open: use it instead of creating one. */
+  existing?: { ref: string; webUrl: string; title: string };
+  commits: { shortId: string; title: string }[];
+  files: number;
+  truncated: boolean;
+  findings: Pick<MrCheck, 'envAdded' | 'envReadInCode' | 'migrations' | 'sqlOutside' | 'modelWithoutMigration' | 'commitsWithoutKey' | 'jiraKeys'>;
+  /** Release tickets of this service, and whether their key is in the source branch commits. */
+  tickets: { key: string; summary: string; status: string; inSource: boolean }[];
+  /** Tickets in the source branch commits that are not in the release: would be carried along. */
+  outOfScope: OutOfScope[];
+  title: string;
+  description: string;
+  /** GitLab's "new merge request" form, filled in (no write scope needed). */
+  formUrl: string;
+  /** The token has the `api` scope; undefined when GitLab can't tell. */
+  canCreate?: boolean;
   warnings: string[];
 }

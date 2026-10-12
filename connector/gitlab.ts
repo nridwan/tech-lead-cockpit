@@ -11,8 +11,9 @@ import type {
 } from '../src/lib/gitlab/types.ts';
 
 /**
- * Read-only GitLab client for the internal instance (reached over the laptop's VPN).
- * Authenticates with a Personal Access Token (scope `read_api`) kept in the Keychain.
+ * GitLab client for the internal instance (reached over the laptop's VPN), read-only except
+ * createMr (Release Management, after the user confirms), which needs a token with scope `api`.
+ * Authenticates with a Personal Access Token (scope `read_api` is enough to read) kept in the Keychain.
  * Only GET requests are made; MR content is treated as untrusted data.
  */
 
@@ -216,6 +217,78 @@ export class GitLabClient {
     if (res.status === 404) throw new GitLabError('Tidak ditemukan di GitLab (404).', 404, 'not-found');
     if (!res.ok) throw new GitLabError(`GitLab membalas HTTP ${res.status}.`, 502, 'upstream');
     return { body: (await res.json()) as T, headers: res.headers };
+  }
+
+  /** POST with the same error handling as get; writes need a token with the `api` scope. */
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.cfg.baseUrl}/api/v4${path}`, {
+        method: 'POST',
+        headers: { 'PRIVATE-TOKEN': this.cfg.token, Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      throw new GitLabError(`GitLab tidak terjangkau (${(e as Error).message}). Pastikan VPN aktif.`, 502, 'network');
+    }
+    const data = (await res.json().catch(() => ({}))) as { message?: unknown; error?: string };
+    const detail = Array.isArray(data.message) ? data.message.join(' ') : typeof data.message === 'string' ? data.message : (data.error ?? '');
+    if (res.status === 401) throw new GitLabError('Token GitLab ditolak (401).', 401, 'unauthorized');
+    if (res.status === 403) throw new GitLabError('Token GitLab tidak boleh menulis (403). Membuat MR butuh token dengan scope api, atau pakai "Buka form di GitLab".', 403, 'forbidden');
+    if (res.status === 404) throw new GitLabError('Project atau branch tidak ditemukan di GitLab (404).', 404, 'not-found');
+    if (res.status === 409) throw new GitLabError(`Sudah ada MR terbuka untuk branch ini${detail ? `: ${detail}` : '.'}`, 409, 'bad-request');
+    if (!res.ok) throw new GitLabError(`GitLab menolak (HTTP ${res.status})${detail ? `: ${detail}` : '.'}`, res.status === 422 || res.status === 400 ? 400 : 502, res.status === 422 || res.status === 400 ? 'bad-request' : 'upstream');
+    return data as T;
+  }
+
+  /** Scopes of the current personal access token; undefined when GitLab can't tell (older versions, other token types). */
+  async tokenScopes(): Promise<string[] | undefined> {
+    try {
+      return (await this.get<{ scopes?: string[] }>('/personal_access_tokens/self')).body.scopes;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async branchExists(projectPath: string, branch: string): Promise<boolean> {
+    try {
+      await this.get(`/projects/${encodeURIComponent(projectPath)}/repository/branches/${encodeURIComponent(branch)}`);
+      return true;
+    } catch (e) {
+      if (e instanceof GitLabError && e.status === 404) return false;
+      throw e;
+    }
+  }
+
+  /** What `source` has that `target` doesn't: commits and changed files (merge-base compare). */
+  async compare(projectPath: string, target: string, source: string): Promise<{ commits: MrCommit[]; changes: MrFileChange[]; truncated: boolean }> {
+    const { body } = await this.get<{ commits?: ApiCommit[]; diffs?: ApiDiff[]; compare_timeout?: boolean }>(
+      `/projects/${encodeURIComponent(projectPath)}/repository/compare?from=${encodeURIComponent(target)}&to=${encodeURIComponent(source)}&straight=false`,
+    );
+    const diffs = body.diffs ?? [];
+    return {
+      commits: (body.commits ?? []).map((c) => ({ id: c.id, shortId: c.short_id, title: c.title, authorName: c.author_name, createdAt: c.created_at })),
+      changes: diffs.slice(0, MAX_FILES).map((d) => ({ oldPath: d.old_path, newPath: d.new_path, newFile: d.new_file, renamedFile: d.renamed_file, deletedFile: d.deleted_file, diff: (d.diff ?? '').length > MAX_FILE_DIFF_CHARS ? '' : (d.diff ?? ''), truncated: Boolean(d.too_large || d.collapsed || (d.diff ?? '').length > MAX_FILE_DIFF_CHARS), ...countDiffLines(d.diff ?? '') })),
+      truncated: Boolean(body.compare_timeout) || diffs.length > MAX_FILES,
+    };
+  }
+
+  /** The open MR from `source` into `target`, if there is one. */
+  async openMrFor(projectPath: string, source: string, target: string): Promise<MrSummary | undefined> {
+    const { body } = await this.get<ApiMr[]>(`/projects/${encodeURIComponent(projectPath)}/merge_requests?state=opened&source_branch=${encodeURIComponent(source)}&target_branch=${encodeURIComponent(target)}&per_page=5`);
+    return body[0] ? summary(body[0]) : undefined;
+  }
+
+  async createMr(projectPath: string, req: { source: string; target: string; title: string; description: string }): Promise<MrSummary> {
+    const mr = await this.post<ApiMr>(`/projects/${encodeURIComponent(projectPath)}/merge_requests`, {
+      source_branch: req.source,
+      target_branch: req.target,
+      title: req.title,
+      description: req.description,
+      remove_source_branch: false,
+    });
+    return summary(mr);
   }
 
   async currentUser(): Promise<GitLabUser> {

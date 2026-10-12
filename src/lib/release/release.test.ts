@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MrDetail, MrFileChange } from '../gitlab/types';
 import { checkMr, envAddedIn, envReadsIn, isMigration, jiraKeysIn } from './checks';
-import { buildReport, matchesCodename, sameService, type ReleaseTicket } from './coverage';
+import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from './coverage';
 import { releaseMarkdown } from './document';
 import { mergeReleaseDoc, mrRefFromUrl, parseReleaseDoc } from './import';
 import { shareMessageHtml, shareMessageText } from './share';
@@ -44,6 +44,7 @@ const release = (over: Partial<Release> = {}): Release => ({
   date: '2026-10-20',
   status: 'draft',
   targetBranch: 'master',
+  sourceBranch: 'staging',
   minApprovals: 1,
   projectIds: [],
   codenames: [],
@@ -52,6 +53,7 @@ const release = (over: Partial<Release> = {}): Release => ({
   items: [],
   steps: [],
   shares: [],
+  accepted: [],
   createdAt: '2026-10-12T00:00:00Z',
   updatedAt: '',
   ...over,
@@ -222,6 +224,7 @@ const check = (over: Partial<MrCheck> = {}): MrCheck => ({
   modelWithoutMigration: [],
   commitsWithoutKey: [],
   jiraKeys: ['MU-12'],
+  keyCommits: { 'MU-12': ['MU-12 refund'] },
   diffTruncated: false,
   ...over,
 });
@@ -254,10 +257,48 @@ describe('release report', () => {
       'payments/core-payment!12 punya konflik dengan master.',
       'payments/core-payment!12: pipeline failed.',
       'payments/core-payment!12: 1/2 approval.',
-      '2 tiket belum ada di MR rilis mana pun.',
+      '2 tiket scope belum ada di kode MR rilis mana pun.',
       '2 tiket belum selesai development di Jira.',
       'Service MOBILE-APP belum punya MR ke master.',
     ]);
+  });
+});
+
+describe('scope check against the code', () => {
+  const r = release({ services: [{ id: 's1', name: 'core-payment', mrs: [{ ref: 'payments/core-payment!12', projectPath: 'payments/core-payment', iid: 12, webUrl: 'u', via: 'auto' }], order: 1 }] });
+  const scopeTickets: ReleaseTicket[] = [
+    { key: 'MU-12', summary: '[BACKEND][CORE-PAYMENT][SWITCHING] - Refund', status: 'READY TO TEST', statusCategory: 'indeterminate', service: 'core-payment', from: 'tad' },
+    { key: 'MU-13', summary: '[BACKEND][CORE-PAYMENT][SWITCHING] - Limit', status: 'READY TO TEST', statusCategory: 'indeterminate', service: 'core-payment', from: 'tad' },
+  ];
+
+  it('counts only keys in commits and the source branch, not the MR description', () => {
+    const c = check({ jiraKeys: ['MU-12', 'MU-13'], keyCommits: { 'MU-12': ['MU-12 refund'] }, sourceBranch: 'staging' });
+    expect(codeKeys(c)).toEqual(['MU-12']);
+    expect(codeKeys(check({ keyCommits: {}, sourceBranch: 'feature/MU-13-limit' }))).toEqual(['MU-13']);
+    const rep = buildReport(r, scopeTickets, [c]);
+    expect(rep.tickets.find((t) => t.key === 'MU-13')!.inMrs).toEqual([]);
+    expect(rep.scope).toMatchObject({ tickets: 2, inCode: 1, missing: 1, matched: false });
+  });
+
+  it('reports tickets carried along outside the scope, unless accepted on purpose', () => {
+    const c = check({ keyCommits: { 'MU-12': ['MU-12 refund'], 'MU-13': ['MU-13 limit'], 'MU-50': ["Merge branch 'feature/MU-50-promo' into 'staging'", 'MU-50 promo'] } });
+    const extra = new Map([['MU-50', { summary: '[BACKEND][CORE-PAYMENT][PROMO] - Diskon', status: 'In Progress' }]]);
+    const rep = buildReport(r, scopeTickets, [c], '2026-10-12T00:00:00Z', extra);
+    expect(rep.outOfScope).toEqual([{ key: 'MU-50', summary: '[BACKEND][CORE-PAYMENT][PROMO] - Diskon', status: 'In Progress', codename: 'PROMO', mrs: ['payments/core-payment!12'], commits: ["Merge branch 'feature/MU-50-promo' into 'staging'", 'MU-50 promo'] }]);
+    expect(rep.scope).toMatchObject({ inCode: 2, missing: 0, carried: 1, matched: false });
+    expect(rep.warnings).toContain('1 tiket di luar scope ikut terbawa: MU-50.');
+
+    const accepted = buildReport({ ...r, accepted: [{ key: 'MU-50', note: 'hotfix ikut', at: '' }] }, scopeTickets, [c], '', extra);
+    expect(accepted.outOfScope).toEqual([]);
+    expect(accepted.scope).toMatchObject({ carried: 0, accepted: 1, matched: true });
+  });
+
+  it('is not matched while commits have no Jira key, and ignores closed MRs', () => {
+    const rep = buildReport(r, scopeTickets, [check({ keyCommits: { 'MU-12': ['a'], 'MU-13': ['b'] }, commitsWithoutKey: ['fix typo'] })]);
+    expect(rep.scope).toMatchObject({ commitsWithoutKey: 1, matched: false });
+    expect(rep.warnings).toContain('1 commit tanpa Jira key: scope-nya tidak bisa dipastikan.');
+    const closed = buildReport(r, scopeTickets, [check({ state: 'closed', keyCommits: { 'MU-99': ['x'] } })]);
+    expect(closed.outOfScope).toEqual([]);
   });
 });
 

@@ -1,13 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { EstimateProject } from '../../src/lib/estimate/types.ts';
-import type { MrDetail, MrSummary } from '../../src/lib/gitlab/types.ts';
+import type { MrCommit, MrDetail, MrFileChange, MrSummary } from '../../src/lib/gitlab/types.ts';
+import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { buildReport, matchesCodename, sameService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath } from '../../src/lib/release/import.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
-import type { MrCheck, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
+import type { MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
 import { parseScopeTasks } from '../../src/lib/tad/task-links.ts';
 import { matchRepo } from '../roster/git-activity.ts';
@@ -20,11 +21,24 @@ import { ReleaseInputError, ReleaseStore } from './store.ts';
  * Jira are only read; the one write is the Teams message the user confirmed.
  */
 
+/** What release management needs from GitLab (reads, plus createMr after confirmation). */
+export interface ReleaseGitLab {
+  mrsToBranch(target: string, days?: number): Promise<(MrSummary & { description: string })[]>;
+  mr(path: string, iid: number): Promise<MrDetail>;
+  tokenScopes?(): Promise<string[] | undefined>;
+  branchExists?(path: string, branch: string): Promise<boolean>;
+  compare?(path: string, target: string, source: string): Promise<{ commits: MrCommit[]; changes: MrFileChange[]; truncated: boolean }>;
+  openMrFor?(path: string, source: string, target: string): Promise<MrSummary | undefined>;
+  createMr?(path: string, req: { source: string; target: string; title: string; description: string }): Promise<MrSummary>;
+}
+
 export interface ReleaseDeps {
   store: ReleaseStore;
   /** Where the last report per release is kept. */
   reportDir: string;
-  gitlab: () => Promise<{ mrsToBranch(target: string, days?: number): Promise<(MrSummary & { description: string })[]>; mr(path: string, iid: number): Promise<MrDetail> } | null>;
+  gitlab: () => Promise<ReleaseGitLab | null>;
+  /** GitLab web address, for the filled-in "new MR" form. */
+  gitlabBaseUrl?: () => Promise<string>;
   jiraSearch: (jql: string, limit: number) => Promise<JiraIssue[]>;
   projects: () => Promise<EstimateProject[]>;
   drafts: () => Promise<{ id: string; markdown: string; scopePlan?: string }[]>;
@@ -76,6 +90,29 @@ export class ReleaseManager {
     const list = [...new Set(keys)];
     for (let i = 0; i < list.length; i += KEY_BATCH) out.push(...(await this.deps.jiraSearch(`key in (${list.slice(i, i + KEY_BATCH).join(',')})`, KEY_BATCH)));
     return out;
+  }
+
+  /**
+   * Keys found in the code but not in the scope: their Jira summary and status, and the ones
+   * whose CODENAME belongs to the release (older than the codename search reaches) join the scope.
+   */
+  private async resolveOutside(release: Release, tickets: ReleaseTicket[], keys: string[], warnings: string[]): Promise<Map<string, { summary: string; status: string }>> {
+    const inScope = new Set(tickets.map((t) => t.key));
+    const outside = [...new Set(keys)].filter((k) => !inScope.has(k));
+    const extra = new Map<string, { summary: string; status: string }>();
+    if (!outside.length) return extra;
+    let issues: JiraIssue[] = [];
+    try {
+      issues = await this.issuesByKeys(outside);
+    } catch (e) {
+      warnings.push(`Judul tiket di luar scope tidak termuat: ${(e as Error).message}`);
+    }
+    const codenames = await this.codenames(release);
+    for (const i of issues) {
+      if (matchesCodename(i.summary, codenames)) tickets.push({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: parseTaskTitle(i.summary)?.service, from: 'codename' });
+      else extra.set(i.key, { summary: i.summary, status: i.status });
+    }
+    return extra;
   }
 
   /** Every ticket of the release, with where it came from (TAD first, then CODENAME, then the document). */
@@ -202,7 +239,9 @@ export class ReleaseManager {
       }
     }
     const { tickets, warnings } = await this.tickets(release);
-    const report = buildReport(release, tickets, checks, this.now());
+    const live = checks.filter((c) => !c.error && c.state !== 'closed');
+    const extra = await this.resolveOutside(release, tickets, live.flatMap(codeKeys), warnings);
+    const report = buildReport(release, tickets, checks, this.now(), extra);
     report.warnings.unshift(...warnings);
     const saved = await this.deps.store.save({ ...release, items, services: release.services.map((s) => ({ ...s, mrs: s.mrs.map((m) => ({ ...m, title: checks.find((c) => c.ref === m.ref && !c.error)?.title ?? m.title })) })) });
     await this.saveReport(report);
@@ -251,6 +290,104 @@ export class ReleaseManager {
     });
   }
 
+  private service(release: Release, serviceId: string): ReleaseService {
+    const s = release.services.find((x) => x.id === serviceId);
+    if (!s) throw new ReleaseInputError('Service tidak ditemukan di rilis ini.');
+    if (!s.gitlabPath) throw new ReleaseInputError(`Isi path GitLab untuk ${s.name} dulu (group/repo).`);
+    return s;
+  }
+
+  /**
+   * What a new MR from the source branch into the target branch of one service would contain:
+   * commits, files, env/migration/query findings, the service's tickets, a title and description,
+   * and the filled-in GitLab form. Only reads GitLab.
+   */
+  async mrPlan(id: string, serviceId: string, sourceBranch?: string): Promise<MrPlan> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const path = service.gitlabPath!;
+    const source = (sourceBranch || release.sourceBranch || 'staging').trim();
+    const target = release.targetBranch;
+    if (!/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare || !gitlab.branchExists) throw new ReleaseInputError('GitLab belum terhubung.');
+    const warnings: string[] = [];
+    const [sourceExists, targetExists, scopes, existing] = await Promise.all([
+      gitlab.branchExists(path, source),
+      gitlab.branchExists(path, target),
+      gitlab.tokenScopes?.() ?? Promise.resolve(undefined),
+      gitlab.openMrFor?.(path, source, target).catch(() => undefined) ?? Promise.resolve(undefined),
+    ]);
+    if (!sourceExists) warnings.push(`Branch ${source} tidak ada di ${path}.`);
+    if (!targetExists) warnings.push(`Branch ${target} tidak ada di ${path}.`);
+    const cmp = sourceExists && targetExists ? await gitlab.compare(path, target, source) : { commits: [], changes: [], truncated: false };
+    if (sourceExists && targetExists && !cmp.commits.length) warnings.push(`${source} tidak punya commit baru dibanding ${target}: tidak ada yang perlu di-merge.`);
+    const pseudo = { ref: '', title: '', webUrl: '', state: 'opened', draft: false, author: { id: 0, username: '', name: '' }, sourceBranch: source, targetBranch: target, description: '', commits: cmp.commits, changes: cmp.changes, diffTruncated: cmp.truncated } as unknown as MrDetail;
+    const c = checkMr(pseudo);
+    const findings = { envAdded: c.envAdded, envReadInCode: c.envReadInCode, migrations: c.migrations, sqlOutside: c.sqlOutside, modelWithoutMigration: c.modelWithoutMigration, commitsWithoutKey: c.commitsWithoutKey, jiraKeys: c.jiraKeys };
+    const { tickets: all, warnings: tw } = await this.tickets(release).catch((e: Error) => ({ tickets: [] as ReleaseTicket[], warnings: [e.message] }));
+    warnings.push(...tw);
+    const keysInCode = codeKeys(c);
+    const extra = await this.resolveOutside(release, all, keysInCode, warnings);
+    const scopeKeys = new Set(all.map((t) => t.key));
+    const accepted = new Set((release.accepted ?? []).map((a) => a.key));
+    const outOfScope: OutOfScope[] = keysInCode
+      .filter((k) => !scopeKeys.has(k) && !accepted.has(k))
+      .map((k) => ({ key: k, ...(extra.get(k) ?? {}), ...(extra.get(k) && parseTaskTitle(extra.get(k)!.summary) ? { codename: parseTaskTitle(extra.get(k)!.summary)!.codeName } : {}), mrs: [], commits: c.keyCommits[k] ?? [] }));
+    if (outOfScope.length) warnings.push(`${outOfScope.length} tiket di luar scope akan ikut terbawa dari ${source}: ${outOfScope.map((o) => o.key).join(', ')}.`);
+    if (c.commitsWithoutKey.length) warnings.push(`${c.commitsWithoutKey.length} commit tanpa Jira key: scope-nya tidak bisa dipastikan.`);
+    const tickets = all.filter((t) => t.service && sameService(t.service, service.name)).map((t) => ({ key: t.key, summary: t.summary, status: t.status, inSource: keysInCode.includes(t.key) }));
+    const missing = tickets.filter((t) => !t.inSource);
+    if (missing.length) warnings.push(`${missing.length} tiket ${service.name} tidak ada di commit ${source}: ${missing.map((t) => t.key).join(', ')}.`);
+    const title = mrTitle(release, service);
+    const description = mrDescription(release, service, { commits: cmp.commits, findings, tickets });
+    const base = (await this.deps.gitlabBaseUrl?.().catch(() => '')) ?? '';
+    return {
+      serviceId,
+      projectPath: path,
+      sourceBranch: source,
+      targetBranch: target,
+      sourceExists,
+      targetExists,
+      ...(existing ? { existing: { ref: existing.ref, webUrl: existing.webUrl, title: existing.title } } : {}),
+      commits: cmp.commits.map((x) => ({ shortId: x.shortId, title: x.title })),
+      files: cmp.changes.length,
+      truncated: cmp.truncated,
+      findings,
+      tickets,
+      outOfScope,
+      title,
+      description,
+      formUrl: base ? newMrFormUrl(base, path, source, target, title, description) : '',
+      ...(scopes ? { canCreate: scopes.includes('api') } : {}),
+      warnings,
+    };
+  }
+
+  /**
+   * Creates the release MR in GitLab (the user confirmed in the UI) and adds it to the service.
+   * An MR already open for the same branches is attached instead of creating a second one.
+   */
+  async createMr(id: string, serviceId: string, req: { sourceBranch: string; title: string; description: string }): Promise<{ release: Release; ref: string; webUrl: string; created: boolean }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const path = service.gitlabPath!;
+    const source = req.sourceBranch.trim();
+    const title = req.title.trim().slice(0, 250);
+    if (!/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
+    if (!title) throw new ReleaseInputError('Judul MR wajib diisi.');
+    if (source === release.targetBranch) throw new ReleaseInputError('Branch sumber sama dengan branch target.');
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.createMr) throw new ReleaseInputError('GitLab belum terhubung.');
+    const existing = await gitlab.openMrFor?.(path, source, release.targetBranch).catch(() => undefined);
+    const mr = existing ?? (await gitlab.createMr(path, { source, target: release.targetBranch, title, description: req.description.slice(0, 50_000) }));
+    const services = release.services.map((s) =>
+      s.id === serviceId && !s.mrs.some((m) => m.ref === mr.ref) ? { ...s, mrs: [...s.mrs, { ref: mr.ref, projectPath: mr.projectPath, iid: mr.iid, webUrl: mr.webUrl, title: mr.title, via: 'manual' as const }] } : s,
+    );
+    const saved = await this.deps.store.save({ ...release, services, sourceBranch: release.sourceBranch || source });
+    return { release: saved, ref: mr.ref, webUrl: mr.webUrl, created: !existing };
+  }
+
   private validRefs(release: Release, refs: string[]): string[] {
     const all = new Set(release.services.flatMap((s) => s.mrs.map((m) => m.ref)));
     const picked = [...new Set(refs ?? [])].filter((r) => all.has(r));
@@ -260,5 +397,5 @@ export class ReleaseManager {
 }
 
 function blankCheck(ref: string, webUrl: string, title: string | undefined, targetBranch: string, error: string): MrCheck {
-  return { ref, title: title ?? ref, webUrl, state: 'opened', draft: false, sourceBranch: '', targetBranch, author: '', approvals: { count: 0, by: [] }, envAdded: [], envReadInCode: [], migrations: [], sqlOutside: [], modelWithoutMigration: [], commitsWithoutKey: [], jiraKeys: [], diffTruncated: false, error };
+  return { ref, title: title ?? ref, webUrl, state: 'opened', draft: false, sourceBranch: '', targetBranch, author: '', approvals: { count: 0, by: [] }, envAdded: [], envReadInCode: [], migrations: [], sqlOutside: [], modelWithoutMigration: [], commitsWithoutKey: [], jiraKeys: [], keyCommits: {}, diffTruncated: false, error };
 }
