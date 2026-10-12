@@ -15,11 +15,19 @@ export interface PrdSource {
   checkedAt?: string;
 }
 
-/** Page id from a Confluence URL (`/pages/123/...`, `?pageId=123`) or a bare id. */
+/**
+ * Page id from a Confluence link or a bare id. Covers published pages (`/pages/123/...`,
+ * `viewpage.action?pageId=123`), the editor (`/pages/edit-v2/123`, `/pages/edit/123`) and
+ * unpublished drafts, whose link is `resumedraft.action?draftId=123&draftShareId=…`.
+ */
 export function extractPageId(raw: string): string | null {
   const t = raw.trim();
   if (/^\d{1,20}$/.test(t)) return t;
-  return t.match(/\/pages\/(\d{1,20})/)?.[1] ?? t.match(/[?&]pageId=(\d{1,20})/)?.[1] ?? null;
+  return (
+    t.match(/\/pages\/(?:edit(?:-v2|-embed)?\/)?(\d{1,20})(?:[/?#]|$)/)?.[1] ??
+    t.match(/[?&](?:pageId|draftId|contentId)=(\d{1,20})/)?.[1] ??
+    null
+  );
 }
 
 /** Reads the PRD page and converts it to the Markdown the TAD generator works from. */

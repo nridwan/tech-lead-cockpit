@@ -5,6 +5,7 @@
   import { connector } from '../lib/confluence/client';
   import type { ConnectorStatus, PageInfo } from '../lib/confluence/api-types';
   import { storageToMarkdown } from '../lib/confluence/storage-to-markdown';
+  import { extractPageId } from '../lib/prd/confluence-prd';
   import { drafts, type Draft } from './drafts.svelte';
 
   let {
@@ -27,17 +28,6 @@
   let directInput = $state('');
   let importingId = $state<string | null>(null);
   let importError = $state('');
-
-  function extractPageId(raw: string): string | null {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    if (/^\d{1,20}$/.test(trimmed)) return trimmed;
-    const m1 = trimmed.match(/\/pages\/(\d{1,20})/);
-    if (m1) return m1[1];
-    const m2 = trimmed.match(/[?&]pageId=(\d{1,20})/);
-    if (m2) return m2[1];
-    return null;
-  }
 
   function extractJiraKeys(text: string): string[] {
     const matches = text.match(/\b([A-Z][A-Z0-9]+-\d+)\b/g);
@@ -213,7 +203,7 @@
           <input
             type="text"
             class="input mono"
-            placeholder="Tempelkan URL halaman Confluence (https://.../pages/123456789/...) atau Page ID"
+            placeholder="Tempelkan URL halaman atau draft Confluence (…/pages/123456789/…, …resumedraft.action?draftId=…) atau Page ID"
             bind:value={directInput}
             onkeydown={(e) => e.key === 'Enter' && importByDirectInput()}
             disabled={importingId !== null}

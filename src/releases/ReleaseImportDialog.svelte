@@ -82,7 +82,7 @@
 
     {#if mode === 'confluence'}
       <div class="row">
-        <input class="input" bind:value={pageInput} placeholder="https://…/wiki/spaces/…/pages/123456/… atau ID halaman" onkeydown={(e) => e.key === 'Enter' && fetchPage()} />
+        <input class="input" bind:value={pageInput} placeholder="Link halaman atau draft Confluence (…/pages/123456/…, …resumedraft.action?draftId=…) atau ID halaman" onkeydown={(e) => e.key === 'Enter' && fetchPage()} />
         <button class="btn btn-primary btn-sm" onclick={fetchPage} disabled={loading || !pageInput.trim()}>{loading ? 'Mengambil…' : 'Ambil'}</button>
       </div>
     {:else}
