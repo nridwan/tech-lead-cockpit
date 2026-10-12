@@ -344,6 +344,11 @@
     max-height: 55vh;
     overflow: auto;
   }
+  /* A file card clips its content (overflow: hidden): in a height-capped flex column it would
+     shrink to fit and cut the diff instead of letting the list scroll. */
+  .diffs > :global(*) {
+    flex-shrink: 0;
+  }
   .branch {
     padding: 10px 12px;
     border: 1px solid var(--border);

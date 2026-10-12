@@ -46,8 +46,7 @@ export function mrDescription(
     if (data.commits.length > 50) lines.push(`- … ${data.commits.length - 50} commit lain`);
     lines.push('');
   }
-  lines.push('_Dibuat dari Tech Lead Cockpit._');
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 /** GitLab's new-MR form for a project, filled in; the description is cut to keep the URL short. */
