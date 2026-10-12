@@ -1,5 +1,5 @@
 import { JIRA_KEY } from './checks';
-import { belongsTo, sameService, ticketService } from './coverage';
+import { belongsTo, sameService, ticketService, typeInScope } from './coverage';
 import type { Release, ReleaseItem, ReleaseMrRef, ReleaseService, ReleaseSource, ReleaseStep } from './types';
 
 /**
@@ -294,7 +294,9 @@ export function servicesOutsideScope(release: Release, report: { tickets: { serv
   // The Jira title decides too (a report kept from before may only have the TAD row's service).
   const names = release.services.map((s) => s.name);
   const owns = (t: { service?: string; alsoService?: string; summary?: string }, name: string) => belongsTo(t, name, false, names) || Boolean(t.summary && belongsTo({ service: ticketService(t.summary, release.codenames), summary: t.summary }, name, false, names));
-  return release.services.filter((s) => !s.mrs.length && !report.tickets.some((t) => owns(t, s.name)));
+  // Tickets of a type the release leaves out (e.g. FRONTEND) give no service a place in scope.
+  const tickets = report.tickets.filter((t) => typeInScope(t.summary ?? '', release.ticketTypes));
+  return release.services.filter((s) => !s.mrs.length && !tickets.some((t) => owns(t, s.name)));
 }
 
 /** Removes services (and their checklist items) from a release. */

@@ -155,6 +155,8 @@ export interface Release {
   accepted: { key: string; note?: string; at: string }[];
   /** Services the user removed: the check never adds them back. */
   ignoredServices?: string[];
+  /** Ticket types in scope (first title tag: BACKEND, FRONTEND, IOS…); empty = all types. */
+  ticketTypes?: string[];
   /** Confluence page this release was published to. */
   published?: { pageId: string; version: number; url?: string; at: string };
   notes?: string;
@@ -299,6 +301,8 @@ export interface ReleaseReport {
   sources?: CodeSource[];
   /** Set when the tickets were also read by AI. */
   ai?: { model: string; errors: string[] };
+  /** Ticket types found (before the release's type filter), with how many and whether left out. */
+  types?: { type: string; count: number; excluded: boolean }[];
   /** Tickets whose title does not follow [TYPE][SERVICE][CODENAME] - Name. */
   badTitles: { key: string; summary: string }[];
   /** Jira keys in release MRs that are not part of the release: changes carried along. */

@@ -121,6 +121,9 @@ describe('ticket service', () => {
     // A report kept from before: the TAD row says another service, the Jira title says GO-WORKER.
     const out = servicesOutsideScope(r, { tickets: [{ service: 'CORE-TOPUP', summary: '[BACKEND][GO-WORKER][TOKO] - Scheduler' }] });
     expect(out.map((s) => s.name)).toEqual(['core-other']);
+    // A back-end only release: a FRONTEND ticket keeps no service in scope.
+    const fe = release({ ticketTypes: ['BACKEND'], services: [{ id: 's3', name: 'portal-frontend', mrs: [], order: 1 }] });
+    expect(servicesOutsideScope(fe, { tickets: [{ service: 'PORTAL', summary: '[FRONTEND][PORTAL][TOKO] - Form' }] }).map((s) => s.name)).toEqual(['portal-frontend']);
   });
 
   it('puts a [FRONTEND][X] ticket in the front-end repo of X too', () => {

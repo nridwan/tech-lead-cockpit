@@ -29,6 +29,16 @@ export interface ReleaseTicket {
 const FRONT_TYPES = new Set(['frontend', 'fe', 'webfe', 'web', 'cms']);
 export const FRONT_SUFFIXES = ['frontend', 'fe', 'web'];
 
+/** A ticket's type: its first title tag, upper case ([BACKEND][X]… → BACKEND, [IOS][CODE]… → IOS). */
+export const ticketType = (summary: string) => (ticketTags(summary)[0] ?? '').toUpperCase();
+
+/** Is the ticket's type in the release's scope? No filter, or no type tag, = in. */
+export function typeInScope(summary: string, types: string[] | undefined): boolean {
+  if (!types?.length) return true;
+  const t = ticketType(summary);
+  return !t || types.some((x) => x.toUpperCase() === t);
+}
+
 /** A [FRONTEND]/[FE]/[WEB]/[CMS] ticket. */
 export const isFrontTicket = (summary: string) => FRONT_TYPES.has(norm(ticketTags(summary)[0] ?? ''));
 

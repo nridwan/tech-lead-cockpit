@@ -10,7 +10,7 @@ import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hun
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
-import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, ticketType, typeInScope, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
@@ -76,6 +76,8 @@ const newId = () => crypto.randomUUID();
 
 export class ReleaseManager {
   private readonly aiLive = new Map<string, AiLive>();
+  /** Ticket types seen by the last ticket lookup per release (for the report's type filter). */
+  private readonly lastTypes = new Map<string, NonNullable<ReleaseReport['types']>>();
 
   constructor(private readonly deps: ReleaseDeps) {}
 
@@ -139,7 +141,7 @@ export class ReleaseManager {
     }
     const codenames = await this.codenames(release);
     for (const i of issues) {
-      if (matchesCodename(i.summary, codenames)) tickets.push({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: ticketService(i.summary, codenames), from: 'codename' });
+      if (matchesCodename(i.summary, codenames) && typeInScope(i.summary, release.ticketTypes)) tickets.push({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: ticketService(i.summary, codenames), from: 'codename' });
       else extra.set(i.key, { summary: i.summary, status: i.status });
     }
     return extra;
@@ -188,7 +190,14 @@ export class ReleaseManager {
       const i = byKey.get(k);
       if (i) push(toTicket(i, 'release'));
     }
-    return { tickets: out, warnings };
+    // The release's ticket types: tickets of other types (e.g. FRONTEND in a back-end release) are left out.
+    const types = new Map<string, number>();
+    for (const t of out) {
+      const ty = ticketType(t.summary);
+      if (ty) types.set(ty, (types.get(ty) ?? 0) + 1);
+    }
+    this.lastTypes.set(release.id, [...types].map(([type, count]) => ({ type, count, excluded: !typeInScope(`[${type}]`, release.ticketTypes) })));
+    return { tickets: out.filter((t) => typeInScope(t.summary, release.ticketTypes)), warnings };
   }
 
   /**
@@ -350,6 +359,8 @@ export class ReleaseManager {
 
   private async finishCheck(release: Release, code: CodeRead, items: ReleaseItem[], ai?: AiRead): Promise<{ release: Release; report: ReleaseReport }> {
     const report = buildReport(release, code.tickets, code.checks, this.now(), code.extra, { sources: code.sources, evidence: code.evidence, ...(ai ? { ai: ai.tickets } : {}) });
+    const types = this.lastTypes.get(release.id);
+    if (types?.length) report.types = types;
     if (ai) {
       report.ai = { model: ai.model, errors: ai.errors };
       for (const src of report.sources ?? []) {

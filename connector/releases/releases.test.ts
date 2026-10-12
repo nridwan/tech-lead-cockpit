@@ -446,6 +446,17 @@ describe('ReleaseManager', () => {
     expect(job?.notes?.[0]).toBe('AI menambah 1 service dan 1 MR.');
   });
 
+  it('leaves out ticket types the release does not take (e.g. a back-end only release)', async () => {
+    const m = manager();
+    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], ticketTypes: ['backend', 'bad type!'] } as never);
+    expect(r.ticketTypes).toEqual(['BACKEND']);
+    const { tickets } = await m.tickets(r);
+    // MU-13 is [MOBILE-FE][MOBILE-APP][SWITCHING]: not a BACKEND ticket.
+    expect(tickets.map((t) => t.key)).toEqual(['MU-12']);
+    const { report } = await m.check(r.id);
+    expect(report.types).toEqual(expect.arrayContaining([{ type: 'BACKEND', count: 1, excluded: false }, { type: 'MOBILE-FE', count: 1, excluded: true }]));
+  });
+
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
     const calls: string[] = [];
     const m = manager({

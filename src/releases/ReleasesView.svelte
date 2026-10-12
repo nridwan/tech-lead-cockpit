@@ -83,6 +83,23 @@
     if (aiFind.error) toasts.show(aiFind.error, 'err');
   }
 
+  /** Ticket types to choose from: those found by the last check, the chosen ones, else the usual ones. */
+  const typeOptions = $derived.by(() => {
+    const seen = new Map<string, number>((report?.types ?? []).map((t) => [t.type, t.count]));
+    for (const t of current?.ticketTypes ?? []) if (!seen.has(t)) seen.set(t, 0);
+    if (!seen.size) for (const t of ['BACKEND', 'FRONTEND', 'IOS', 'ANDROID']) seen.set(t, 0);
+    return [...seen].map(([type, count]) => ({ type, count }));
+  });
+  const typeOn = (type: string) => !current?.ticketTypes?.length || current.ticketTypes.includes(type);
+
+  /** Leaving every type on means no filter (all types, also new ones later). */
+  function toggleType(type: string) {
+    if (!current) return;
+    const on = typeOptions.map((t) => t.type).filter((t) => (t === type ? !typeOn(t) : typeOn(t)));
+    if (!on.length) return; // at least one type stays in scope
+    current.ticketTypes = on.length === typeOptions.length ? undefined : on;
+  }
+
   function pickAi(v: typeof ai) {
     ai = v;
     saveReleaseAi(v);
@@ -439,6 +456,15 @@
             <span class="label">Tiket tambahan</span>
             <input class="input" bind:value={keysText} onblur={applyKeys} placeholder="mis. MU-120, MU-121" />
           </div>
+          <div class="scope-col">
+            <span class="label" title="Jenis tiket (tag pertama judul Jira) yang masuk scope rilis ini. Tidak ada yang dipilih = semua jenis.">Jenis tiket</span>
+            <div class="chips">
+              {#each typeOptions as ty (ty.type)}
+                <button class="chip-btn" class:on={typeOn(ty.type)} onclick={() => toggleType(ty.type)} title={typeOn(ty.type) ? 'Masuk scope; klik untuk keluarkan' : 'Di luar scope rilis ini; klik untuk masukkan'}>{ty.type}{ty.count ? ` (${ty.count})` : ''}</button>
+              {/each}
+            </div>
+            <span class="muted small">{current.ticketTypes?.length ? `Hanya ${current.ticketTypes.join(', ')}. Klik Jalankan cek untuk memperbarui.` : 'Semua jenis masuk scope.'}</span>
+          </div>
         </div>
         <div class="actions">
           {#if aiFind.running}
@@ -591,6 +617,9 @@
                   </li>
                 {/each}
               </ul>
+            {/if}
+            {#if report.types?.some((t) => t.excluded)}
+              <p class="muted small">Tidak dihitung (jenis di luar rilis ini): {report.types.filter((t) => t.excluded).map((t) => `${t.type} (${t.count})`).join(', ')}.</p>
             {/if}
             <table class="tbl">
               <thead><tr><th>Tiket</th><th>Judul</th><th>Status</th><th>Sumber</th><th>Di kode</th></tr></thead>
