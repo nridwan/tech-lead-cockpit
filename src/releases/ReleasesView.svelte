@@ -550,6 +550,9 @@
                 {#each report.sources as src (src.ref)}
                   <li>
                     <strong>{src.service}</strong> · <span class="mono">{src.ref}</span> · {src.error ? `gagal: ${src.error}` : `${src.files} file berubah`}
+                    {#if src.aiRisks?.length}
+                      <details open><summary class="err-text">AI: {src.aiRisks.length} risiko/temuan review</summary><ul>{#each src.aiRisks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}<span>{r.reason}</span></li>{/each}</ul></details>
+                    {/if}
                     {#if src.aiUnrelated?.length}
                       <details open><summary class="warn-text">AI: {src.aiUnrelated.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each src.aiUnrelated as u (u.path)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>
                     {:else if src.unattributed.length}

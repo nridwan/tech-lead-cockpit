@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { MrFileChange } from '../gitlab/types';
 import { taskEndpoints } from '../tad/task-links';
 import { jiraKeysIn } from './checks';
-import { buildReport, codeKeys, forCurrentServices, type ReleaseTicket } from './coverage';
+import { belongsTo, buildReport, codeKeys, forCurrentServices, type ReleaseTicket } from './coverage';
 import { endpointVariants, findEvidence, indexChanges, ticketTerms, unattributedFiles, withSharedEndpoints } from './evidence';
 import { removeServices } from './import';
 import type { MrCheck, Release } from './types';
@@ -113,6 +113,22 @@ const release = (over: Partial<Release> = {}): Release => ({
   items: [], steps: [], shares: [], accepted: [], createdAt: '', updatedAt: '',
   ...over,
 } as Release);
+
+describe('ticket service', () => {
+  it('matches the TAD service or the one the title names', () => {
+    const t = { service: 'CORE-TOPUP-ULTIMATE', alsoService: 'GO-WORKER' };
+    expect(belongsTo(t, 'go-worker')).toBe(true);
+    expect(belongsTo(t, 'core-topup-ultimate')).toBe(true);
+    expect(belongsTo(t, 'core-topup')).toBe(false);
+    expect(belongsTo({}, 'x')).toBe(false);
+    expect(belongsTo({}, 'x', true)).toBe(true);
+  });
+
+  it('is not "no repo" when the title service is in the release', () => {
+    const rep = buildReport(release({ services: [{ id: 's9', name: 'go-worker', mrs: [], order: 1 }] }), [{ key: 'MU-9', summary: '[BACKEND][GO-WORKER][TOKO] - Scheduler', status: 'Done', service: 'CORE-TOPUP', alsoService: 'GO-WORKER', from: 'tad' }], []);
+    expect(rep.tickets[0].noRepo).toBeUndefined();
+  });
+});
 
 describe('report from the code', () => {
   const tickets: ReleaseTicket[] = [

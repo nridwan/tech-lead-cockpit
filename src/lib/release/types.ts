@@ -245,6 +245,8 @@ export interface CodeSource {
   unattributed: string[];
   /** Changed files the AI found unrelated to every scope ticket, with why. */
   aiUnrelated?: { path: string; reason: string }[];
+  /** Review findings of the AI (leaked secrets, bugs, risks, decisions to make). */
+  aiRisks?: { path: string; reason: string }[];
   error?: string;
 }
 
@@ -374,6 +376,7 @@ export interface ReleaseAiJob {
   verdicts?: ({ key: string } & AiTicketVerdict)[];
   unrelated?: { path: string; reason: string }[];
   needs?: ReleaseAiNeed[];
+  risks?: { path: string; reason: string }[];
   notes?: string[];
 }
 

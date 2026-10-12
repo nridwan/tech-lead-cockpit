@@ -27,6 +27,9 @@ Semua pengecekan rilis lewat AI (provider dari pemilih AI, default dari setup wi
 | `document` | **Perbaiki dengan AI** di tab Dokumen | Instruksi Tech Lead + isi dokumen per service + temuan kode (diff .env/config, env dibaca kode, migrasi, query) → usulan `envBlock`/pre/post-deploy/failover per service; diterapkan hanya setelah klik **Terapkan**. |
 
 Aturan hasil:
+- Tiket dicek di service TAD-nya **dan** service yang disebut judulnya (`alsoService`, `belongsTo`): baris TAD bisa menaruh task worker di bawah service utama.
+- Tiap cek AI mengganti hasil AI sebelumnya untuk service yang dibaca (query `source: 'ai'`, Pre/Post-deploy), tidak menumpuk.
+- Temuan review (secret di repo, bug, risiko, keputusan, perubahan kontrak) dipisah ke `risks` (`CodeSource.aiRisks`, `ReleaseAiJob.risks`), bukan langkah deploy.
 - Verdict AI menentukan status tiket (`TicketCoverage.ai`): `ada` = di kode; `sebagian` = perlu dicek; `tidak` = hilang, kecuali pola menemukannya (berbeda pendapat → perlu dicek).
 - Kebutuhan deploy langsung masuk dokumen: env → blok `.env` service (`KEY=`, nilai yang ada dipertahankan, `foldEnvItems`); query/migrasi → item `source: 'ai'` (SQL di `detail`, tampil di Pre-deploy; diubah lewat Perbaiki dengan AI, `queries` mengganti seluruh daftar query service); langkah lain → `preDeploy`/`postDeploy`.
 - `POST /releases/check` dan `/releases/discover` (tanpa AI) tetap ada untuk API/test; UI hanya memakai cek AI.

@@ -328,6 +328,10 @@
               <h4 class="w">Perubahan tanpa tiket (AI) — {aiMrDone.unrelated.length}</h4>
               <ul class="small tickets">{#each aiMrDone.unrelated as u (u.path)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
             {/if}
+            {#if aiMrDone?.risks?.length}
+              <h4 class="bad">Risiko / temuan review (AI) — {aiMrDone.risks.length}</h4>
+              <ul class="small tickets">{#each aiMrDone.risks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}{r.reason}</li>{/each}</ul>
+            {/if}
             {#if aiMrDone?.needs?.length}
               <h4>Perlu di server (AI)</h4>
               <ul class="small tickets">{#each aiMrDone.needs as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sqlbox">{n.detail}</pre>{/if}</li>{/each}</ul>

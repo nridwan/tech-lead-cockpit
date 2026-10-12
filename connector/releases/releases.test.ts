@@ -309,6 +309,7 @@ describe('ReleaseManager', () => {
           { kind: 'env', when: 'pre', label: 'REFUND_MAX', files: [] },
           { kind: 'other', when: 'post', label: 'Smoke test refund', files: [] },
         ],
+        risks: [{ path: 'api/promo.go', reason: 'kredensial di kode' }],
       }),
     );
     expect((await m.aiStart(r.id, 'tickets', { ai })).status).toBe('running');
@@ -325,6 +326,18 @@ describe('ReleaseManager', () => {
     expect(saved.items.map((i) => [i.kind, i.label, i.source, i.detail])).toEqual([['sql', 'Buat tabel refund_logs', 'ai', 'CREATE TABLE refund_logs (id bigint);']]);
     expect(saved.services[0].envBlock).toBe('REFUND_MAX=');
     expect(saved.services[0].postDeploy).toEqual(['Smoke test refund']);
+    expect(report.sources?.[0].aiRisks).toEqual([{ path: 'api/promo.go', reason: 'kredensial di kode' }]);
+
+    // A second check replaces what the AI wrote before instead of piling up.
+    replies.push(JSON.stringify({ services: [], mrs: [] }));
+    replies.push(JSON.stringify({ tickets: [{ key: 'MU-12', verdict: 'ada', files: [], reason: 'x' }], needs: [{ kind: 'other', when: 'post', label: 'Cek log refund', files: [] }] }));
+    await m.aiStart(r.id, 'tickets', { ai });
+    await settle('tickets');
+    const again = await m.get(r.id);
+    expect(again.services[0].postDeploy).toEqual(['Cek log refund']);
+    expect(again.items).toEqual([]);
+    expect(again.services[0].envBlock).toBe('REFUND_MAX=');
+    prompts.splice(1, 2);
 
     replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));
     await m.aiStart(r.id, 'picks', { ai, serviceId: 's1', sourceBranch: 'staging' });

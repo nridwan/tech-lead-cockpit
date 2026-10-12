@@ -9,7 +9,7 @@ import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/ch
 import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
-import { buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { belongsTo, buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
@@ -171,6 +171,9 @@ export class ReleaseManager {
     for (const t of tad) {
       const i = byKey.get(t.key);
       const base = i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' as const };
+      // The title may name another service than the TAD row ([GO-WORKER] under the main service).
+      const named = ticketService(base.summary, codenames);
+      if (named && base.service && !sameService(named, base.service)) Object.assign(base, { alsoService: named });
       push({ ...base, ...(t.endpoints.length ? { endpoints: t.endpoints } : {}), ...(t.detail ? { detail: t.detail } : {}) });
     }
     for (const i of byCodename) push(toTicket(i, 'codename'));
@@ -194,7 +197,7 @@ export class ReleaseManager {
     const folders = Object.keys(repoPaths);
     let addedServices = 0;
     const ignored = release.ignoredServices ?? [];
-    for (const name of [...new Set(tickets.map((t) => t.service).filter((s): s is string => Boolean(s)))]) {
+    for (const name of [...new Set(tickets.flatMap((t) => [t.service, t.alsoService]).filter((s): s is string => Boolean(s)))]) {
       if (services.some((s) => sameService(s.name, name)) || ignored.some((n) => sameService(n, name))) continue;
       services.push({ id: newId(), name, mrs: [], order: services.length + 1 });
       addedServices++;
@@ -304,7 +307,7 @@ export class ReleaseManager {
     const evidence = new Map<string, CodeEvidence[]>();
     const byRef = new Map<string, { summary: string; evidence: CodeEvidence }[]>();
     for (const t of withSharedEndpoints(tickets)) {
-      for (const s of release.services.filter((x) => !t.service || sameService(x.name, t.service))) {
+      for (const s of release.services.filter((x) => belongsTo(t, x.name, true))) {
         for (const ref of serviceRefs.get(s.id) ?? []) {
           const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, diffs.get(ref)!);
           if (!found) continue;
@@ -343,6 +346,8 @@ export class ReleaseManager {
       for (const src of report.sources ?? []) {
         const u = ai.unrelated.get(src.service);
         if (u) src.aiUnrelated = u;
+        const r = ai.risks.get(src.service);
+        if (r?.length) src.aiRisks = r;
       }
       report.warnings.unshift(...ai.errors);
     }
@@ -356,8 +361,8 @@ export class ReleaseManager {
         return {
           ...s,
           mrs: s.mrs.map((m) => ({ ...m, title: code.checks.find((c) => c.ref === m.ref && !c.error)?.title ?? m.title })),
-          ...(steps?.pre.length ? { preDeploy: addLines(s.preDeploy, steps.pre) } : {}),
-          ...(steps?.post.length ? { postDeploy: addLines(s.postDeploy, steps.post) } : {}),
+          // The AI writes these steps: each check replaces the last one's, never piles up.
+          ...(steps ? { preDeploy: addLines([], steps.pre), postDeploy: addLines([], steps.post) } : {}),
         };
       }),
     }));
@@ -466,7 +471,7 @@ export class ReleaseManager {
     const files = indexChanges(cmp.changes);
     const ref = `${path}@${source}`;
     const tickets = withSharedEndpoints(all)
-      .filter((t) => t.service && sameService(t.service, service.name))
+      .filter((t) => belongsTo(t, service.name))
       .map((t) => {
         const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, files);
         const byKey = keysInCode.includes(t.key);
@@ -625,7 +630,7 @@ export class ReleaseManager {
       kind,
       ...(kind === 'picks' || kind === 'mr' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
       ...(instruction && (kind === 'picks' || kind === 'document') ? { instruction } : {}),
-      model: `${opts.ai.provider}/${opts.ai.model}`,
+      model: opts.ai.model ? `${opts.ai.provider}/${opts.ai.model}` : opts.ai.provider,
       status: 'running',
       progress: 'Menyiapkan…',
       createdAt: this.now(),
@@ -687,7 +692,7 @@ export class ReleaseManager {
     }
     const ignored = release.ignoredServices ?? [];
     const keys = new Set(tickets.map((t) => t.key));
-    const names = [...release.services.map((s) => s.name), ...tickets.map((t) => t.service ?? '')].filter(Boolean);
+    const names = [...release.services.map((s) => s.name), ...tickets.flatMap((t) => [t.service ?? '', t.alsoService ?? ''])].filter(Boolean);
     const paths = new Set(release.services.map((s) => s.gitlabPath).filter(Boolean));
     // Candidates: MRs of the release's repos, of repos named like a ticket's service, or naming a ticket.
     const candidates = mrs
@@ -701,7 +706,7 @@ export class ReleaseManager {
       discoverPrompt({
         release: release.name,
         target: release.targetBranch,
-        tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, service: t.service })),
+        tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, service: [t.service, t.alsoService].filter(Boolean).join(' / ') || undefined })),
         repos: repoPaths,
         services: release.services.map((s) => ({ name: s.name, gitlabPath: s.gitlabPath, mrs: s.mrs.map((m) => m.ref) })),
         ignored,
@@ -748,12 +753,12 @@ export class ReleaseManager {
     const release = await this.get(live.job.releaseId);
     live.job.progress = 'Membaca kode semua service dari GitLab…';
     const code = await this.readCode(release);
-    const items = this.checkItems(release, code.checks);
-    const read: AiRead = { model: live.job.model, tickets: new Map(), unrelated: new Map(), errors: [], steps: new Map() };
+    let items = this.checkItems(release, code.checks);
+    const read: AiRead = { model: live.job.model, tickets: new Map(), unrelated: new Map(), risks: new Map(), errors: [], steps: new Map() };
     const services = release.services.filter((s) => (code.serviceRefs.get(s.id) ?? []).length);
     for (const [i, s] of services.entries()) {
       const refs = code.serviceRefs.get(s.id)!;
-      const tickets = code.tickets.filter((t) => !t.service || sameService(s.name, t.service));
+      const tickets = code.tickets.filter((t) => belongsTo(t, s.name, true));
       const changes = refs.flatMap((r) => code.changed.get(r) ?? []);
       if (!changes.length) continue;
       live.job.progress = `AI membaca ${s.name} (${i + 1}/${services.length})…`;
@@ -774,6 +779,9 @@ export class ReleaseManager {
         if (!prev || VERDICT_RANK[v.verdict] > VERDICT_RANK[prev.verdict]) read.tickets.set(key, v);
       }
       read.unrelated.set(s.name, parsed.unrelated);
+      read.risks.set(s.name, parsed.risks);
+      // This check's queries replace those of the last AI check for the service.
+      items = items.filter((x) => !(x.source === 'ai' && x.service && sameService(x.service, s.name)));
       const steps = { pre: [] as string[], post: [] as string[] };
       for (const n of parsed.needs) {
         const note = [n.kind === 'env' ? n.detail : '', n.files.length ? `File: ${n.files.join(', ')}` : ''].filter(Boolean).join(' · ').slice(0, 1000);
@@ -809,7 +817,7 @@ export class ReleaseManager {
     live.job.progress = `Membaca commit ${source}…`;
     const cmp = await gitlab.compare(path, release.targetBranch, source);
     const { tickets: all } = await this.tickets(release);
-    const tickets = all.filter((t) => t.service && sameService(t.service, service.name));
+    const tickets = all.filter((t) => belongsTo(t, service.name));
     const plan = planReleaseBranch(cmp.commits, new Set(all.map((t) => t.key)), { base: release.targetBranch, branch: releaseBranchName(release) });
     const line = plan.commits.slice(-AI_MAX_COMMITS);
     if (!line.length) throw new Error(`${source} tidak punya commit baru dibanding ${release.targetBranch}.`);
@@ -848,7 +856,7 @@ export class ReleaseManager {
     const cmp = await gitlab.compare(path, release.targetBranch, source);
     if (!cmp.changes.length) throw new Error(`${source} tidak punya perubahan dibanding ${release.targetBranch}.`);
     const { tickets: all } = await this.tickets(release);
-    const tickets = all.filter((t) => t.service && sameService(t.service, service.name));
+    const tickets = all.filter((t) => belongsTo(t, service.name));
     live.job.progress = 'AI membaca diff…';
     const ref = `${path}@${source}`;
     const out = await this.ask(live, ai, ticketsPrompt({ service: service.name, target: release.targetBranch, refs: [ref], tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: cmp.commits.map((c) => c.title), diff: diffText(cmp.changes).text }));
@@ -858,6 +866,7 @@ export class ReleaseManager {
     live.job.verdicts = tickets.flatMap((t) => (parsed.tickets.has(t.key) ? [{ key: t.key, ...parsed.tickets.get(t.key)! }] : []));
     live.job.unrelated = parsed.unrelated;
     live.job.needs = parsed.needs;
+    live.job.risks = parsed.risks;
   }
 
   private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {
@@ -913,6 +922,7 @@ interface AiRead {
   model: string;
   tickets: Map<string, AiTicketVerdict>;
   unrelated: Map<string, { path: string; reason: string }[]>;
+  risks: Map<string, { path: string; reason: string }[]>;
   errors: string[];
   steps: Map<string, { pre: string[]; post: string[] }>;
 }

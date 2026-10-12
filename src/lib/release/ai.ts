@@ -67,11 +67,12 @@ export function ticketsPrompt(input: { service: string; target: string; refs: st
     '- "env": variabel environment baru atau yang mulai dibaca kode (os.Getenv, process.env, config ${X}, tag env, viper, dll). label = NAMA_ENV, detail = contoh nilai/keterangan.',
     '- "sql": query yang harus dijalankan manual: CREATE/ALTER/DROP TABLE, CREATE INDEX, INSERT/UPDATE data master/konfigurasi, termasuk tabel baru yang dipakai model/struct/query di kode tapi tidak ada file migrasinya. label = ringkasan, detail = query SQL lengkap bila bisa disusun dari kode (kolom dari struct/model).',
     '- "migration": file migrasi yang harus dijalankan. label = path file.',
-    '- "other": hal lain: config file, cron/scheduler baru, queue/topic, bucket, dependency/service baru, perubahan gateway, feature flag, data seed, restart service lain, smoke test endpoint baru. label = langkah singkat yang bisa langsung dikerjakan.',
+    '- "other": langkah deploy lain yang HARUS dikerjakan saat rilis: config file, cron/scheduler baru, queue/topic, bucket, dependency/service baru, perubahan gateway, feature flag, data seed, restart service lain, smoke test endpoint baru. label = langkah singkat yang bisa langsung dikerjakan, tanpa duplikat.',
+    'Temuan review (secret/kredensial di repo, bug, risiko, hal yang perlu diputuskan, perubahan kontrak) BUKAN langkah deploy: masukkan ke "risks", jangan ke "needs".',
     'Setiap item diberi "when": "pre" (sebelum deploy) atau "post" (sesudah deploy), supaya panduan deploy lengkap dan berurutan.',
     '',
     'Skema jawaban:',
-    '{"tickets":[{"key":"MU-1","verdict":"ada|sebagian|tidak","files":["path/file.go"],"reason":"..."}],"unrelated":[{"path":"path/file.go","reason":"..."}],"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file.go"]}]}',
+    '{"tickets":[{"key":"MU-1","verdict":"ada|sebagian|tidak","files":["path/file.go"],"reason":"..."}],"unrelated":[{"path":"path/file.go","reason":"..."}],"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file.go"]}],"risks":[{"path":"path/file.go","reason":"..."}]}',
   ].join('\n');
 }
 
@@ -195,7 +196,11 @@ export type AiNeed = ReleaseAiNeed;
 const NEED_KINDS: AiNeed['kind'][] = ['env', 'sql', 'migration', 'other'];
 
 /** Ticket verdicts for the asked keys only; files limited to the files that changed. */
-export function parseTicketsReply(reply: string, keys: string[], paths: string[]): { tickets: Map<string, AiTicketVerdict>; unrelated: { path: string; reason: string }[]; needs: AiNeed[] } | null {
+export function parseTicketsReply(
+  reply: string,
+  keys: string[],
+  paths: string[],
+): { tickets: Map<string, AiTicketVerdict>; unrelated: { path: string; reason: string }[]; needs: AiNeed[]; risks: { path: string; reason: string }[] } | null {
   const json = parseJsonReply(reply);
   if (!json) return null;
   const want = new Set(keys);
@@ -224,7 +229,11 @@ export function parseTicketsReply(reply: string, keys: string[], paths: string[]
     const when = str(r.when, 10).toLowerCase() === 'post' ? 'post' : 'pre';
     needs.push({ kind, when, label, ...(detail ? { detail } : {}), files: strs(r.files, 8).filter((p) => known.has(p)) });
   }
-  return { tickets, unrelated, needs: needs.slice(0, 80) };
+  const risks = (Array.isArray(json.risks) ? json.risks : [])
+    .map((u) => ({ path: str((u as Record<string, unknown>).path, 300), reason: str((u as Record<string, unknown>).reason, 800) }))
+    .filter((u) => u.reason && (!u.path || known.has(u.path)))
+    .slice(0, 30);
+  return { tickets, unrelated, needs: needs.slice(0, 80), risks };
 }
 
 /** One pick per known commit, in the commits' order; unknown shas are dropped. */

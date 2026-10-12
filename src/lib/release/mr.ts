@@ -58,7 +58,7 @@ export function newMrFormUrl(gitlabBaseUrl: string, projectPath: string, source:
 }
 
 /** The AI's findings for a release MR description: tickets, changes without a ticket, server needs. */
-export function aiMrSection(job: Pick<ReleaseAiJob, 'verdicts' | 'unrelated' | 'needs' | 'model'>): string {
+export function aiMrSection(job: Pick<ReleaseAiJob, 'verdicts' | 'unrelated' | 'needs' | 'risks' | 'model'>): string {
   const lines: string[] = [];
   if (job.verdicts?.length) {
     lines.push('### Cek AI: tiket di kode', '');
@@ -68,6 +68,11 @@ export function aiMrSection(job: Pick<ReleaseAiJob, 'verdicts' | 'unrelated' | '
   if (job.unrelated?.length) {
     lines.push('### Cek AI: perubahan tanpa tiket', '');
     for (const u of job.unrelated) lines.push(`- \`${u.path}\` — ${u.reason}`);
+    lines.push('');
+  }
+  if (job.risks?.length) {
+    lines.push('### Cek AI: risiko / temuan review', '');
+    for (const r of job.risks) lines.push(`- ${r.path ? `\`${r.path}\` — ` : ''}${r.reason}`);
     lines.push('');
   }
   if (job.needs?.length) {
