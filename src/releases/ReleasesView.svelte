@@ -4,6 +4,7 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { estimate } from '../lib/estimate/client';
+  import { OPEN_MR_KEY } from '../lib/gitlab/client';
   import type { EstimateProject } from '../lib/estimate/types';
   import { renderPreview } from '../lib/markdown/preview';
   import { releases } from '../lib/release/client';
@@ -244,6 +245,17 @@
     const other = serviceForPath(current.services, ref.projectPath);
     if (other && other.id !== s.id) toasts.show(`Catatan: repo MR ini tampak milik service ${other.name}.`, 'info', 4000);
   }
+  /** Opens an MR in MR Review (diff per file, AI review incl. background, TAD conformance). */
+  async function reviewMr(webUrl: string) {
+    await flush();
+    try {
+      sessionStorage.setItem(OPEN_MR_KEY, webUrl);
+    } catch {
+      /* storage blocked: MR Review opens on its list */
+    }
+    location.hash = '#/mr';
+  }
+
   function removeMr(s: ReleaseService, ref: string) {
     if (!current) return;
     const owner = current.services.find((x) => x.id === s.id)!;
@@ -425,6 +437,7 @@
                       {#if c.hasConflicts}<span class="badge b-err">konflik</span>{/if}
                       {#if c.targetBranch !== current.targetBranch}<span class="badge b-err">ke {c.targetBranch}</span>{/if}
                     {/if}
+                    <button class="btn btn-sm btn-ghost" onclick={() => reviewMr(m.webUrl)} title="Buka di MR Review: diff per file, review AI (bisa di background), dan cek kesesuaian TAD"><Icon name="eye" size={12} /> Review</button>
                     <button class="icon-btn" onclick={() => removeMr(s, m.ref)} aria-label="Lepas MR {m.ref}"><Icon name="x" size={11} /></button>
                   </div>
                   {#if c && !c.error}

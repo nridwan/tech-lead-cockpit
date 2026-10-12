@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
+  import DiffFile from '../mr/DiffFile.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { openExternal } from '../lib/open-external';
@@ -33,6 +34,9 @@
   let title = $state('');
   let description = $state('');
   let creating = $state(false);
+  let showChanges = $state(false);
+  let changeFilter = $state('');
+  const shownChanges = $derived((plan?.changes ?? []).filter((c) => !changeFilter.trim() || c.newPath.toLowerCase().includes(changeFilter.trim().toLowerCase())));
 
   onMount(() => void load());
   $effect(() => {
@@ -221,6 +225,23 @@
         </section>
       </div>
 
+      <section class="changes">
+        <button class="link-btn" onclick={() => (showChanges = !showChanges)}>{showChanges ? '▾' : '▸'} Review perubahan ({plan.files} file, {plan.changes.reduce((n, c) => n + c.additions, 0)}+ / {plan.changes.reduce((n, c) => n + c.deletions, 0)}−) yang akan masuk ke {plan.targetBranch}</button>
+        {#if showChanges}
+          <div class="row">
+            <input class="input" bind:value={changeFilter} placeholder="Saring file, mis. migrations atau .env" />
+            <span class="muted small">{shownChanges.length} file{plan.truncated ? ' · perbandingan dari GitLab terpotong' : ''}</span>
+          </div>
+          <div class="diffs">
+            {#each shownChanges as c (c.newPath)}
+              <DiffFile file={c} open={false} />
+            {:else}
+              <p class="muted small">Tidak ada file yang cocok.</p>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
       <div class="actions">
         <span class="muted small grow">
           {#if plan.canCreate === false}Token GitLab tidak punya scope <code>api</code>: pakai "Buka form di GitLab", atau buat token baru dengan scope api lalu simpan di Koneksi.{:else if plan.canCreate === undefined}Scope token tidak bisa dicek; kalau GitLab menolak, pakai "Buka form di GitLab".{/if}
@@ -291,6 +312,22 @@
   }
   .bad {
     color: var(--err);
+  }
+  .changes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .changes .row > :global(.input) {
+    flex: 1;
+    width: auto;
+  }
+  .diffs {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 55vh;
+    overflow: auto;
   }
   .branch {
     padding: 10px 12px;

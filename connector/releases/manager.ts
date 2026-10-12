@@ -358,6 +358,7 @@ export class ReleaseManager {
       ...(existing ? { existing: { ref: existing.ref, webUrl: existing.webUrl, title: existing.title } } : {}),
       commits: cmp.commits.map((x) => ({ shortId: x.shortId, title: x.title })),
       files: cmp.changes.length,
+      changes: capDiffs(cmp.changes),
       truncated: cmp.truncated,
       findings,
       tickets,
@@ -433,6 +434,17 @@ export class ReleaseManager {
     if (!picked.length) throw new ReleaseInputError('Pilih minimal satu MR.');
     return picked;
   }
+}
+
+/** Diffs for the review in the UI, at most ~1.5 MB in total; bigger ones are listed without a diff. */
+const PLAN_DIFF_BUDGET = 1_500_000;
+function capDiffs(changes: MrFileChange[]): MrFileChange[] {
+  let left = PLAN_DIFF_BUDGET;
+  return changes.map((c) => {
+    if (c.diff.length > left) return { ...c, diff: '', truncated: true };
+    left -= c.diff.length;
+    return c;
+  });
 }
 
 function blankCheck(ref: string, webUrl: string, title: string | undefined, targetBranch: string, error: string): MrCheck {

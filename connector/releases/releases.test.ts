@@ -207,6 +207,8 @@ describe('ReleaseManager', () => {
     const plan = await m.mrPlan(r.id, 's1');
     expect(plan).toMatchObject({ sourceBranch: 'staging', targetBranch: 'master', canCreate: false, files: 1, findings: { envAdded: ['REFUND_LIMIT'] }, tickets: [{ key: 'MU-12', inSource: true }] });
     expect(plan.outOfScope.map((o) => o.key)).toEqual(['MU-77']);
+    // The changed files come with their diff, for review before the MR exists.
+    expect(plan.changes.map((c) => [c.newPath, c.diff])).toEqual([['.env.example', '+REFUND_LIMIT=5']]);
     expect(plan.warnings.some((w) => w.includes('MU-77'))).toBe(true);
     expect(plan.formUrl).toContain(`${GL}/payments/core-payment/-/merge_requests/new?`);
     expect(decodeURIComponent(plan.formUrl)).toContain('merge_request[target_branch]=master');

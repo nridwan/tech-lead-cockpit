@@ -1,3 +1,4 @@
+import type { MrFileChange } from '../gitlab/types';
 import type { ReleaseBranchPlan } from './branch';
 
 // Release management: one release groups the MRs into the production branch (master by default)
@@ -261,6 +262,8 @@ export interface MrPlan {
   existing?: { ref: string; webUrl: string; title: string };
   commits: { shortId: string; title: string }[];
   files: number;
+  /** Changed files with their diff, for reviewing before the MR exists (diffs capped in size). */
+  changes: MrFileChange[];
   truncated: boolean;
   findings: Pick<MrCheck, 'envAdded' | 'envReadInCode' | 'migrations' | 'sqlOutside' | 'modelWithoutMigration' | 'commitsWithoutKey' | 'jiraKeys'>;
   /** Release tickets of this service, and whether their key is in the source branch commits. */
