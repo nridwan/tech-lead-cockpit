@@ -104,6 +104,7 @@ export function checkMr(mr: MrDetail): MrCheck {
     modelWithoutMigration,
     commitsWithoutKey,
     jiraKeys,
+    ...(mr.state === 'merged' && mr.mergeCommitSha ? { commitSha: mr.mergeCommitSha } : mr.headSha ? { commitSha: mr.headSha } : {}),
     keyCommits,
     diffTruncated: mr.diffTruncated || mr.changes.some((c) => c.truncated),
   };

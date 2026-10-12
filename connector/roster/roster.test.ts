@@ -60,11 +60,15 @@ describe('git activity', () => {
   });
 
   it('matches service names from the TAD to repo folders', () => {
-    const repos = ['core-payment', 'core-payment-gateway', 'mobile-app', 'cms-web', 'id'];
+    const repos = ['core-payment', 'core-payment-gateway', 'core-tcico-ultimate', 'mobile-app', 'notification-service', 'cms-web', 'id'];
     expect(matchRepo('Core Payment', repos)).toBe('core-payment');
-    expect(matchRepo('payment-gateway', repos)).toBe('core-payment-gateway');
-    expect(matchRepo('mobile', repos)).toBe('mobile-app');
-    expect(matchRepo('notification', repos)).toBeUndefined();
+    // Only generic words may differ; a different repo is never picked.
+    expect(matchRepo('notification', repos)).toBe('notification-service');
+    expect(matchRepo('payment-gateway', repos)).toBeUndefined();
+    expect(matchRepo('CORE-TCICO', repos)).toBeUndefined();
+    expect(matchRepo('core-tcico', [...repos, 'core-tcico'])).toBe('core-tcico');
+    // Platforms may match a folder that contains them.
+    expect(matchRepo('MOBILE', repos)).toBe('mobile-app');
     expect(matchRepo('', repos)).toBeUndefined();
   });
 

@@ -20,18 +20,50 @@ export interface ReleaseTicket {
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+/** Words that only describe a repo, so "core-payment" and "core-payment-service" are one service. */
+export const GENERIC_SUFFIXES = ['service', 'svc', 'api', 'be', 'backend', 'app', 'server'];
 
-/** Same service, allowing "core-payment" vs "Core Payment" vs "core-payment-service". */
+/**
+ * Same service: equal once case and punctuation are ignored, or different only by a generic
+ * word ("core-payment" = "Core Payment" = "core-payment-service"). Not "core-tcico" vs
+ * "core-tcico-ultimate": those are two repos.
+ */
 export function sameService(a: string, b: string): boolean {
   const x = norm(a);
   const y = norm(b);
-  return Boolean(x && y) && (x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x))));
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [short, long] = x.length < y.length ? [x, y] : [y, x];
+  const rest = long.startsWith(short) ? long.slice(short.length) : long.endsWith(short) ? long.slice(0, long.length - short.length) : null;
+  return rest !== null && GENERIC_SUFFIXES.includes(rest);
 }
 
-/** Tickets whose CODENAME is one of the release's (case- and punctuation-insensitive). */
+/** Leading [TAG][TAG]… of a ticket title. */
+export function ticketTags(summary: string): string[] {
+  const m = summary.trim().match(/^(\s*\[[^\]]+\])+/);
+  return m ? [...m[0].matchAll(/\[([^\]]+)\]/g)].map((x) => x[1].trim()) : [];
+}
+
+/** Platforms that stand in for the service in mobile/web titles like [IOS][CODENAME][UI] Nama. */
+const PLATFORMS = new Set(['android', 'ios', 'flutter', 'mobile', 'mobilefe', 'web', 'webfe', 'cms', 'frontend', 'fe']);
+
+/** Tickets with one of the release's CODENAMEs in any of their title tags. */
 export function matchesCodename(summary: string, codenames: string[]): boolean {
-  const parsed = parseTaskTitle(summary);
-  return Boolean(parsed && codenames.some((c) => norm(c) === norm(parsed.codeName)));
+  const want = new Set(codenames.map(norm));
+  return ticketTags(summary).some((t) => want.has(norm(t)));
+}
+
+/**
+ * Service a ticket belongs to: [TYPE][SERVICE][CODENAME] - Name → SERVICE; the mobile layout
+ * [PLATFORM][CODENAME][KIND] Name → the platform (ANDROID, IOS…).
+ */
+export function ticketService(summary: string, codenames: string[] = []): string | undefined {
+  const tags = ticketTags(summary);
+  const want = new Set(codenames.map(norm));
+  const at = tags.findIndex((t) => want.has(norm(t)));
+  if (at >= 2) return tags[at - 1];
+  if (at === 1 && PLATFORMS.has(norm(tags[0]))) return tags[0];
+  return parseTaskTitle(summary)?.service;
 }
 
 /**
@@ -57,7 +89,8 @@ export function buildReport(release: Release, tickets: ReleaseTicket[], checks: 
     if (seen.has(t.key)) continue;
     seen.add(t.key);
     const parsed = parseTaskTitle(t.summary);
-    if (!parsed && t.from !== 'tad') badTitles.push({ key: t.key, summary: t.summary });
+    // Tags in another order (e.g. mobile [IOS][CODENAME][UI]) are a convention, not a broken title.
+    if (!parsed && t.from !== 'tad' && ticketTags(t.summary).length < 3) badTitles.push({ key: t.key, summary: t.summary });
     coverage.push({
       key: t.key,
       summary: t.summary,

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { MrDetail, MrFileChange } from '../gitlab/types';
 import { planReleaseBranch, releaseBranchCommands, releaseBranchName } from './branch';
 import { checkMr, envAddedIn, envReadsIn, isMigration, jiraKeysIn } from './checks';
-import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from './coverage';
+import { buildReport, codeKeys, matchesCodename, sameService, ticketService, ticketTags, type ReleaseTicket } from './coverage';
 import { releaseMarkdown } from './document';
 import { mergeReleaseDoc, mrRefFromUrl, parseReleaseDoc } from './import';
 import { shareMessageHtml, shareMessageText } from './share';
@@ -235,8 +235,18 @@ describe('release report', () => {
     expect(sameService('core-payment', 'Core Payment')).toBe(true);
     expect(sameService('core-payment-service', 'core-payment')).toBe(true);
     expect(sameService('app', 'mobile-app-backend')).toBe(false);
+    // Two repos that share a prefix are two services.
+    expect(sameService('CORE-TCICO', 'CORE-TCICO-ULTIMATE')).toBe(false);
+    expect(sameService('core-payment-api', 'Core Payment')).toBe(true);
     expect(matchesCodename('[BACKEND][CORE-PAYMENT][SWITCHING] - Refund', ['switching'])).toBe(true);
     expect(matchesCodename('Refund switching', ['SWITCHING'])).toBe(false);
+    // Mobile layout: [PLATFORM][CODENAME][KIND] Name, no dash.
+    expect(matchesCodename('[IOS][SWITCHING][UI] Membuat Halaman Topup', ['switching'])).toBe(true);
+    expect(ticketService('[IOS][SWITCHING][UI] Membuat Halaman Topup', ['SWITCHING'])).toBe('IOS');
+    expect(ticketService('[ANDROID][SWITCHING][API] Integrasi API', ['SWITCHING'])).toBe('ANDROID');
+    expect(ticketService('[BACKEND][CORE-TCICO][SWITCHING] - Enhance API', ['SWITCHING'])).toBe('CORE-TCICO');
+    expect(ticketService('[BACKEND][CORE-TCICO][SWITCHING] - Enhance API')).toBe('CORE-TCICO');
+    expect(ticketTags('[A] [B][C] judul')).toEqual(['A', 'B', 'C']);
   });
 
   it('flags missing tickets, services without an MR, bad titles and MR blockers', () => {
@@ -375,11 +385,13 @@ describe('share message and document', () => {
     expect(text).not.toContain('mobile/app');
   });
 
-  it('renders a release document with services, items and steps', () => {
-    const md = releaseMarkdown({ ...r, items: [{ id: 'i', kind: 'env', label: 'A_B', service: 'core-payment', source: 'check', done: true }], steps: [{ id: 's', kind: 'rollback', text: 'Revert tag', done: false }] }, null);
-    expect(md).toContain('# Rilis Switching v2.4.0');
-    expect(md).toContain('| 1 | core-payment | [payments/core-payment!12](https://gitlab.example.com/payments/core-payment/-/merge_requests/12) | - | - |');
-    expect(md).toContain('- [x] **core-payment**: `A_B`');
-    expect(md).toContain('## Rollback');
+  it('renders the release document in the deployment layout', () => {
+    const md = releaseMarkdown({ ...r, items: [{ id: 'i', kind: 'env', label: 'A_B', service: 'core-payment', source: 'check', done: true }], steps: [{ id: 's', kind: 'rollback', text: 'Revert tag', service: 'core-payment', done: false }] }, null);
+    expect(md).toContain('# Deployment 20 Oktober 2026');
+    expect(md).toContain('> 1. core-payment');
+    expect(md).toContain('- [x] Update .env');
+    expect(md).toContain('A_B=');
+    expect(md).toContain('**Failover Strategy**: Revert tag');
+    expect(md).toContain('## 💣 Post Deployment issues');
   });
 });

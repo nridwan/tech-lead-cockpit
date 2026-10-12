@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { sameService } from '../../src/lib/release/coverage.ts';
 import type { ActivityResponse, GitAuthor, ServiceActivity } from '../../src/lib/roster/types.ts';
 
 /**
@@ -36,21 +37,21 @@ export function parseGitLog(out: string): RepoAuthors {
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
+const PLATFORM_WORDS = new Set(['android', 'ios', 'flutter', 'mobile', 'web', 'cms']);
+
 /**
- * Repo folder for a service name from the TAD ("Core Payment", "core-payment-service", …):
- * exact match after normalising, else the closest folder that contains the name or is contained
- * in it.
+ * Repo folder for a service name from the tickets ("Core Payment", "core-payment-service", …):
+ * the same name once case and punctuation are ignored, or one that differs only by a generic
+ * word (service, api, …). "core-tcico" never lands on "core-tcico-ultimate". A platform name
+ * (ANDROID, IOS) may match a folder that contains it (e.g. "mobile-android").
  */
 export function matchRepo(service: string, repos: string[]): string | undefined {
   const s = norm(service);
   if (!s) return undefined;
-  const exact = repos.find((r) => norm(r) === s);
+  const exact = repos.find((r) => norm(r) === s) ?? repos.find((r) => sameService(r, service));
   if (exact) return exact;
-  const near = repos.filter((r) => {
-    const n = norm(r);
-    return n.length >= 3 && (n.includes(s) || s.includes(n));
-  });
-  return near.sort((a, b) => Math.abs(norm(a).length - s.length) - Math.abs(norm(b).length - s.length) || a.localeCompare(b))[0];
+  if (PLATFORM_WORDS.has(s)) return repos.filter((r) => norm(r).includes(s)).sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
+  return undefined;
 }
 
 export class GitActivity {

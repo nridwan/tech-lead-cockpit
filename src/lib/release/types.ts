@@ -35,6 +35,15 @@ export interface ReleaseService {
   gitlabPath?: string;
   /** Branch this service's release MR comes from (staging, a release branch…); default the release's. */
   sourceBranch?: string;
+  /** Deployment page fields (typed in or imported). */
+  commitId?: string;
+  /** The env code block of the deployment page, values included (local file only). */
+  envBlock?: string;
+  /** Other pre-deploy tasks (not env, migration or query). */
+  preDeploy?: string[];
+  postDeploy?: string[];
+  failover?: string;
+  updatedBy?: DeployPerson;
   mrs: ReleaseMrRef[];
   /** 1 = deployed first. */
   order: number;
@@ -43,6 +52,31 @@ export interface ReleaseService {
 }
 
 /** Something to do on the server: set an env variable, run a migration or a query. */
+export interface DeployPerson {
+  /** Confluence/Atlassian account (shown as a mention); missing for names typed as text. */
+  accountId?: string;
+  name: string;
+}
+
+/** The release info and sections of the team's deployment page. */
+export interface DeployInfo {
+  /** Release time on the release day, e.g. "06:00". */
+  targetTime?: string;
+  actual?: string;
+  /** Status shown on the page; default follows the release status. */
+  statusTitle?: string;
+  statusColour?: string;
+  impact?: string;
+  /** Supervisor, Tech Lead, QA, … with the people for each. */
+  roles: { label: string; people: DeployPerson[] }[];
+  room?: string;
+  issueLink?: string;
+  changeLog: { details: string; notes?: string }[];
+  /** Jira issues of the release (a JQL link). */
+  releaseList?: { url?: string; jql?: string };
+  testEvidence: { title: string; url: string }[];
+}
+
 export interface ReleaseItem {
   id: string;
   kind: 'env' | 'migration' | 'sql';
@@ -110,6 +144,8 @@ export interface Release {
   /** Last Teams chat used to ask for review. */
   teamsChat?: { id: string; name: string };
   shares: ReleaseShare[];
+  /** Deployment page info (release time, roles, change log, …). */
+  deploy?: DeployInfo;
   /** Tickets outside the scope that may ride along on purpose (decided by the user), with why. */
   accepted: { key: string; note?: string; at: string }[];
   /** Confluence page this release was published to. */
@@ -144,6 +180,8 @@ export interface MrCheck {
   /** Commit titles without a Jira key. */
   commitsWithoutKey: string[];
   jiraKeys: string[];
+  /** Commit to deploy: the merge commit once merged, else the MR head. */
+  commitSha?: string;
   /** Commit titles per Jira key (at most 5 each), to show what a key brought in. */
   keyCommits: Record<string, string[]>;
   /** The diff was cut by GitLab or Cockpit: env lines may be missing. */

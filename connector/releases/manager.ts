@@ -6,8 +6,9 @@ import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.t
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { buildReport, codeKeys, matchesCodename, sameService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { buildReport, codeKeys, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath } from '../../src/lib/release/import.ts';
+import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
 import type { MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
@@ -112,7 +113,7 @@ export class ReleaseManager {
     }
     const codenames = await this.codenames(release);
     for (const i of issues) {
-      if (matchesCodename(i.summary, codenames)) tickets.push({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: parseTaskTitle(i.summary)?.service, from: 'codename' });
+      if (matchesCodename(i.summary, codenames)) tickets.push({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: ticketService(i.summary, codenames), from: 'codename' });
       else extra.set(i.key, { summary: i.summary, status: i.status });
     }
     return extra;
@@ -140,7 +141,7 @@ export class ReleaseManager {
         warnings.push(`Pencarian tiket per codename gagal: ${(e as Error).message}`);
       }
     }
-    const toTicket = (i: JiraIssue, from: ReleaseTicket['from'], service?: string): ReleaseTicket => ({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: service || parseTaskTitle(i.summary)?.service, from });
+    const toTicket = (i: JiraIssue, from: ReleaseTicket['from'], service?: string): ReleaseTicket => ({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: service || ticketService(i.summary, codenames), from });
     const out: ReleaseTicket[] = [];
     const seen = new Set<string>();
     const push = (t: ReleaseTicket) => !seen.has(t.key) && (seen.add(t.key), out.push(t));
@@ -266,10 +267,12 @@ export class ReleaseManager {
     await rename(`${file}.tmp`, file);
   }
 
-  async importDoc(id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>): Promise<Release> {
+  /** A Confluence page's storage, when given, is read as a deployment page first (exact layout). */
+  async importDoc(id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, storage?: string): Promise<Release> {
     const release = await this.get(id);
-    if (!markdown.trim()) throw new ReleaseInputError('Dokumen rilis kosong.');
-    return this.deps.store.save(mergeReleaseDoc(release, parseReleaseDoc(markdown), markdown, source, this.now()));
+    if (!markdown.trim() && !storage?.trim()) throw new ReleaseInputError('Dokumen rilis kosong.');
+    const doc = (storage && parseDeploymentStorage(storage, source.title)) || parseReleaseDoc(markdown);
+    return this.deps.store.save(mergeReleaseDoc(release, doc, markdown, source, this.now()));
   }
 
   async sharePreview(id: string, opts: ShareOptions): Promise<{ text: string; html: string }> {

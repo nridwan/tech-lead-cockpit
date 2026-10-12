@@ -1,59 +1,68 @@
-import { bringsSummary } from './share';
+import { DEFAULT_FAILOVER, DEFAULT_ROLES, deploymentTitle, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
 import { RELEASE_STATUS_LABELS, type Release, type ReleaseReport } from './types';
 
-/** The release document as Markdown (for Confluence and copying): what, where, in which order, and how to roll back. */
+/**
+ * The release document as Markdown, laid out like the deployment page Cockpit publishes
+ * (deployment.ts): for the Dokumen tab preview and for copying.
+ */
 
 const cell = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+const box = (done?: boolean) => (done ? '[x]' : '[ ]');
 
 export function releaseMarkdown(r: Release, report?: ReleaseReport | null): string {
+  const d = r.deploy ?? { roles: [], changeLog: [], testEvidence: [] };
   const checks = report?.mrs ?? [];
-  const lines: string[] = [`# Rilis ${r.name}${r.version ? ` ${r.version}` : ''}`, ''];
-  lines.push('| Item | Detail |', '| --- | --- |');
-  lines.push(`| Versi | ${cell(r.version || '-')} |`);
-  lines.push(`| Tanggal rilis | ${r.date ?? '-'} |`);
-  lines.push(`| Status | ${RELEASE_STATUS_LABELS[r.status]} |`);
-  lines.push(`| Branch target | ${cell(r.targetBranch)} |`);
-  if (r.codenames.length) lines.push(`| Codename | ${cell(r.codenames.join(', '))} |`);
+  const lines: string[] = [`# ${deploymentTitle(r)}`, ''];
+
+  lines.push('| | |', '| --- | --- |');
+  lines.push(`| Target Release | ${cell(`${tanggal(r.date)} ${d.targetTime ?? ''}`.trim() || '-')} |`);
+  lines.push(`| Actual Release | ${cell(d.actual ?? 'TBA')} |`);
+  lines.push(`| Deployment Status | ${cell(d.statusTitle ?? RELEASE_STATUS_LABELS[r.status])} |`);
+  lines.push(`| Deployment Impact | ${cell(d.impact ?? '-')} |`);
+  for (const role of d.roles.length ? d.roles : DEFAULT_ROLES.map((label) => ({ label, people: [] }))) lines.push(`| ${cell(role.label)} | ${cell(role.people.map((p) => (p.accountId ? `@${p.name}` : p.name)).join(', ') || '-')} |`);
+  lines.push(`| Deployment Room | ${cell(d.room ?? '-')} |`);
+  lines.push(`| Issue/Request Link (if any) | ${cell(d.issueLink ?? '-')} |`, '');
+
+  lines.push('## 🎯 Change Log', '', '| No. | Details | Notes |', '| --- | --- | --- |');
+  (d.changeLog.length ? d.changeLog : [{ details: '-', notes: '' }]).forEach((c, i) => lines.push(`| ${i + 1} | ${cell(c.details)} | ${cell(c.notes ?? '')} |`));
   lines.push('');
 
-  lines.push('## Service & MR', '', '| Urutan | Service | MR | PIC | Membawa |', '| --- | --- | --- | --- | --- |');
-  for (const s of [...r.services].sort((a, b) => a.order - b.order)) {
-    const mrs = s.mrs.map((m) => `[${m.ref}](${m.webUrl})`).join(', ') || 'belum ada';
-    const brings = s.mrs.map((m) => bringsSummary(checks.find((c) => c.ref === m.ref))).filter(Boolean).join('; ');
-    lines.push(`| ${s.order} | ${cell(s.name)} | ${cell(mrs)} | ${cell(s.pic ?? '-')} | ${cell(brings || '-')} |`);
-  }
-  lines.push('');
-
-  if (report?.tickets.length) {
-    lines.push('## Tiket', '', '| Tiket | Judul | Status | Di MR |', '| --- | --- | --- | --- |');
-    for (const t of report.tickets) lines.push(`| ${t.key} | ${cell(t.summary)} | ${cell(t.status)} | ${t.inMrs.length ? cell(t.inMrs.join(', ')) : 'belum'} |`);
-    lines.push('');
-  }
-
-  const group = (kind: 'env' | 'migration' | 'sql', title: string) => {
-    const items = r.items.filter((i) => i.kind === kind);
-    if (!items.length) return;
-    lines.push(`## ${title}`, '');
-    for (const i of items) {
-      lines.push(`- [${i.done ? 'x' : ' '}] ${i.service ? `**${i.service}**: ` : ''}\`${i.label}\``);
-      if (i.detail && i.detail !== i.label) lines.push('', '```sql', i.detail, '```', '');
+  const services = [...r.services].sort((a, b) => a.order - b.order);
+  lines.push('## 📝 Deployment List', '', '> **Urutan deploy:**', ...services.map((s, i) => `> ${i + 1}. ${s.name}`), '');
+  for (const s of services) {
+    lines.push(`### \`${s.name}\``, '');
+    lines.push('**Pre-deploy**', '');
+    let any = false;
+    const env = serviceEnvBlock(r, s);
+    if (env) {
+      any = true;
+      lines.push(`- ${box(env.done)} Update .env`, '', '```', env.text, '```', '');
     }
-    lines.push('');
-  };
-  group('env', 'Environment variable baru');
-  group('migration', 'Migrasi database');
-  group('sql', 'Query manual');
-
-  for (const [kind, title] of [
-    ['deploy', 'Langkah deploy'],
-    ['rollback', 'Rollback'],
-  ] as const) {
-    const steps = r.steps.filter((s) => s.kind === kind);
-    if (!steps.length) continue;
-    lines.push(`## ${title}`, '');
-    steps.forEach((s, i) => lines.push(`${i + 1}. ${s.service ? `**${s.service}**: ` : ''}${s.text}${s.done ? ' ✅' : ''}`));
-    lines.push('');
+    for (const m of r.items.filter((i) => i.kind === 'migration' && i.service === s.name)) {
+      any = true;
+      lines.push(`- ${box(m.done)} Jalankan migrasi \`${m.label}\``);
+    }
+    for (const q of r.items.filter((i) => i.kind === 'sql' && i.service === s.name)) {
+      any = true;
+      lines.push(`- ${box(q.done)} ${q.detail ? q.label : `Jalankan query \`${q.label}\``}`);
+      if (q.detail) lines.push('', '```sql', q.detail, '```', '');
+    }
+    for (const p of s.preDeploy ?? []) {
+      any = true;
+      lines.push(`- [ ] ${p}`);
+    }
+    if (!any) lines.push('- [ ] N/A');
+    lines.push('', `**Commit id**: \`${serviceCommit(s, checks) ?? 'TBA'}\``, '');
+    lines.push('**Post-deploy**', '', ...((s.postDeploy ?? []).length ? s.postDeploy!.map((p) => `- [ ] ${p}`) : ['- [ ] N/A']), '');
+    const rollback = r.steps.filter((x) => x.kind === 'rollback' && x.service === s.name).map((x) => x.text);
+    lines.push(`**Failover Strategy**: ${s.failover ?? (rollback.join('; ') || DEFAULT_FAILOVER)}`, '');
+    lines.push(`**Updated by**: ${s.updatedBy ? `@${s.updatedBy.name}` : '-'}`, '');
   }
-  if (r.notes) lines.push('## Catatan', '', r.notes, '');
+
+  const keys = [...new Set([...(report?.tickets.map((t) => t.key) ?? []), ...r.jiraKeys])];
+  lines.push('## 🚀 Release List', '', d.releaseList?.jql ? `JQL: \`${d.releaseList.jql}\`` : keys.length ? `JQL: \`key in (${keys.join(', ')})\`` : '-', '');
+  lines.push('## Document Control', '', '_Tanda tangan (page signatures) di Confluence._', '');
+  lines.push('## Post Deployment Test', '', '**Evidence link:**', ...d.testEvidence.map((e) => `- [${e.title}](${e.url})`), '');
+  lines.push('## 💣 Post Deployment issues', '', '| | Date | Issues | Rootcause | Solution | Status | Datetime |', '| --- | --- | --- | --- | --- | --- | --- |', ...[1, 2, 3, 4].map((n) => `| ${n} | | | | | | |`), '');
   return lines.join('\n');
 }

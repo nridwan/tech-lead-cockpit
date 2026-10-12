@@ -53,10 +53,19 @@ Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). 
 
 ## 🧾 Cakupan tiket ([`src/lib/release/coverage.ts`](../../../src/lib/release/coverage.ts))
 
-- Tiket dari TAD, codename (dicari longgar `summary ~ "CODE"` lalu dicocokkan persis dengan `parseTaskTitle`), dan tiket tambahan.
+- Tiket dari TAD, codename (dicari longgar `summary ~ "CODE"` lalu dicocokkan persis di tag judul mana pun: `[TYPE][SERVICE][CODENAME] - Nama` maupun pola mobile `[IOS][CODENAME][UI] Nama`), dan tiket tambahan.
+- Service tiket: tag sebelum codename; untuk pola mobile, platformnya (ANDROID, IOS). Nama service dianggap sama hanya bila persis sama (tanpa beda huruf/tanda baca) atau beda kata generik (`-service`, `-api`, …): `core-tcico` ≠ `core-tcico-ultimate`. Pemetaan ke folder repo (`matchRepo`) memakai aturan yang sama; nama platform boleh cocok ke folder yang memuatnya.
 - Tiket "di MR" bila key-nya muncul di commit, judul, branch, atau deskripsi MR rilis.
 - `devDone` memakai aturan status laporan progres (`jiraDevStage`).
 - Service yang disentuh tiket tapi tidak punya MR hidup ke branch target, dan judul tiket di luar format, dilaporkan.
+
+## 🗂️ Format dokumen Deployment ([`src/lib/release/deployment.ts`](../../../src/lib/release/deployment.ts))
+
+Dokumen rilis mengikuti halaman Deployment tim di Confluence, dua arah:
+- **Baca** (`parseDeploymentStorage`, dari storage XHTML): tabel info (Target Release dengan `<time>` + jam, Actual Release, Deployment Status/Impact dari macro status, peran seperti Supervisor/Tech Lead/QA/Cloud Platform Team/Product Lead sebagai mention atau nama, Deployment Room, Issue/Request Link), Change Log, Deployment List (urutan dari panel info, lalu tabel per service: Pre-deploy berupa checklist + blok kode env/SQL, Commit id, Post-deploy, Failover Strategy, Updated by), Release List (JQL), dan link bukti Post Deployment Test. Mengembalikan `null` bila halaman bukan format ini (lalu pembaca Markdown generik dipakai).
+- **Tulis** (`deploymentStorage`): struktur yang sama, termasuk checklist Confluence (`ac:task`), macro status, code macro, mention, info panel urutan deploy, page-signatures, dan tabel Post Deployment issues. Pre-deploy disusun dari blok `.env` service (nilai dari dokumen yang diimport tetap utuh, env baru dari cek MR ditambah sebagai `KEY=`), migrasi, query, dan catatan pre-deploy. Commit id: isian manual/import, else commit merge MR (atau head MR). Status mengikuti status rilis kecuali diubah. Judul halaman `Deployment <tanggal>`.
+- Data tambahan: `Release.deploy` (DeployInfo) dan per service `commitId`, `envBlock`, `preDeploy`, `postDeploy`, `failover`, `updatedBy`. Diedit di tab Dokumen (form Info dokumen Deployment, pencarian akun Confluence untuk mention) dan "Detail deployment" per service di Papan.
+- Pembacaan dan penulisan saling cocok (round-trip diuji), jadi import halaman lama lalu publish ulang tidak menghilangkan isi.
 
 ## 📄 Import dokumen ([`src/lib/release/import.ts`](../../../src/lib/release/import.ts))
 

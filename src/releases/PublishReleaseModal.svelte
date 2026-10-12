@@ -3,12 +3,13 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { connector } from '../lib/confluence/client';
-  import { toConfluenceStorage } from '../lib/confluence/storage';
   import { releases } from '../lib/release/client';
-  import type { Release } from '../lib/release/types';
+  import { deploymentStorage, deploymentTitle } from '../lib/release/deployment';
+  import type { Release, ReleaseReport } from '../lib/release/types';
+  import { appSettings } from '../lib/settings/store.svelte';
 
   /** Publishes the release document to Confluence (new page, or a new version of the page it went to before). */
-  let { open = $bindable(false), release, markdown, onpublished }: { open: boolean; release: Release; markdown: string; onpublished: (r: Release) => void } = $props();
+  let { open = $bindable(false), release, report, onpublished }: { open: boolean; release: Release; report: ReleaseReport | null; onpublished: (r: Release) => void } = $props();
 
   const SPACE_KEY = 'tlc.release.space';
   const PARENT_KEY = 'tlc.release.parent';
@@ -21,7 +22,7 @@
   $effect(() => {
     if (!open) return;
     error = '';
-    title = `Rilis ${release.name}${release.version ? ` ${release.version}` : ''}`.replace(/^Rilis Rilis /, 'Rilis ');
+    title = deploymentTitle(release);
     try {
       spaceKey ||= localStorage.getItem(SPACE_KEY) ?? '';
       parentId ||= localStorage.getItem(PARENT_KEY) ?? '';
@@ -38,8 +39,8 @@
     busy = true;
     error = '';
     try {
-      // The H1 is the page title in Confluence; drop it from the body.
-      const storage = toConfluenceStorage(markdown.replace(/^#\s+.+\n+/, '')).xhtml;
+      // Same layout as the team's deployment pages.
+      const storage = deploymentStorage(release, report, { jiraBaseUrl: appSettings.value.jira.baseUrl });
       const expectedVersion = update ? (await connector.pageVersion(update)).version : undefined;
       const res = await connector.publish({
         spaceKey: spaceKey.trim(),
@@ -74,7 +75,7 @@
     <label class="field"><span>Space key</span><input class="input mono" bind:value={spaceKey} placeholder="mis. ENG" disabled={Boolean(release.published)} /></label>
     <label class="field"><span>ID halaman induk (opsional)</span><input class="input mono" bind:value={parentId} placeholder="mis. 123456789" disabled={Boolean(release.published)} /></label>
     <label class="field"><span>Judul halaman</span><input class="input" bind:value={title} /></label>
-    <p class="muted small">Isinya dokumen dari tab Dokumen: info rilis, service dan MR, tiket, env, migrasi, query, langkah deploy, dan rollback.{release.published ? ' Kalau halaman sudah diubah orang lain sejak publish terakhir, Cockpit menolak menimpa.' : ''}</p>
+    <p class="muted small">Format dokumen Deployment: info rilis, Change Log, Deployment List (urutan deploy, lalu Pre-deploy, Commit id, Post-deploy, Failover Strategy per service), Release List, Document Control, Post Deployment Test, dan Post Deployment issues.{release.published ? ' Kalau halaman sudah diubah orang lain sejak publish terakhir, Cockpit menolak menimpa.' : ''}</p>
     {#if error}<p class="err small">{error}</p>{/if}
     <div class="actions">
       <button class="btn btn-ghost btn-sm" onclick={() => (open = false)}>Batal</button>

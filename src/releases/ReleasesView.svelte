@@ -15,6 +15,8 @@
   import ReleaseImportDialog from './ReleaseImportDialog.svelte';
   import ShareMrModal from './ShareMrModal.svelte';
   import CreateMrModal from './CreateMrModal.svelte';
+  import DeployInfoForm from './DeployInfoForm.svelte';
+  import ServiceDeployFields from './ServiceDeployFields.svelte';
 
   /**
    * Release management: the MRs into the production branch of every service in a release, what
@@ -40,6 +42,7 @@
   let shareOpen = $state(false);
   let publishOpen = $state(false);
   let mrFor = $state<ReleaseService | null>(null);
+  let openDetail = $state<Record<string, boolean>>({});
   let mrInput = $state<Record<string, string>>({});
   let newItem = $state<{ kind: ReleaseItem['kind']; label: string; service: string }>({ kind: 'env', label: '', service: '' });
   let newStep = $state<{ kind: 'deploy' | 'rollback'; text: string }>({ kind: 'deploy', text: '' });
@@ -440,6 +443,8 @@
                   {/if}
                 </div>
               {/each}
+              <button class="link-btn small" onclick={() => (openDetail[s.id] = !openDetail[s.id])}>{openDetail[s.id] ? '▾' : '▸'} Detail deployment (commit id, .env, pre/post-deploy, failover)</button>
+              {#if openDetail[s.id]}<ServiceDeployFields service={s} checks={report?.mrs ?? []} />{/if}
               <div class="add-mr">
                 <input class="input mono" value={mrInput[s.id] ?? ''} oninput={(e) => (mrInput[s.id] = e.currentTarget.value)} placeholder="Tempel link MR ke {current.targetBranch}" aria-label="Link MR" onkeydown={(e) => e.key === 'Enter' && addMr(s)} />
                 <button class="btn btn-sm" onclick={() => addMr(s)}><Icon name="plus" size={12} /> MR</button>
@@ -560,9 +565,10 @@
             {#if current.published}<span class="small">Dipublish ke Confluence versi {current.published.version} {#if current.published.url}<a href={current.published.url} target="_blank" rel="noreferrer">Buka <Icon name="external" size={11} /></a>{/if}</span>{/if}
             <button class="btn btn-sm" onclick={copyDoc}><Icon name="copy" size={12} /> Salin Markdown</button>
           </div>
+          <DeployInfoForm release={current} />
           <div class="docs">
             <article class="doc">
-              <h4>Dokumen dari Cockpit</h4>
+              <h4>Pratinjau dokumen Deployment</h4>
               <div class="md">{@html renderPreview(docMd).html}</div>
             </article>
             {#if current.docMarkdown}
@@ -582,7 +588,7 @@
 {#if current}
   <ReleaseImportDialog bind:open={importOpen} release={current} onimported={onImported} />
   <ShareMrModal bind:open={shareOpen} release={current} {report} onshared={(r) => setCurrent(r)} />
-  <PublishReleaseModal bind:open={publishOpen} release={current} markdown={docMd} onpublished={(r) => setCurrent(r)} />
+  <PublishReleaseModal bind:open={publishOpen} release={current} {report} onpublished={(r) => setCurrent(r)} />
   {#if mrFor}
     <CreateMrModal release={current} service={mrFor} onclose={() => (mrFor = null)} oncreated={(r) => { setCurrent(r); mrFor = null; }} onchanged={(r) => setCurrent(r)} />
   {/if}

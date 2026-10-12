@@ -154,6 +154,8 @@ export interface MrRisk {
 export interface MrDetail extends MrSummary {
   description: string;
   headSha?: string;
+  /** The commit on the target branch once merged (merge or squash commit). */
+  mergeCommitSha?: string;
   mergeStatus?: string;
   pipeline?: { id: number; status: PipelineStatus; webUrl?: string };
   approvals?: { approved: boolean; approvedBy: string[]; required?: number; left?: number };

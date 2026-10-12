@@ -35,7 +35,7 @@ export const releases = {
   check: (id: string) => call<{ release: Release; report: ReleaseReport }>('/check', { id }),
   report: (id: string) => call<{ report: ReleaseReport | null }>(`/report?id=${encodeURIComponent(id)}`).then((r) => r.report),
   codenames: (id: string) => call<string[]>(`/codenames?id=${encodeURIComponent(id)}`),
-  importDoc: (id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>) => call<Release>('/import', { id, markdown, source }),
+  importDoc: (id: string, markdown: string, source: Omit<ReleaseSource, 'importedAt'>, storage?: string) => call<Release>('/import', { id, markdown, source, storage }),
   /** What a new MR for one service would contain (reads GitLab only). */
   mrPlan: (id: string, serviceId: string, sourceBranch?: string) => call<MrPlan>('/mr/plan', { id, serviceId, sourceBranch }),
   /** Creates the MR in GitLab (token with scope api), or attaches the one already open. */

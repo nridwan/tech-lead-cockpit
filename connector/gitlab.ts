@@ -139,6 +139,8 @@ interface ApiMr {
   user_notes_count?: number;
   references?: { full?: string };
   sha?: string;
+  merge_commit_sha?: string | null;
+  squash_commit_sha?: string | null;
   merge_status?: string;
   detailed_merge_status?: string;
   head_pipeline?: { id: number; status: PipelineStatus; web_url?: string } | null;
@@ -412,6 +414,7 @@ export class GitLabClient {
       ...summary(mr),
       description: mr.description ?? '',
       headSha: mr.sha,
+      mergeCommitSha: mr.merge_commit_sha ?? mr.squash_commit_sha ?? undefined,
       mergeStatus: mr.detailed_merge_status ?? mr.merge_status,
       pipeline: pipeline ? { id: pipeline.id, status: pipeline.status, webUrl: pipeline.web_url } : undefined,
       approvals: approvals && {

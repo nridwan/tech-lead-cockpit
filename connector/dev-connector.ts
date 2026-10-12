@@ -1547,10 +1547,10 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       return send(res, 200, await rm.check(idOf(body.id)));
     }
     if (route === 'POST /releases/import') {
-      const body = await readJson<{ id?: string; markdown?: string; source?: { kind?: string; title?: string; pageId?: string; version?: number; url?: string } }>(req, 2 * 1024 * 1024);
+      const body = await readJson<{ id?: string; markdown?: string; storage?: string; source?: { kind?: string; title?: string; pageId?: string; version?: number; url?: string } }>(req, 4 * 1024 * 1024);
       const s = body.source ?? {};
       const source = { kind: s.kind === 'confluence' ? ('confluence' as const) : ('markdown' as const), title: String(s.title ?? 'Dokumen rilis').slice(0, 200), ...(s.pageId ? { pageId: String(s.pageId) } : {}), ...(Number.isInteger(s.version) ? { version: Number(s.version) } : {}), ...(s.url ? { url: String(s.url).slice(0, 500) } : {}) };
-      return send(res, 200, await rm.importDoc(idOf(body.id), String(body.markdown ?? ''), source));
+      return send(res, 200, await rm.importDoc(idOf(body.id), String(body.markdown ?? ''), source, typeof body.storage === 'string' ? body.storage : undefined));
     }
     if (route === 'POST /releases/mr/plan') {
       const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string }>(req, 16 * 1024);

@@ -6,6 +6,7 @@
   import { storageToMarkdown } from '../lib/confluence/storage-to-markdown';
   import { extractPageId } from '../lib/prd/confluence-prd';
   import { releases } from '../lib/release/client';
+  import { parseDeploymentStorage } from '../lib/release/deployment';
   import { parseReleaseDoc, type ParsedReleaseDoc } from '../lib/release/import';
   import type { Release, ReleaseSource } from '../lib/release/types';
 
@@ -15,12 +16,15 @@
   let mode = $state<'confluence' | 'markdown'>('confluence');
   let pageInput = $state('');
   let markdown = $state('');
+  /** The Confluence page's own markup: read as a deployment page when it has that layout. */
+  let storage = $state('');
   let source = $state<Omit<ReleaseSource, 'importedAt'> | null>(null);
   let loading = $state(false);
   let saving = $state(false);
   let error = $state('');
 
-  const parsed = $derived<ParsedReleaseDoc | null>(markdown.trim() ? parseReleaseDoc(markdown) : null);
+  const deployment = $derived(storage ? parseDeploymentStorage(storage, source?.title) : null);
+  const parsed = $derived<ParsedReleaseDoc | null>(deployment ?? (markdown.trim() ? parseReleaseDoc(markdown) : null));
 
   $effect(() => {
     if (open) {
@@ -38,6 +42,7 @@
       const page = await connector.page({ id });
       if (!page.storage) throw new Error('Isi halaman kosong atau tidak bisa diakses.');
       markdown = storageToMarkdown(page.storage, page.title).markdown;
+      storage = page.storage;
       source = { kind: 'confluence', title: page.title, pageId: page.id, version: page.version, url: page.url };
     } catch (e) {
       error = (e as Error).message;
@@ -52,6 +57,7 @@
     if (!f) return;
     if (f.size > 2 * 1024 * 1024) return void (error = 'File melebihi 2 MB.');
     markdown = await f.text();
+    storage = '';
     source = { kind: 'markdown', title: f.name };
   }
 
@@ -59,11 +65,12 @@
     if (!markdown.trim()) return;
     saving = true;
     try {
-      const r = await releases.importDoc(release.id, markdown, source ?? { kind: 'markdown', title: 'Teks yang ditempel' });
+      const r = await releases.importDoc(release.id, markdown, source ?? { kind: 'markdown', title: 'Teks yang ditempel' }, storage || undefined);
       onimported(r);
       toasts.show('Dokumen rilis diimport. Service, MR, env, query, dan langkah yang terbaca sudah masuk.', 'ok', 4000);
       open = false;
       markdown = '';
+      storage = '';
       source = null;
     } catch (e) {
       error = (e as Error).message;
@@ -90,15 +97,24 @@
         <label class="btn btn-sm"><Icon name="upload" size={13} /> Pilih file .md<input type="file" accept=".md,.markdown,.txt" hidden onchange={readFile} /></label>
         <span class="muted small">atau tempel teks di bawah</span>
       </div>
-      <textarea class="input mono" rows="8" bind:value={markdown} placeholder="# Rilis v2.4.0&#10;&#10;| Service | MR | PIC |&#10;| --- | --- | --- |&#10;| core-payment | https://gitlab.example.com/payments/core-payment/-/merge_requests/12 | Budi |" oninput={() => (source ??= { kind: 'markdown', title: 'Teks yang ditempel' })}></textarea>
+      <textarea class="input mono" rows="8" bind:value={markdown} placeholder="# Rilis v2.4.0&#10;&#10;| Service | MR | PIC |&#10;| --- | --- | --- |&#10;| core-payment | https://gitlab.example.com/payments/core-payment/-/merge_requests/12 | Budi |" oninput={() => { storage = ''; source ??= { kind: 'markdown', title: 'Teks yang ditempel' }; }}></textarea>
     {/if}
 
     {#if error}<p class="err small">{error}</p>{/if}
 
     {#if parsed}
       <section class="summary">
-        <h4>Yang terbaca{source ? ` dari "${source.title}"` : ''}</h4>
-        <ul class="small">
+        <h4>Yang terbaca{source ? ` dari "${source.title}"` : ''}{deployment ? ' (format dokumen Deployment)' : ''}</h4>
+        {#if deployment}
+          <ul class="small">
+            <li>Rilis: <strong>{deployment.date ?? '-'}</strong> {deployment.deploy.targetTime ?? ''} · status {deployment.deploy.statusTitle ?? '-'} · impact {deployment.deploy.impact ?? '-'}</li>
+            <li>Peran: {deployment.deploy.roles.map((r) => `${r.label} (${r.people.length})`).join(', ') || '-'}</li>
+            <li>Change Log: {deployment.deploy.changeLog.length} baris</li>
+            <li>Service ({deployment.serviceDetails.length}, sesuai urutan deploy): {deployment.serviceDetails.map((s) => `${s.name}${s.envNames.length ? ` · ${s.envNames.length} env` : ''}${s.sql.length ? ` · ${s.sql.length} query` : ''}`).join('; ')}</li>
+            <li>Release List: {deployment.deploy.releaseList?.jql ?? deployment.deploy.releaseList?.url ?? '-'}</li>
+          </ul>
+        {/if}
+        <ul class="small" class:hidden={Boolean(deployment)}>
           <li>Versi: <strong>{parsed.version ?? 'tidak terbaca'}</strong> · Tanggal: <strong>{parsed.date ?? 'tidak terbaca'}</strong></li>
           <li>Service: {parsed.services.length ? parsed.services.map((s) => s.name).join(', ') : 'tidak ada tabel service'}</li>
           <li>MR: {parsed.mrs.length} link</li>
@@ -172,6 +188,9 @@
   .summary ul {
     margin: 0;
     padding-left: 18px;
+  }
+  .hidden {
+    display: none;
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

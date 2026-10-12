@@ -190,8 +190,57 @@ export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdow
   };
   addSteps('deploy', doc.deploySteps);
   addSteps('rollback', doc.rollbackSteps);
+  // A deployment page (see deployment.ts): release info and per-service details.
+  const dep = doc as Partial<import('./deployment').ParsedDeploymentDoc>;
+  let deploy = release.deploy;
+  if (dep.deploy) {
+    const cur = release.deploy ?? { roles: [], changeLog: [], testEvidence: [] };
+    const d = dep.deploy;
+    deploy = {
+      ...cur,
+      targetTime: cur.targetTime ?? d.targetTime,
+      actual: d.actual ?? cur.actual,
+      statusTitle: d.statusTitle ?? cur.statusTitle,
+      statusColour: d.statusColour ?? cur.statusColour,
+      impact: d.impact ?? cur.impact,
+      room: cur.room ?? d.room,
+      issueLink: cur.issueLink ?? d.issueLink,
+      roles: d.roles.length ? d.roles.map((r) => ({ ...r, people: r.people.length ? r.people : (cur.roles.find((x) => x.label === r.label)?.people ?? []) })) : cur.roles,
+      changeLog: [...cur.changeLog, ...d.changeLog.filter((c) => !cur.changeLog.some((x) => norm(x.details) === norm(c.details)))],
+      releaseList: d.releaseList ?? cur.releaseList,
+      testEvidence: [...cur.testEvidence, ...d.testEvidence.filter((e) => !cur.testEvidence.some((x) => x.url === e.url))],
+    };
+  }
+  for (const s of dep.serviceDetails ?? []) {
+    const target = byName(s.name) ?? addService(s.name);
+    if (s.order) target.order = s.order;
+    target.commitId ??= s.commitId;
+    target.envBlock ??= s.envBlock;
+    target.failover ??= s.failover;
+    target.updatedBy ??= s.updatedBy;
+    target.preDeploy = [...new Set([...(target.preDeploy ?? []), ...s.preDeploy])];
+    target.postDeploy = [...new Set([...(target.postDeploy ?? []), ...s.postDeploy])];
+    for (const e of s.envNames) {
+      const it = items.find((i) => i.kind === 'env' && i.label === e && (!i.service || i.service === s.name));
+      if (it) {
+        it.service ??= s.name;
+        if (s.envDone) it.done = true;
+      } else items.push({ id: newId(), kind: 'env', label: e, service: s.name, source: 'import', done: s.envDone });
+    }
+    for (const q of s.sql) {
+      const it = items.find((i) => i.kind === 'sql' && i.detail === q.text);
+      if (it) it.service ??= s.name;
+      else items.push({ id: newId(), kind: 'sql', label: q.label, detail: q.text, service: s.name, source: 'import', done: q.done });
+    }
+  }
+  // Generic SQL/env from a deployment page are already tied to a service above.
+  if (dep.serviceDetails?.length) {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].source === 'import' && !items[i].service && !release.items.some((x) => x.id === items[i].id)) items.splice(i, 1);
+  }
+
   return {
     ...release,
+    ...(deploy ? { deploy } : {}),
     name: release.name || doc.title || release.name,
     version: release.version || doc.version || '',
     date: release.date ?? doc.date,
