@@ -16,6 +16,10 @@
   import { loadProjectProgress, type ProjectProgress } from '../lib/projects/project-progress';
   import { OPS_TITLE } from '../lib/projects/ops-tasks';
   import ScheduledReportModal from './ScheduledReportModal.svelte';
+  import RosterModal from './RosterModal.svelte';
+  import { rosterState } from '../lib/roster/store.svelte';
+  import { appSettings } from '../lib/settings/store.svelte';
+  import { loadServicesRoot } from '../tad/generator-client';
 
   type Tab = 'board' | 'estimate' | 'e2e';
   const TABS: Tab[] = ['board', 'estimate', 'e2e'];
@@ -28,6 +32,12 @@
   let tab = $state<Tab>(savedTab());
   let addingTad = $state(false);
   let scheduleOpen = $state(false);
+  // The team roster is one list for every project; projects pick their developers from it.
+  let rosterOpen = $state(false);
+  async function openRoster() {
+    await rosterState.load(true);
+    rosterOpen = true;
+  }
   /** What the Task Board tab shows: one TAD at a time, or the project's tickets & bugs (`OPS`). */
   const OPS = 'ops';
   let boardTad = $state<string | null>(null);
@@ -264,6 +274,7 @@
     </div>
     <p class="muted small hint">Satu proyek bisa berisi beberapa TAD dengan satu tim. Estimasi dan E2E test dihitung per proyek.</p>
     <button class="btn btn-sm schedule-btn" onclick={() => (scheduleOpen = true)} title="Kirim progres proyek otomatis ke WhatsApp lewat Hermes di VPS"><Icon name="clock" size={13} /> Laporan Terjadwal</button>
+    <button class="btn btn-sm schedule-btn" onclick={openRoster} title="Satu daftar anggota tim untuk semua proyek: role, akun Jira, email git, kapasitas, cuti"><Icon name="user" size={13} /> Daftar Tim</button>
     {#if loaded && !projects.length}
       <p class="muted small">Belum ada proyek.</p>
     {/if}
@@ -360,6 +371,7 @@
 </div>
 
 <ScheduledReportModal bind:open={scheduleOpen} {projects} />
+<RosterModal bind:open={rosterOpen} bind:members={rosterState.members} jiraProjects={appSettings.value.jira.defaultProject ? [appSettings.value.jira.defaultProject] : []} servicesRoot={loadServicesRoot()} />
 
 <style>
   .delete-project {

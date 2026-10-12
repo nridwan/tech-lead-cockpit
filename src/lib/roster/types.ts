@@ -73,7 +73,8 @@ export interface MemberRecommendation {
   busy: MemberBusy[];
   /** Leave working days inside the project window. */
   leaveDays: number;
-  jira?: { days: number; issues: number };
+  /** Open Jira work outside this project; `until` = when it is done at their capacity. */
+  jira?: { days: number; issues: number; until?: string };
   /** Share of recent commits in the repos of this role's tasks (0–1); undefined without git data. */
   familiarity?: { share: number; commits: number; topService?: string; topShare?: number };
   /** Already in this project's team. */

@@ -18,7 +18,7 @@
   import MemberRecommendations from './MemberRecommendations.svelte';
   import RosterModal from './RosterModal.svelte';
   import { projectAvailability } from '../lib/roster/availability';
-  import { roster } from '../lib/roster/client';
+  import { rosterState } from '../lib/roster/store.svelte';
   import type { TeamMember } from '../lib/roster/types';
   import { analysisContext, projectDrafts, projectTasks } from './project-tasks';
 
@@ -91,11 +91,11 @@
   }
 
   // Team roster: availability (other projects, leave) for developers linked to a member.
-  let members = $state<TeamMember[]>([]);
+  const members = $derived(rosterState.members);
   let rosterOpen = $state(false);
   let showRecs = $state(false);
   $effect(() => {
-    void roster.list().then((m) => (members = m)).catch(() => {});
+    void rosterState.load();
   });
   const availability = $derived.by(() => {
     try {
@@ -565,7 +565,7 @@
         </div>
       </section>
 
-      <RosterModal bind:open={rosterOpen} bind:members {jiraProjects} excludeKeys={projectJiraKeys} {servicesRoot} />
+      <RosterModal bind:open={rosterOpen} bind:members={rosterState.members} {jiraProjects} excludeKeys={projectJiraKeys} {servicesRoot} />
 
       {#if project.notes}
         <details class="card notes">

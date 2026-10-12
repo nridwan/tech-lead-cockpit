@@ -106,15 +106,18 @@ export interface RecommendInput {
   projects: EstimateProject[];
   holidays: Holiday[];
   /** Open Jira work outside the project, by Jira account (already fetched). */
-  jiraLoads?: Record<string, { days: number; issues: number }>;
+  jiraLoads?: Record<string, { days: number; issues: number; inProgress?: number }>;
   activity?: ActivityResponse;
   /** End of the window for counting leave (the current schedule end); default 20 working days. */
   windowEnd?: string;
 }
 
 /**
- * Active members of a role, best first: earliest start (by week), then most familiar with the
- * repos of this role's tasks, then the lighter Jira load. Each comes with the reasons behind it.
+ * Active members of a role, best first: earliest start (by week; their open Jira work always
+ * counts here, whatever the project's own schedule setting), then the lighter Jira load, then the
+ * most familiar with the repos of this role's tasks. A member whose Jira load is unknown (no Jira
+ * link, or not loaded) ranks after the known ones of the same week, so "no data" never looks like
+ * "free". Each comes with the reasons behind it.
  */
 export function recommendMembers(input: RecommendInput): MemberRecommendation[] {
   const { role, project, holidays } = input;
@@ -132,9 +135,11 @@ export function recommendMembers(input: RecommendInput): MemberRecommendation[] 
       const busy = memberBusy(m, input.projects, schedules, start);
       const a = availableFrom(m, busy, start);
       const jira = m.jira ? input.jiraLoads?.[m.jira.accountId] : undefined;
-      // Open Jira work already includes the other projects' tickets: the later of the two counts.
-      let offset = cal.offsetOf(a.from);
-      if (project.useJiraLoad && jira) offset = Math.max(offset, Math.ceil(jira.days - EPS));
+      // Open Jira work (at the member's capacity) already includes the other projects' tickets:
+      // the later of the two counts, not the sum.
+      const jiraDays = jira ? Math.ceil(jira.days / m.capacity - EPS) : 0;
+      const jiraUntil = jiraDays > 0 ? cal.dateAt(jiraDays - 1) : undefined;
+      let offset = Math.max(cal.offsetOf(a.from), jiraDays);
       let from = cal.dateAt(offset);
       // Starting on a leave day means starting after it.
       for (let guard = 0; guard < 400 && m.leaves.some((l) => l.start <= from && from <= l.end); guard++) from = cal.dateAt(++offset);
@@ -156,7 +161,8 @@ export function recommendMembers(input: RecommendInput): MemberRecommendation[] 
       const reasons: string[] = [];
       reasons.push(offset === 0 ? `bisa mulai ${fmt(start)}` : `bisa mulai ${fmt(from)} (${offset} hari kerja setelah proyek mulai)`);
       for (const b of busy) reasons.push(`${Math.round(b.allocation * 100)}% di ${b.projectName} sampai ${fmt(b.until)}`);
-      if (jira) reasons.push(jira.issues ? `${jira.issues} tiket Jira aktif (±${jira.days} hari)` : 'tidak ada tiket Jira aktif');
+      if (jira) reasons.push(jira.issues ? `${jira.issues} tiket Jira aktif${jira.inProgress ? `, ${jira.inProgress} in progress` : ''} (±${jira.days} hari${jiraUntil ? `, selesai ±${fmt(jiraUntil)}` : ''})` : 'tidak ada tiket Jira aktif');
+      else reasons.push(m.jira ? 'beban Jira belum termuat' : 'beban Jira tidak diketahui: akun Jira belum ditautkan di daftar tim');
       if (familiarity?.topService) reasons.push(`${Math.round((familiarity.topShare ?? 0) * 100)}% commit di ${familiarity.topService} (${input.activity!.days} hari terakhir)`);
       else if (familiarity) reasons.push(m.gitEmails.length ? `belum ada commit di repo ${ROLE_LABELS[role]} proyek ini` : 'email git belum diisi di daftar tim');
       if (leaveDays) reasons.push(`cuti ${leaveDays} hari kerja di periode proyek`);
@@ -169,7 +175,7 @@ export function recommendMembers(input: RecommendInput): MemberRecommendation[] 
         freeCapacity: a.freeCapacity,
         busy,
         leaveDays,
-        ...(jira ? { jira } : {}),
+        ...(jira ? { jira: { days: jira.days, issues: jira.issues, ...(jiraUntil ? { until: jiraUntil } : {}) } } : {}),
         ...(familiarity ? { familiarity } : {}),
         inProject: project.developers.some((d) => d.memberId === m.id),
         reasons,
@@ -179,9 +185,10 @@ export function recommendMembers(input: RecommendInput): MemberRecommendation[] 
     .sort(
       (a, b) =>
         a._bucket - b._bucket ||
+        Number(!a.jira) - Number(!b.jira) ||
+        (a.jira?.days ?? 0) - (b.jira?.days ?? 0) ||
         (b.familiarity?.share ?? 0) - (a.familiarity?.share ?? 0) ||
         a.leaveDays - b.leaveDays ||
-        (a.jira?.days ?? 0) - (b.jira?.days ?? 0) ||
         a.member.name.localeCompare(b.member.name),
     )
     .map(({ _bucket: _b, ...r }) => r);

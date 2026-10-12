@@ -73,10 +73,15 @@ Perhitungan estimasi pada [`src/lib/estimate/schedule.ts`](file:///Users/ridwan/
 
 ## 👥 Daftar Tim & Rekomendasi Developer
 
+Daftar Tim adalah **satu daftar global** untuk semua proyek (tombol Daftar Tim di sidebar halaman Proyek, juga di bagian Tim pada Estimasi); proyek memilih developernya dari sana. Store bersama: [`src/lib/roster/store.svelte.ts`](../../../src/lib/roster/store.svelte.ts).
+
 Urutan rekomendasi per role (`recommendMembers`):
-1. Paling cepat bisa mulai, dikelompokkan per minggu (5 hari kerja), dari proyek lain, beban Jira (bila proyek menghitungnya), dan cuti di hari mulai.
-2. Porsi commit 180 hari terakhir di repo task role itu (email git anggota terhadap total commit repo). Sinyal pendukung, bukan penentu, karena cenderung menguntungkan orang lama.
-3. Cuti di periode proyek, beban Jira, lalu nama.
+1. Paling cepat bisa mulai, dikelompokkan per minggu (5 hari kerja). Tiket Jira terbuka di luar proyek ini **selalu** dihitung (sisa estimasi, atau default per tiket, dibagi kapasitas), tidak bergantung pada opsi "Hitung beban Jira" di jadwal proyek. Digabung dengan pekerjaan di proyek Cockpit lain (yang paling akhir, bukan dijumlah) dan cuti di hari mulai.
+2. Beban Jira paling ringan. Anggota tanpa data beban (Jira belum ditautkan atau belum termuat) ditaruh setelah yang datanya ada di minggu yang sama, supaya "tidak ada data" tidak terlihat seperti "bebas".
+3. Porsi commit 180 hari terakhir di repo task role itu (email git anggota terhadap total commit repo). Sinyal pendukung, bukan penentu, karena cenderung menguntungkan orang lama.
+4. Cuti di periode proyek, lalu nama.
+
+Panel menampilkan badge beban Jira per kandidat (jumlah tiket, ±hari, perkiraan selesai) dengan daftar tiket yang bisa dibuka, dan tombol muat ulang.
 
 Setiap kandidat membawa alasan yang ditampilkan di UI (mulai kapan, proyek lain, tiket Jira, porsi commit, cuti, kapasitas). Semua data dihitung lokal dari Jira, folder Services, dan proyek Cockpit lain; tidak ada AI. Chip proyek di TAD dan data aplikasi mobile juga memakai `projectAvailability`, sehingga tanggal target konsisten.
 

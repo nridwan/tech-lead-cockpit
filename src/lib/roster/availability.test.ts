@@ -94,20 +94,35 @@ describe('recommendMembers', () => {
     expect(recs.map((r) => r.member.id)).toEqual(['budi', 'citra']);
   });
 
-  it('uses Jira load when the project counts it, skips a start on leave and flags missing git e-mails', () => {
+  it('always counts open Jira work for the start date, skips a start on leave and flags missing git e-mails', () => {
     const members = [member('budi', { jira: { accountId: 'acc-b', displayName: 'Budi' }, leaves: [{ start: '2026-10-08', end: '2026-10-08' }] }), member('fajar', { gitEmails: [] })];
-    const recs = recommendMembers({ role: 'BACKEND', members, project: { ...current, useJiraLoad: true }, projects: [current], holidays: [], activity, jiraLoads: { 'acc-b': { days: 3, issues: 2 } } });
+    // The project does not count Jira load in its own schedule; the recommendation still does.
+    const recs = recommendMembers({ role: 'BACKEND', members, project: current, projects: [current], holidays: [], activity, jiraLoads: { 'acc-b': { days: 3, issues: 2, inProgress: 1 } } });
     const budi = recs.find((r) => r.member.id === 'budi')!;
-    // 3 days of Jira work → Thursday, which is leave → Friday.
+    // 3 days of Jira work (Mon–Wed) → Thursday, which is leave → Friday.
     expect(budi.availableFrom).toBe('2026-10-09');
-    expect(budi.reasons).toContain('2 tiket Jira aktif (±3 hari)');
-    expect(recs.find((r) => r.member.id === 'fajar')!.reasons).toContain('email git belum diisi di daftar tim');
+    expect(budi.jira).toEqual({ days: 3, issues: 2, until: '2026-10-07' });
+    expect(budi.reasons).toContain('2 tiket Jira aktif, 1 in progress (±3 hari, selesai ±7 Okt)');
+    const fajar = recs.find((r) => r.member.id === 'fajar')!;
+    expect(fajar.reasons).toContain('email git belum diisi di daftar tim');
+    expect(fajar.reasons).toContain('beban Jira tidak diketahui: akun Jira belum ditautkan di daftar tim');
+  });
+
+  it('prefers the lighter Jira load over more commits within the same week, and puts unknown load last', () => {
+    const jiraOf = (id: string) => ({ jira: { accountId: `acc-${id}`, displayName: id } });
+    const members = [member('budi', jiraOf('budi')), member('citra', jiraOf('citra')), member('gita')];
+    const recs = recommendMembers({ role: 'BACKEND', members, project: current, projects: [current], holidays: [], activity, jiraLoads: { 'acc-citra': { days: 2, issues: 3 }, 'acc-budi': { days: 0.5, issues: 1 } } });
+    // Citra has 60% of the commits but 2 days of tickets; Budi has half a day. Gita: no Jira link.
+    expect(recs.map((r) => r.member.id)).toEqual(['budi', 'citra', 'gita']);
+    // Part-time capacity stretches the Jira work: 2 days at 50% = 4 working days.
+    const half = recommendMembers({ role: 'BACKEND', members: [member('citra', { ...jiraOf('citra'), capacity: 0.5 })], project: current, projects: [current], holidays: [], jiraLoads: { 'acc-citra': { days: 2, issues: 3 } } });
+    expect(half[0]).toMatchObject({ availableFrom: '2026-10-09', waitDays: 4 });
   });
 
   it('works without git data and marks members already in the team', () => {
     const inTeam = { ...current, developers: [{ id: 'x', name: 'Budi', role: 'BACKEND' as const, allocation: 1, memberId: 'budi' }] };
     const recs = recommendMembers({ role: 'BACKEND', members: [member('budi')], project: inTeam, projects: [inTeam], holidays: [] });
-    expect(recs[0]).toMatchObject({ inProject: true, reasons: ['bisa mulai 5 Okt'] });
+    expect(recs[0]).toMatchObject({ inProject: true, reasons: ['bisa mulai 5 Okt', 'beban Jira tidak diketahui: akun Jira belum ditautkan di daftar tim'] });
     expect(recs[0].familiarity).toBeUndefined();
   });
 });

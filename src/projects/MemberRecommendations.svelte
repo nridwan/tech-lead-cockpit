@@ -1,14 +1,15 @@
 <script lang="ts">
   import Icon from '../components/Icon.svelte';
-  import { ESTIMATE_ROLES, ROLE_LABELS, type Developer, type EstimateProject, type EstimateRole, type Holiday } from '../lib/estimate/types';
+  import { ESTIMATE_ROLES, ROLE_LABELS, type Developer, type DeveloperJiraLoad, type EstimateProject, type EstimateRole, type Holiday } from '../lib/estimate/types';
   import { jira } from '../lib/jira/client';
   import { recommendMembers } from '../lib/roster/availability';
   import { roster } from '../lib/roster/client';
   import type { ActivityResponse, MemberRecommendation, TeamMember } from '../lib/roster/types';
 
   /**
-   * Who from the roster fits this project, per role: earliest start first (by week), then most
-   * familiar with the role's repos, with the reasons visible. Adding fills a placeholder developer
+   * Who from the roster fits this project, per role: earliest start first (by week, open Jira work
+   * included), then the lighter Jira load, then the most familiar with the role's repos, with the
+   * reasons visible. Adding fills a placeholder developer
    * ("Backend 2") when one is picked, so its task assignments stay.
    */
   let {
@@ -43,8 +44,15 @@
 
   let activity = $state<ActivityResponse | undefined>();
   let loadingActivity = $state(false);
-  let jiraLoads = $state<Record<string, { days: number; issues: number }>>({});
+  /** Open Jira tickets per account (outside this project), with the issue lists. */
+  let jiraDetail = $state<Record<string, DeveloperJiraLoad>>({});
+  let loadingJira = $state(false);
+  let jiraLoadedAt = $state('');
   let jiraError = $state('');
+  let openTickets = $state<string | null>(null);
+  const jiraLoads = $derived(
+    Object.fromEntries(Object.entries(jiraDetail).map(([id, l]) => [id, { days: l.days, issues: l.issues.length, inProgress: l.issues.filter((i) => i.statusCategory === 'indeterminate').length }])),
+  );
   let replaceFor = $state<Record<string, string>>({});
 
   const services = $derived([...new Set(project.tasks.filter((t) => t.service).map((t) => t.service))]);
@@ -74,14 +82,21 @@
 
   async function loadJira(accounts: string[]) {
     if (!accounts.length) return;
+    loadingJira = true;
     try {
       const loads = await jira.loads(accounts, excludeKeys, jiraOpts);
-      jiraLoads = Object.fromEntries(Object.entries(loads).map(([id, l]) => [id, { days: l.days, issues: l.issues.length }]));
+      // Linked members with no open ticket come back missing: that is a known zero, not unknown.
+      jiraDetail = Object.fromEntries(accounts.map((id) => [id, loads[id] ?? { accountId: id, displayName: id, days: 0, issues: [] }]));
+      jiraLoadedAt = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
       jiraError = '';
     } catch (e) {
       jiraError = (e as Error).message;
+    } finally {
+      loadingJira = false;
     }
   }
+
+  const reloadJira = () => void loadJira(members.filter((m) => m.active && m.jira).map((m) => m.jira!.accountId));
 
   const recs = $derived<MemberRecommendation[]>(recommendMembers({ role, members, project, projects, holidays, jiraLoads, activity, windowEnd }));
   const roleMembers = $derived(members.filter((m) => m.role === role).length);
@@ -109,7 +124,7 @@
   </div>
 
   <p class="muted small">
-    Diurutkan: paling cepat bisa mulai (per minggu), lalu paling sering commit di repo task {ROLE_LABELS[role]} proyek ini, lalu cuti dan beban Jira paling ringan. Ini bahan pertimbangan, bukan keputusan.
+    Diurutkan: paling cepat bisa mulai (per minggu, setelah tiket Jira terbukanya di luar proyek ini selesai dan pekerjaan di proyek lain), lalu beban Jira paling ringan, lalu paling sering commit di repo task {ROLE_LABELS[role]} proyek ini. Anggota yang bebannya tidak diketahui ditaruh di belakang. Ini bahan pertimbangan, bukan keputusan.
   </p>
 
   {#if !roleMembers}
@@ -128,9 +143,23 @@
             <div class="who">
               <strong>{r.member.name}</strong>
               <span class="start" class:late={r.waitDays > 0}>mulai {fmt(r.availableFrom)}{r.waitDays > 0 ? ` · +${r.waitDays} hari kerja` : ''}</span>
+              {#if r.jira}
+                <button class="jira" class:heavy={r.jira.days >= 5} onclick={() => (openTickets = openTickets === r.member.id ? null : r.member.id)} title="Tiket Jira terbuka di luar proyek ini">
+                  <Icon name="jira" size={10} /> {r.jira.issues ? `${r.jira.issues} tiket · ±${r.jira.days} hari` : 'Jira kosong'} {r.jira.issues ? (openTickets === r.member.id ? '▾' : '▸') : ''}
+                </button>
+              {:else}
+                <span class="jira unknown" title={r.member.jira ? 'Beban Jira belum termuat' : 'Tautkan akun Jira di daftar tim'}><Icon name="jira" size={10} /> beban ?</span>
+              {/if}
               {#if r.familiarity && r.familiarity.share > 0}<span class="fam" title="{r.familiarity.commits} commit di repo task {ROLE_LABELS[role]} proyek ini">{Math.round(r.familiarity.share * 100)}% commit repo proyek</span>{/if}
               {#if r.inProject}<span class="chip">di tim</span>{/if}
             </div>
+            {#if openTickets === r.member.id && r.member.jira && jiraDetail[r.member.jira.accountId]?.issues.length}
+              <ul class="tickets small">
+                {#each jiraDetail[r.member.jira.accountId].issues as i (i.key)}
+                  <li><span class="mono">{i.key}</span> {i.summary} <span class="muted">· {i.status} · {i.estimateDays} hari{i.source === 'default' ? ' (default)' : ''}{i.due ? ` · due ${i.due}` : ''}</span></li>
+                {/each}
+              </ul>
+            {/if}
             <ul class="reasons small muted">
               <!-- The first reason is the start date, already shown in the badge. -->
               {#each r.reasons.slice(1) as reason (reason)}<li>{reason}</li>{/each}
@@ -154,7 +183,8 @@
 
   <p class="foot muted small">
     {#if loadingActivity}Membaca riwayat git…{:else if activity?.error}Riwayat git tidak terbaca ({activity.error}), jadi keahlian per repo tidak dihitung.{:else if activity}Riwayat git {activity.days} hari terakhir di folder Services.{#if unmatched.length} Service tanpa repo yang cocok: {unmatched.join(', ')}.{/if}{/if}
-    {#if jiraError} Beban Jira tidak termuat: {jiraError}.{/if}
+    {#if jiraError} Beban Jira tidak termuat: {jiraError}.{:else if loadingJira} Memuat beban Jira…{:else if jiraLoadedAt} Beban Jira dimuat {jiraLoadedAt} (tiket proyek ini tidak dihitung; tiket tanpa estimasi {jiraOpts.defaultDays ?? 0.5} hari).{/if}
+    <button class="link-btn" onclick={reloadJira} disabled={loadingJira}>Muat ulang beban Jira</button>
   </p>
 </div>
 
@@ -281,5 +311,46 @@
   }
   .foot {
     margin: 0;
+  }
+  .jira {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border: none;
+    border-radius: 999px;
+    background: var(--surface-hover);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .jira.heavy {
+    background: var(--warn-soft);
+  }
+  .jira.unknown {
+    cursor: default;
+    color: var(--text-3);
+  }
+  .tickets {
+    margin: 6px 0 0;
+    padding: 6px 10px;
+    list-style: none;
+    border-radius: 6px;
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .link-btn {
+    border: none;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font: inherit;
   }
 </style>
