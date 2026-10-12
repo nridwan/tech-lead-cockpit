@@ -15,10 +15,15 @@
   import { loadServicesRoot } from '../tad/generator-client';
   import type { Draft } from '../tad/drafts.svelte';
   import HolidaysModal from './HolidaysModal.svelte';
+  import MemberRecommendations from './MemberRecommendations.svelte';
+  import RosterModal from './RosterModal.svelte';
+  import { projectAvailability } from '../lib/roster/availability';
+  import { roster } from '../lib/roster/client';
+  import type { TeamMember } from '../lib/roster/types';
   import { analysisContext, projectDrafts, projectTasks } from './project-tasks';
 
   /** The project is owned (and saved) by the Projects view; this panel edits its estimate. */
-  let { project = $bindable(), drafts }: { project: EstimateProject; drafts: Draft[] } = $props();
+  let { project = $bindable(), drafts, projects = [] }: { project: EstimateProject; drafts: Draft[]; projects?: EstimateProject[] } = $props();
 
   const POLL_MS = 1500;
 
@@ -85,9 +90,26 @@
     }
   }
 
+  // Team roster: availability (other projects, leave) for developers linked to a member.
+  let members = $state<TeamMember[]>([]);
+  let rosterOpen = $state(false);
+  let showRecs = $state(false);
+  $effect(() => {
+    void roster.list().then((m) => (members = m)).catch(() => {});
+  });
+  const availability = $derived.by(() => {
+    try {
+      return projectAvailability(project, members, projects, holidays);
+    } catch {
+      return {};
+    }
+  });
+  /** The project plus availability: what every schedule on this panel runs on. */
+  const plan = $derived({ ...project, availability });
+
   const result = $derived.by((): ScheduleResult | { error: string } | null => {
     try {
-      return schedule(project, holidays);
+      return schedule(plan, holidays);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -189,7 +211,7 @@
   let loadingCandidates = $state(false);
   let candidateRole = $state<Record<string, EstimateRole>>({});
   let recFor = $state<string | null>(null);
-  const recs = $derived(recFor ? recommendAssignees(project, holidays, recFor) : []);
+  const recs = $derived(recFor ? recommendAssignees(plan, holidays, recFor) : []);
   const unassigned = $derived(project.tasks.filter((t) => !t.assigneeId && t.effortDays && byId.get(t.id)?.developerId).length);
 
   function searchUsers(q: string) {
@@ -263,6 +285,21 @@
     toasts.show(`${c.displayName} ditambahkan sebagai ${ROLE_LABELS[role]}.`, 'ok', 2000);
   }
 
+  /** Adds a roster member to the team, or puts them in a placeholder slot (keeps its tasks). */
+  function addMember(m: TeamMember, replaceId?: string) {
+    if (project.developers.some((d) => d.memberId === m.id)) return void toasts.show(`${m.name} sudah ada di tim.`, 'info');
+    const fields = { name: m.name, role: m.role, allocation: m.capacity, memberId: m.id, jira: m.jira, jiraLoad: undefined };
+    const slot = replaceId ? project.developers.find((d) => d.id === replaceId) : undefined;
+    if (slot) {
+      Object.assign(slot, fields);
+      toasts.show(`${m.name} mengisi slot ${ROLE_LABELS[m.role]}.`, 'ok', 2500);
+    } else {
+      project.developers = [...project.developers, { id: crypto.randomUUID(), ...fields }];
+      toasts.show(`${m.name} ditambahkan sebagai ${ROLE_LABELS[m.role]}.`, 'ok', 2500);
+    }
+    if (m.jira) void refreshJiraLoads(project.developers.filter((d) => d.memberId === m.id));
+  }
+
   function assign(t: EstimateTask, devId: string) {
     t.assigneeId = devId;
     recFor = null;
@@ -274,7 +311,7 @@
       message: `${unassigned} task yang masih "Otomatis" akan dikunci ke developer yang dipilih penjadwal sekarang. Task yang sudah di-assign tidak berubah.`,
       confirmText: 'Kunci',
     });
-    if (ok) project.tasks = lockAssignments(project, holidays);
+    if (ok) project.tasks = lockAssignments(plan, holidays);
   }
 
   const fmtTime = (iso?: string) => (iso ? new Date(iso).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
@@ -413,8 +450,25 @@
               <button class="btn btn-sm" onclick={() => addDev(r)}><Icon name="plus" size={12} /> {ROLE_LABELS[r]}</button>
             {/each}
             <button class="btn btn-sm" onclick={loadCandidates} disabled={loadingCandidates} title="Orang yang bisa di-assign di project Jira {jiraProjects.join(', ') || '-'}, beban paling ringan dulu"><Icon name="jira" size={12} /> {loadingCandidates ? 'Memuat…' : 'Kandidat dari Jira'}</button>
+            <button class="btn btn-sm btn-primary" onclick={() => (showRecs = !showRecs)} title="Siapa dari daftar tim yang paling cepat tersedia dan paling paham repo proyek ini"><Icon name="sparkles" size={12} /> Rekomendasi</button>
+            <button class="btn btn-sm" onclick={() => (rosterOpen = true)} title="Daftar semua anggota tim: role, Jira, email git, kapasitas, cuti"><Icon name="user" size={12} /> Daftar tim ({members.filter((m) => m.active).length})</button>
           </div>
         </div>
+        {#if showRecs}
+          <MemberRecommendations
+            {project}
+            {members}
+            {projects}
+            {holidays}
+            windowEnd={sched?.endDate}
+            {servicesRoot}
+            excludeKeys={projectJiraKeys}
+            {jiraOpts}
+            onadd={addMember}
+            onclose={() => (showRecs = false)}
+            onroster={() => (rosterOpen = true)}
+          />
+        {/if}
         <div class="jira-bar">
           <label class="check small" title="Developer yang tertaut Jira baru mulai mengerjakan proyek setelah tiket Jira terbukanya (di luar proyek ini) selesai">
             <input type="checkbox" bind:checked={project.useJiraLoad} /> Hitung beban Jira
@@ -463,7 +517,10 @@
               <label class="alloc" title="Porsi hari kerja untuk proyek ini">
                 <input class="input" type="number" min="10" max="100" step="10" value={Math.round(d.allocation * 100)} oninput={(e) => (d.allocation = Math.min(1, Math.max(0.1, Number(e.currentTarget.value) / 100 || 1)))} aria-label="Alokasi persen" />%
               </label>
-              <span class="muted small load">{load?.tasks ? `${days(load.effortDays)} · ${load.tasks} task · selesai ${fmtShort(load.finishDate)} · sibuk ${pct(load.utilization)}` : 'belum ada task'}</span>
+              <span class="muted small load">{load?.tasks ? `${days(load.effortDays)} · ${load.tasks} task · selesai ${fmtShort(load.finishDate)} · sibuk ${pct(load.utilization)}` : 'belum ada task'}{load?.availableFrom ? ` · baru tersedia ${fmtShort(load.availableFrom)}` : ''}{load?.leaveDays ? ` · cuti ${load.leaveDays} hari` : ''}</span>
+              {#if d.memberId}
+                <span class="chip" title={availability[d.id]?.fromReason ?? 'Ketersediaan dan cuti diambil dari daftar tim'}><Icon name="user" size={10} /> daftar tim</span>
+              {/if}
               {#if d.jira}
                 <span class="jira-link" title="Tertaut ke akun Jira {d.jira.displayName}">
                   <Icon name="jira" size={11} /> {d.jira.displayName}
@@ -507,6 +564,8 @@
           {/each}
         </div>
       </section>
+
+      <RosterModal bind:open={rosterOpen} bind:members {jiraProjects} excludeKeys={projectJiraKeys} {servicesRoot} />
 
       {#if project.notes}
         <details class="card notes">
@@ -630,7 +689,7 @@
                     <td class="when">
                       {#if s?.startDate}
                         <span>{fmtShort(s.startDate)} – {fmtShort(s.endDate)}</span>
-                        <span class="muted small">{s.spanDays} hari kerja{s.waitedFor ? ` · menunggu ${s.waitedFor.kind === 'dependency' ? 'task' : s.waitedFor.kind === 'jira' ? 'beban Jira' : 'developer'}` : ''}</span>
+                        <span class="muted small">{s.spanDays} hari kerja{s.waitedFor ? ` · menunggu ${s.waitedFor.kind === 'dependency' ? 'task' : s.waitedFor.kind === 'jira' ? 'beban Jira' : s.waitedFor.kind === 'availability' ? s.waitedFor.title : 'developer'}` : ''}</span>
                       {:else if s?.issues.includes('unestimated')}<span class="muted small">isi effort</span>
                       {:else if s?.issues.includes('no-developer')}<span class="err small">tidak ada developer {ROLE_LABELS[t.role]}</span>
                       {:else if s?.issues.includes('cycle')}<span class="err small">dependency melingkar</span>{/if}

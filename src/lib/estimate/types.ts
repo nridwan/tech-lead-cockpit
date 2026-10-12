@@ -26,6 +26,8 @@ export interface Developer {
   jira?: { accountId: string; displayName: string };
   /** Open Jira work outside the project at the last refresh. */
   jiraLoad?: { days: number; issues: number; loadedAt: string };
+  /** Team roster member this developer is (availability, leave and other projects come from there). */
+  memberId?: string;
 }
 
 export interface JiraLoadIssue {

@@ -1,3 +1,4 @@
+import type { LeaveRange } from '../roster/types';
 import type { Developer, EstimateProject, EstimateRole, EstimateTask, Holiday } from './types';
 import { ESTIMATE_ROLES } from './types';
 
@@ -58,6 +59,14 @@ export class WorkCalendar {
     return this.days[index];
   }
 
+  /** Index of the first working day on/after `date` (0 for dates up to the start). */
+  offsetOf(date: string): number {
+    if (date <= this.start) return 0;
+    let i = 0;
+    while (this.dateAt(i) < date) i++;
+    return i;
+  }
+
   /** Days off (weekday holidays) between two dates inclusive, for the summary. */
   daysOffBetween(from: string, to: string): Holiday[] {
     const out: Holiday[] = [];
@@ -95,8 +104,8 @@ export interface ScheduledTask {
   /** Working days between start and end (inclusive), what a calendar shows. */
   spanDays: number;
   critical: boolean;
-  /** Why it could not start earlier: a dependency, the developer busy with another task, or their open Jira work. */
-  waitedFor?: { kind: 'dependency' | 'developer' | 'jira'; id: string; title: string };
+  /** Why it could not start earlier: a dependency, the developer busy with another task, their open Jira work, or their availability (other projects, leave). */
+  waitedFor?: { kind: 'dependency' | 'developer' | 'jira' | 'availability'; id: string; title: string };
   issues: ScheduleIssue[];
 }
 
@@ -112,6 +121,10 @@ export interface DeveloperLoad {
   utilization: number;
   /** Open Jira work (days) counted before this developer's project tasks. */
   jiraLoadDays: number;
+  /** First day they can work on the project (other projects, leave), when later than the start. */
+  availableFrom?: string;
+  /** Leave working days that fell inside their project work. */
+  leaveDays: number;
 }
 
 export interface ScheduleResult {
@@ -150,7 +163,53 @@ function findCycle(nodes: Node[]): Set<number> {
   return new Set(nodes.filter((n) => !seen.has(n.index)).map((n) => n.index));
 }
 
-export type SchedulePlan = Pick<EstimateProject, 'startDate' | 'skipCutiBersama' | 'developers' | 'tasks' | 'useJiraLoad'>;
+/** Per developer, from the team roster: busy in other projects until a date, and leave. */
+export interface DeveloperAvailability {
+  /** Earliest day they can start on this project (YYYY-MM-DD). */
+  from?: string;
+  /** Why `from` is set, shown when a task waits for it. */
+  fromReason?: string;
+  leaves?: LeaveRange[];
+}
+
+export type SchedulePlan = Pick<EstimateProject, 'startDate' | 'skipCutiBersama' | 'developers' | 'tasks' | 'useJiraLoad'> & {
+  /** Keyed by developer id; computed from the roster and other projects (see roster/availability). */
+  availability?: Record<string, DeveloperAvailability>;
+};
+
+/** Working-day offsets a developer is on leave. */
+function leaveOffsets(cal: WorkCalendar, leaves: LeaveRange[] | undefined): Set<number> {
+  const out = new Set<number>();
+  for (const l of leaves ?? []) {
+    if (l.end < cal.start) continue;
+    for (let i = cal.offsetOf(l.start); cal.dateAt(i) <= l.end; i++) out.add(i);
+  }
+  return out;
+}
+
+/**
+ * Places `effort` man-days starting at offset `from` for a developer with `allocation`, skipping
+ * their leave days. Returns the real start (first non-leave moment) and the finish offset.
+ */
+export function placeWork(from: number, effort: number, allocation: number, leave: Set<number>): { start: number; finish: number; leaveDays: number } {
+  let t = from;
+  while (leave.has(Math.floor(t + EPS))) t = Math.floor(t + EPS) + 1;
+  const start = t;
+  let rest = effort / allocation;
+  let skipped = 0;
+  while (rest > EPS) {
+    const day = Math.floor(t + EPS);
+    if (leave.has(day)) {
+      t = day + 1;
+      skipped++;
+      continue;
+    }
+    const step = Math.min(day + 1 - t, rest);
+    t += step;
+    rest -= step;
+  }
+  return { start, finish: t, leaveDays: skipped };
+}
 
 /** Open Jira work (days) a developer finishes before project tasks, when the project counts it. */
 export function jiraLoadOf(plan: Pick<EstimateProject, 'useJiraLoad'>, d: Developer): number {
@@ -161,15 +220,25 @@ export function schedule(plan: SchedulePlan, holidays: Holiday[]): ScheduleResul
   const cal = new WorkCalendar(plan.startDate, holidays, plan.skipCutiBersama);
   const warnings: string[] = [];
   // Open Jira work is done first, at full days: the developer joins the project after it.
-  const devs: (Developer & { free: number; jiraDays: number; last?: number; effort: number; busy: number; count: number })[] = plan.developers.map((d) => ({
-    ...d,
-    allocation: Math.min(1, Math.max(0.1, Number(d.allocation) || 1)),
-    free: jiraLoadOf(plan, d),
-    jiraDays: jiraLoadOf(plan, d),
-    effort: 0,
-    busy: 0,
-    count: 0,
-  }));
+  // Busy elsewhere until a date: they join then. Their Jira load already contains that other work,
+  // so the later of the two counts, not the sum.
+  const devs: (Developer & { free: number; jiraDays: number; fromDays: number; fromReason?: string; leave: Set<number>; leaveDays: number; last?: number; effort: number; busy: number; count: number })[] = plan.developers.map((d) => {
+    const av = plan.availability?.[d.id];
+    const fromDays = av?.from ? cal.offsetOf(av.from) : 0;
+    return {
+      ...d,
+      allocation: Math.min(1, Math.max(0.1, Number(d.allocation) || 1)),
+      free: Math.max(jiraLoadOf(plan, d), fromDays),
+      jiraDays: jiraLoadOf(plan, d),
+      fromDays,
+      fromReason: av?.fromReason,
+      leave: leaveOffsets(cal, av?.leaves),
+      leaveDays: 0,
+      effort: 0,
+      busy: 0,
+      count: 0,
+    };
+  });
 
   const byId = new Map(plan.tasks.map((t, i) => [t.id, i]));
   const nodes: Node[] = plan.tasks.map((task, index) => ({ task, index, deps: [], dependents: [], rank: 0 }));
@@ -227,13 +296,13 @@ export function schedule(plan: SchedulePlan, holidays: Holiday[]): ScheduleResul
       if (!candidates.length) r.issues.push('no-developer');
       if (readyBy !== undefined) pred.set(i, readyBy);
     } else {
-      let best: { dev: (typeof devs)[number]; start: number; finish: number } | undefined;
+      let best: { dev: (typeof devs)[number]; start: number; finish: number; leaveDays: number } | undefined;
       for (const dev of candidates) {
-        const start = Math.max(readyAt, dev.free);
-        const finish = start + effort / dev.allocation;
-        if (!best || finish < best.finish - EPS || (Math.abs(finish - best.finish) < EPS && dev.effort < best.dev.effort)) best = { dev, start, finish };
+        const placed = placeWork(Math.max(readyAt, dev.free), effort, dev.allocation, dev.leave);
+        if (!best || placed.finish < best.finish - EPS || (Math.abs(placed.finish - best.finish) < EPS && dev.effort < best.dev.effort)) best = { dev, ...placed };
       }
-      const { dev, start, finish } = best!;
+      const { dev, start, finish, leaveDays } = best!;
+      dev.leaveDays += leaveDays;
       r.developerId = dev.id;
       r.start = start;
       r.finish = finish;
@@ -247,8 +316,10 @@ export function schedule(plan: SchedulePlan, holidays: Holiday[]): ScheduleResul
         } else if (dev.last !== undefined) {
           r.waitedFor = { kind: 'developer', id: plan.tasks[dev.last].id, title: plan.tasks[dev.last].title };
           pred.set(i, dev.last);
-        } else if (dev.jiraDays > EPS && Math.abs(start - dev.jiraDays) < EPS) {
+        } else if (dev.jiraDays > EPS && Math.abs(start - dev.jiraDays) < EPS && dev.jiraDays >= dev.fromDays) {
           r.waitedFor = { kind: 'jira', id: dev.id, title: `beban Jira ${dev.name} (${dev.jiraDays} hari)` };
+        } else if (dev.fromDays > EPS || dev.leave.size) {
+          r.waitedFor = { kind: 'availability', id: dev.id, title: dev.fromDays > EPS && start - dev.fromDays < 1 ? `${dev.name} ${dev.fromReason ?? `baru tersedia ${cal.dateAt(dev.fromDays)}`}` : `${dev.name} cuti` };
         }
       }
       dev.free = finish;
@@ -304,6 +375,8 @@ export function schedule(plan: SchedulePlan, holidays: Holiday[]): ScheduleResul
       finishDate: d.count ? cal.endDate(d.free) : undefined,
       utilization: spanDays ? d.busy / spanDays : 0,
       jiraLoadDays: d.jiraDays,
+      availableFrom: d.fromDays > 0 ? cal.dateAt(d.fromDays) : undefined,
+      leaveDays: d.leaveDays,
     })),
     daysOff: endDate ? cal.daysOffBetween(startDate, endDate) : [],
     complete: result.every((t) => !t.issues.length),

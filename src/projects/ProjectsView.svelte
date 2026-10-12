@@ -349,7 +349,7 @@
               {/if}
             </div>
           {:else if tab === 'estimate'}
-            <EstimatePanel bind:project={current} drafts={draftList} />
+            <EstimatePanel bind:project={current} drafts={draftList} {projects} />
           {:else}
             <E2EPanel project={current} drafts={draftList} />
           {/if}

@@ -1,4 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import type { TeamMember } from '../../src/lib/roster/types.ts';
+import { projectAvailability } from '../../src/lib/roster/availability.ts';
 import { join } from 'node:path';
 import type { EstimateProject, Holiday } from '../../src/lib/estimate/types.ts';
 import { schedule } from '../../src/lib/estimate/schedule.ts';
@@ -22,6 +24,8 @@ import type { MobileData } from './server.ts';
 export interface MobileSources {
   projects: () => Promise<EstimateProject[]>;
   holidays: () => Promise<Holiday[]>;
+  /** Team roster, for availability (other projects, leave) in the target dates; optional. */
+  members?: () => Promise<TeamMember[]>;
   drafts: () => Promise<{ id: string; markdown: string; scopePlan?: string }[]>;
   jiraIssues: (keys: string[]) => Promise<JiraIssue[]>;
   /** null when GitLab is not configured or unreachable. */
@@ -61,7 +65,7 @@ export function connectorMobileData(src: MobileSources, now: () => number = Date
 
   async function load() {
     if (cache && now() - cache.at < CACHE_MS) return cache;
-    const [projects, drafts, holidays, targets, peaks] = await Promise.all([src.projects(), src.drafts(), src.holidays().catch(() => []), src.reportTargets(), readPeaks()]);
+    const [projects, drafts, holidays, targets, peaks, members] = await Promise.all([src.projects(), src.drafts(), src.holidays().catch(() => []), src.reportTargets(), readPeaks(), src.members?.().catch(() => []) ?? Promise.resolve([] as TeamMember[])]);
     const tasksByDraft = new Map(drafts.map((d) => [d.id, parseScopeTasks(d.markdown, d.scopePlan)]));
     const keys = [...new Set(projects.flatMap((p) => p.draftIds.flatMap((id) => (tasksByDraft.get(id) ?? []).flatMap((t) => t.jiraKeys))))];
 
@@ -108,7 +112,7 @@ export function connectorMobileData(src: MobileSources, now: () => number = Date
       let targetComplete = false;
       if (p.tasks.length) {
         try {
-          const s = schedule(p, holidays);
+          const s = schedule({ ...p, availability: projectAvailability(p, members, projects, holidays) }, holidays);
           targetDate = s.endDate;
           targetComplete = s.complete;
         } catch {

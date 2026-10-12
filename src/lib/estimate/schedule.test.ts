@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_HOLIDAYS } from './holidays';
-import { WorkCalendar, lockAssignments, nextWorkingDay, recommendAssignees, schedule } from './schedule';
+import { WorkCalendar, lockAssignments, nextWorkingDay, placeWork, recommendAssignees, schedule } from './schedule';
 import type { Developer, EstimateTask } from './types';
 import { roleOf, roundEffort } from './types';
 
@@ -182,5 +182,44 @@ describe('Jira load and assignee recommendations', () => {
     expect(locked.map((t) => t.assigneeId)).toEqual(['citra', 'citra']);
     // Already fixed tasks stay as they are.
     expect(lockAssignments({ ...plan, tasks: [{ ...plan.tasks[0], assigneeId: 'budi' }, plan.tasks[1]] }, [])[0].assigneeId).toBe('budi');
+  });
+});
+
+describe('availability from the team roster', () => {
+  // 2026-10-05 is a Monday.
+  const base = { startDate: '2026-10-05', skipCutiBersama: true };
+  const tasks = [task('[BACKEND][S][X] - a', 2)];
+
+  it('starts a developer busy in another project on their first free day', () => {
+    const r = schedule({ ...base, developers: [dev('a', 'BACKEND')], tasks, availability: { a: { from: '2026-10-08', fromReason: 'masih di Proyek Lain sampai 7 Okt' } } }, []);
+    expect(r.tasks[0]).toMatchObject({ start: 3, finish: 5, startDate: '2026-10-08', endDate: '2026-10-09' });
+    expect(r.tasks[0].waitedFor).toEqual({ kind: 'availability', id: 'a', title: 'a masih di Proyek Lain sampai 7 Okt' });
+    expect(r.developers[0].availableFrom).toBe('2026-10-08');
+  });
+
+  it('skips leave days in the middle of a task and at its start', () => {
+    const mid = schedule({ ...base, developers: [dev('a', 'BACKEND')], tasks: [task('[BACKEND][S][X] - a', 3)], availability: { a: { leaves: [{ start: '2026-10-06', end: '2026-10-07' }] } } }, []);
+    expect(mid.tasks[0]).toMatchObject({ start: 0, finish: 5, endDate: '2026-10-09' });
+    expect(mid.developers[0].leaveDays).toBe(2);
+    const atStart = schedule({ ...base, developers: [dev('a', 'BACKEND')], tasks, availability: { a: { leaves: [{ start: '2026-10-05', end: '2026-10-05' }] } } }, []);
+    expect(atStart.tasks[0]).toMatchObject({ start: 1, finish: 3, startDate: '2026-10-06' });
+    expect(atStart.tasks[0].waitedFor).toMatchObject({ kind: 'availability', title: 'a cuti' });
+  });
+
+  it('counts the later of Jira load and other-project work, not both', () => {
+    const d: Developer = { ...dev('a', 'BACKEND'), jira: { accountId: 'acc', displayName: 'a' }, jiraLoad: { days: 3, issues: 1, loadedAt: '' } };
+    const r = schedule({ ...base, useJiraLoad: true, developers: [d], tasks, availability: { a: { from: '2026-10-07' } } }, []);
+    expect(r.tasks[0].start).toBe(3);
+    expect(r.tasks[0].waitedFor?.kind).toBe('jira');
+  });
+
+  it('gives the task to a colleague when one developer is on leave', () => {
+    const r = schedule({ ...base, developers: [dev('a', 'BACKEND'), dev('b', 'BACKEND')], tasks, availability: { a: { leaves: [{ start: '2026-10-05', end: '2026-10-09' }] } } }, []);
+    expect(r.tasks[0].developerId).toBe('b');
+  });
+
+  it('places part-time work around leave', () => {
+    expect(placeWork(0, 1, 0.5, new Set([1]))).toEqual({ start: 0, finish: 3, leaveDays: 1 });
+    expect(placeWork(0.5, 0.5, 1, new Set([0]))).toEqual({ start: 1, finish: 1.5, leaveDays: 0 });
   });
 });

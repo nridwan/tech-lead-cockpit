@@ -3,6 +3,9 @@
   import Icon from '../components/Icon.svelte';
   import { estimate } from '../lib/estimate/client';
   import { schedule } from '../lib/estimate/schedule';
+  import { projectAvailability } from '../lib/roster/availability';
+  import { roster } from '../lib/roster/client';
+  import type { TeamMember } from '../lib/roster/types';
   import type { EstimateProject, Holiday } from '../lib/estimate/types';
   import type { Draft } from './drafts.svelte';
 
@@ -11,6 +14,8 @@
 
   let project = $state<EstimateProject | null>(null);
   let holidays = $state<Holiday[]>([]);
+  let all = $state<EstimateProject[]>([]);
+  let members = $state<TeamMember[]>([]);
   let loaded = $state(false);
 
   $effect(() => {
@@ -21,7 +26,9 @@
   async function load(id: string) {
     loaded = false;
     try {
-      const [list, h] = await Promise.all([estimate.projects(), estimate.holidays()]);
+      const [list, h, m] = await Promise.all([estimate.projects(), estimate.holidays(), roster.list().catch(() => [] as TeamMember[])]);
+      all = list;
+      members = m;
       if (draft.id !== id) return;
       project = list.find((p) => p.draftIds.includes(id)) ?? null;
       holidays = h.holidays;
@@ -34,7 +41,7 @@
   const end = $derived.by(() => {
     if (!project) return undefined;
     try {
-      const r = schedule(project, holidays);
+      const r = schedule({ ...project, availability: projectAvailability(project, members, all, holidays) }, holidays);
       return r.complete && r.endDate ? r.endDate : undefined;
     } catch {
       return undefined;

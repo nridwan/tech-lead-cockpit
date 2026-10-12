@@ -29,6 +29,8 @@ import { EstimateInputError, EstimateManager } from './estimate/manager.ts';
 import type { EstimateProject, EstimateRequest } from '../src/lib/estimate/types.ts';
 import { deleteDoc, listDocs, saveDoc, unlockDoc, workspaceDir } from './workspace-docs.ts';
 import { FigmaError, FigmaManager } from './figma.ts';
+import { RosterInputError, RosterStore } from './roster/store.ts';
+import { DEFAULT_DAYS, GitActivity } from './roster/git-activity.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { normalizeEditedFlow } from './qa/generator.ts';
@@ -101,6 +103,8 @@ export interface ConnectorDeps {
   reviewManager?: (deps: ConnectorDeps) => ReviewManager;
   /** Figma (REST API, token in the Keychain); defaults to the process-wide manager. Tests inject one with a fake fetch. */
   figma?: () => FigmaManager;
+  /** Team roster and git activity; defaults to ~/.tech-lead-cockpit/team-roster.json and real `git log`. */
+  roster?: () => { store: RosterStore; git: GitActivity; resolveRoot: (input?: string) => Promise<string> };
   /** Furthest stage per task (anti-regression); defaults to ~/.tech-lead-cockpit/task-peaks.json. */
   taskPeaks?: TaskPeakStore;
   /** E2E test manager; defaults to the process-wide singleton. */
@@ -328,6 +332,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
       if (url.pathname.startsWith(`${PREFIX}/assistant/conversations`)) return await handleConversations(route, url, req, res);
       if (url.pathname.startsWith(`${PREFIX}/gitlab/`)) return await handleGitLab(route, url, req, res, env);
       if (url.pathname.startsWith(`${PREFIX}/figma/`)) return await handleFigma(route, url, req, res, (deps.figma ?? defaultFigma)());
+      if (url.pathname === `${PREFIX}/roster` || url.pathname.startsWith(`${PREFIX}/roster/`)) return await handleRoster(route, url, req, res, (deps.roster ?? defaultRoster)());
       if (url.pathname.startsWith(`${PREFIX}/coder/`)) return await handleCoder(route, url, req, res, env, deps);
       if (route === 'GET /ai/providers') return send(res, 200, await listProviders());
       if (route === 'GET /ai/usage') return send(res, 200, await getUsage(url.searchParams.get('refresh') === '1'));
@@ -1484,6 +1489,49 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
   }
 }
 
+let rosterDeps: ReturnType<NonNullable<ConnectorDeps['roster']>> | undefined;
+const defaultRoster = () => (rosterDeps ??= { store: new RosterStore(), git: new GitActivity(), resolveRoot: (input?: string) => resolveServicesRoot(input || undefined) });
+
+/** Team roster (local file) and recent git activity per repo (read-only `git log`). */
+async function handleRoster(route: string, url: URL, req: IncomingMessage, res: ServerResponse, r: ReturnType<NonNullable<ConnectorDeps['roster']>>) {
+  const daysOf = (v: unknown) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 7 ? Math.min(730, n) : DEFAULT_DAYS;
+  };
+  try {
+    if (route === 'GET /roster') return send(res, 200, await r.store.list());
+    if (route === 'POST /roster') {
+      const body = await readJson<{ member?: Record<string, unknown> }>(req, 64 * 1024);
+      return send(res, 200, await r.store.save(body.member ?? {}));
+    }
+    if (route === 'POST /roster/delete') {
+      const body = await readJson<{ id?: string }>(req, 16 * 1024);
+      return send(res, 200, await r.store.remove(String(body.id ?? '')));
+    }
+    if (route === 'GET /roster/git-authors') {
+      const root = await r.resolveRoot(url.searchParams.get('root') ?? undefined).catch((e: Error) => Promise.reject(new RosterInputError(e.message)));
+      return send(res, 200, await r.git.authors(root, daysOf(url.searchParams.get('days'))));
+    }
+    if (route === 'POST /roster/activity') {
+      const body = await readJson<{ services?: unknown; root?: string; days?: number }>(req, 64 * 1024);
+      const days = daysOf(body.days);
+      let root: string;
+      try {
+        root = await r.resolveRoot(body.root);
+      } catch (e) {
+        // Without a codebase the ranking still works on availability; say why familiarity is missing.
+        return send(res, 200, { days, services: [], error: (e as Error).message });
+      }
+      const services = (Array.isArray(body.services) ? body.services : []).map((s) => String(s).slice(0, 100));
+      return send(res, 200, await r.git.activity(root, services, days));
+    }
+    return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
+  } catch (e) {
+    if (e instanceof RosterInputError) return fail(res, 400, { error: e.message, code: 'bad-request' });
+    throw e;
+  }
+}
+
 let figmaManager: FigmaManager | undefined;
 const defaultFigma = () => (figmaManager ??= new FigmaManager({ readToken: () => readKeychain(FIGMA_SERVICE), workspaceFor: workspaceDir }));
 
@@ -2078,6 +2126,7 @@ function remoteFor(env: Env, deps: ConnectorDeps): RemoteAccess {
       taskPeaks: deps.taskPeaks ?? defaultTaskPeaks,
       projects: () => (deps.estimate ?? estimateManager)().listProjects(),
       holidays: async () => (await (deps.estimate ?? estimateManager)().holidays()).holidays,
+      members: () => (deps.roster ?? defaultRoster)().store.list(),
       drafts: async () => (await draftFiles.list()) as { id: string; markdown: string; scopePlan?: string }[],
       jiraIssues: async (keys) => {
         const { cfg } = await loadJiraConfig(env);

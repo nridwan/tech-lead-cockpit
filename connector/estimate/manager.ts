@@ -108,7 +108,8 @@ export function validateProject(raw: Partial<EstimateProject>): EstimateProject 
       jira && Number.isFinite(loadDays) && loadDays >= 0
         ? { days: Math.min(500, Math.round(loadDays * 2) / 2), issues: Math.max(0, Math.floor(Number(d.jiraLoad?.issues) || 0)), loadedAt: String(d.jiraLoad?.loadedAt ?? '').slice(0, 40) }
         : undefined;
-    return { id: ID.test(String(d.id)) ? String(d.id) : randomUUID(), name: devName, role: d.role, allocation: Number.isFinite(allocation) ? Math.min(1, Math.max(0.1, allocation)) : 1, ...(jira ? { jira } : {}), ...(jiraLoad ? { jiraLoad } : {}) };
+    const memberId = ID.test(String(d.memberId ?? '')) ? String(d.memberId) : undefined;
+    return { id: ID.test(String(d.id)) ? String(d.id) : randomUUID(), name: devName, role: d.role, allocation: Number.isFinite(allocation) ? Math.min(1, Math.max(0.1, allocation)) : 1, ...(jira ? { jira } : {}), ...(jiraLoad ? { jiraLoad } : {}), ...(memberId ? { memberId } : {}) };
   });
   const seen = new Set<string>();
   const tasks: EstimateTask[] = [];
