@@ -215,11 +215,13 @@ describe('ReleaseManager', () => {
     expect(plan.warnings.some((w) => w.includes('MU-77'))).toBe(true);
     expect(plan.formUrl).toContain(`${GL}/payments/core-payment/-/merge_requests/new?`);
     expect(decodeURIComponent(plan.formUrl)).toContain('merge_request[target_branch]=master');
-    expect(plan.description).toContain('- Env baru `REFUND_LIMIT` sudah diset di server');
+    // Release MRs carry no description; the GitLab form gets none either.
+    expect('description' in plan).toBe(false);
+    expect(decodeURIComponent(plan.formUrl)).not.toContain('merge_request[description]');
 
     expect((await m.mrPlan(r.id, 's1', 'nope')).warnings).toContain('Branch nope tidak ada di payments/core-payment.');
-    await expect(m.createMr(r.id, 's1', { sourceBranch: 'master', title: 'x', description: '' })).rejects.toThrow(/sama dengan branch target/);
-    const created = await m.createMr(r.id, 's1', { sourceBranch: 'staging', title: plan.title, description: plan.description });
+    await expect(m.createMr(r.id, 's1', { sourceBranch: 'master', title: 'x' })).rejects.toThrow(/sama dengan branch target/);
+    const created = await m.createMr(r.id, 's1', { sourceBranch: 'staging', title: plan.title });
     expect(created).toMatchObject({ created: true, ref: 'payments/core-payment!40' });
     expect(created.release.services[0].mrs.map((x) => x.ref)).toEqual(['payments/core-payment!40']);
   });

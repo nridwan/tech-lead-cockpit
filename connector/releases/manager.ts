@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { EstimateProject } from '../../src/lib/estimate/types.ts';
 import type { MrCommit, MrDetail, MrFileChange, MrSummary } from '../../src/lib/gitlab/types.ts';
-import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
+import { mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
@@ -453,7 +453,7 @@ export class ReleaseManager {
 
   /**
    * What a new MR from the source branch into the target branch of one service would contain:
-   * commits, files, env/migration/query findings, the service's tickets, a title and description,
+   * commits, files, env/migration/query findings, the service's tickets, a title (no description),
    * and the filled-in GitLab form. Only reads GitLab.
    */
   async mrPlan(id: string, serviceId: string, sourceBranch?: string): Promise<MrPlan> {
@@ -506,7 +506,6 @@ export class ReleaseManager {
     if (unsure.length) warnings.push(`${unsure.length} tiket hanya cocok samar di kode ${source}, cek manual: ${unsure.map((t) => t.key).join(', ')}.`);
     const unattributed = unattributedFiles(cmp.changes, tickets.flatMap((t) => (t.code ? [{ summary: t.summary, evidence: t.code }] : []))).slice(0, 50);
     const title = mrTitle(release, service);
-    const description = mrDescription(release, service, { commits: cmp.commits, findings, tickets });
     const base = (await this.deps.gitlabBaseUrl?.().catch(() => '')) ?? '';
     return {
       serviceId,
@@ -525,8 +524,7 @@ export class ReleaseManager {
       unattributed,
       outOfScope,
       title,
-      description,
-      formUrl: base ? newMrFormUrl(base, path, source, target, title, description) : '',
+      formUrl: base ? newMrFormUrl(base, path, source, target, title) : '',
       ...(scopes ? { canCreate: scopes.includes('api') } : {}),
       releaseBranch: planReleaseBranch(cmp.commits, new Set([...scopeKeys, ...accepted]), { base: target, branch: releaseBranchName(release) }),
       warnings,
@@ -537,7 +535,7 @@ export class ReleaseManager {
    * Creates the release MR in GitLab (the user confirmed in the UI) and adds it to the service.
    * An MR already open for the same branches is attached instead of creating a second one.
    */
-  async createMr(id: string, serviceId: string, req: { sourceBranch: string; title: string; description: string }): Promise<{ release: Release; ref: string; webUrl: string; created: boolean }> {
+  async createMr(id: string, serviceId: string, req: { sourceBranch: string; title: string }): Promise<{ release: Release; ref: string; webUrl: string; created: boolean }> {
     const release = await this.get(id);
     const service = this.service(release, serviceId);
     const path = service.gitlabPath!;
@@ -549,7 +547,7 @@ export class ReleaseManager {
     const gitlab = await this.deps.gitlab();
     if (!gitlab?.createMr) throw new ReleaseInputError('GitLab belum terhubung.');
     const existing = await gitlab.openMrFor?.(path, source, release.targetBranch).catch(() => undefined);
-    const mr = existing ?? (await gitlab.createMr(path, { source, target: release.targetBranch, title, description: req.description.slice(0, 50_000) }));
+    const mr = existing ?? (await gitlab.createMr(path, { source, target: release.targetBranch, title, description: '' }));
     const services = release.services.map((s) =>
       s.id === serviceId && !s.mrs.some((m) => m.ref === mr.ref) ? { ...s, mrs: [...s.mrs, { ref: mr.ref, projectPath: mr.projectPath, iid: mr.iid, webUrl: mr.webUrl, title: mr.title, via: 'manual' as const }] } : s,
     );

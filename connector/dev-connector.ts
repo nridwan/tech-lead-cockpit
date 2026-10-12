@@ -1612,10 +1612,10 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       }
     }
     if (route === 'POST /releases/mr/create') {
-      const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; title?: string; description?: string }>(req, 128 * 1024);
+      const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; title?: string }>(req, 128 * 1024);
       const base = { ts: new Date().toISOString(), action: 'gitlab.mr.create' as const, spaceKey: 'GitLab', title: String(body.title ?? '').slice(0, 200), attachments: 0 };
       try {
-        const r = await rm.createMr(idOf(body.id), String(body.serviceId ?? ''), { sourceBranch: String(body.sourceBranch ?? ''), title: String(body.title ?? ''), description: String(body.description ?? '') });
+        const r = await rm.createMr(idOf(body.id), String(body.serviceId ?? ''), { sourceBranch: String(body.sourceBranch ?? ''), title: String(body.title ?? '') });
         await audit({ ...base, title: `${r.created ? 'Buat' : 'Tautkan'} MR ${r.ref}`, result: 'success' }).catch(() => {});
         return send(res, 200, r);
       } catch (e) {

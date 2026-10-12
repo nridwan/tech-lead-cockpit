@@ -10,7 +10,6 @@
   import { openExternal } from '../lib/open-external';
   import { releaseBranchCommands, type BranchPick } from '../lib/release/branch';
   import { releases } from '../lib/release/client';
-  import { aiMrSection } from '../lib/release/mr';
   import type { AiPick, MrPlan, Release, ReleaseAiJob, ReleaseService } from '../lib/release/types';
 
   /**
@@ -35,7 +34,6 @@
   let loading = $state(false);
   let error = $state('');
   let title = $state('');
-  let description = $state('');
   let creating = $state(false);
   let showChanges = $state(false);
   let changeFilter = $state('');
@@ -59,28 +57,16 @@
 
   // AI read of what the source branch brings: tickets, changes without a ticket (endpoints
   // registered without a task, too), server needs. Starts by itself when the plan loads.
-  let baseDescription = '';
   const aiMr = new AiJobWatch(
     () => release.id,
     'mr',
     () => service.id,
     (job) => {
-      if (job.status === 'done') applyAiMr(job);
-      else if (job.status === 'error') toasts.show(`Cek AI MR gagal: ${job.error}`, 'err', 6000);
+      if (job.status === 'error') toasts.show(`Cek AI MR gagal: ${job.error}`, 'err', 6000);
     },
   );
   const aiMrDone = $derived(aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan?.sourceBranch ? aiMr.job : null);
   const verdictOf = (key: string) => aiMrDone?.verdicts?.find((v) => v.key === key);
-
-  /** Adds the AI's findings to the description, unless the user already edited it. */
-  function applyAiMr(job: ReleaseAiJob) {
-    if (!plan || job.sourceBranch !== plan.sourceBranch) return;
-    const extra = aiMrSection(job);
-    if (extra && description === baseDescription) {
-      description = `${baseDescription}\n\n${extra}`;
-      baseDescription = description;
-    }
-  }
 
   async function startAiMr() {
     if (!plan) return;
@@ -119,8 +105,6 @@
     try {
       plan = await releases.mrPlan(release.id, service.id, source.trim());
       title = plan.title;
-      description = plan.description;
-      baseDescription = description;
       branchName = plan.releaseBranch.branch;
       picks = plan.releaseBranch.commits.map((c) => ({ ...c }));
       // A dirty source: suggest the release branch right away.
@@ -140,8 +124,7 @@
       }
       // The AI read of this branch: reuse the last one, else start it.
       await aiMr.load();
-      if (aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan.sourceBranch) applyAiMr(aiMr.job);
-      else if (!aiMr.running && plan.files) void startAiMr();
+      if (!(aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan.sourceBranch) && !aiMr.running && plan.files) void startAiMr();
     } catch (e) {
       error = (e as Error).message;
       plan = null;
@@ -160,7 +143,7 @@
     if (!ok) return;
     creating = true;
     try {
-      const r = await releases.createMr(release.id, service.id, { sourceBranch: plan.sourceBranch, title, description });
+      const r = await releases.createMr(release.id, service.id, { sourceBranch: plan.sourceBranch, title });
       toasts.show(r.created ? `MR ${r.ref} dibuat.` : `MR ${r.ref} sudah ada, ditautkan ke rilis.`, 'ok', 4000);
       oncreated(r.release);
     } catch (e) {
@@ -470,7 +453,6 @@
         </section>
         <section>
           <label class="field"><span>Judul MR</span><input class="input" bind:value={title} /></label>
-          <label class="field"><span>Deskripsi</span><textarea class="input mono desc" rows="16" bind:value={description}></textarea></label>
         </section>
       </div>
 
@@ -707,9 +689,6 @@
   }
   .field > span {
     font-weight: 600;
-  }
-  .desc {
-    font-size: 12px;
   }
   .note,
   .warn {

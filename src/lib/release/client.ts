@@ -41,7 +41,7 @@ export const releases = {
   /** What a new MR for one service would contain (reads GitLab only). */
   mrPlan: (id: string, serviceId: string, sourceBranch?: string) => call<MrPlan>('/mr/plan', { id, serviceId, sourceBranch }),
   /** Creates the MR in GitLab (token with scope api), or attaches the one already open. */
-  createMr: (id: string, serviceId: string, req: { sourceBranch: string; title: string; description: string }) =>
+  createMr: (id: string, serviceId: string, req: { sourceBranch: string; title: string }) =>
     call<{ release: Release; ref: string; webUrl: string; created: boolean }>('/mr/create', { id, serviceId, ...req }),
   /** Release branch from the target with the chosen commits cherry-picked (token with scope api). */
   createReleaseBranch: (id: string, serviceId: string, branch: string, picks: { sha: string; title?: string }[]) =>

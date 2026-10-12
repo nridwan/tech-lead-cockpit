@@ -335,7 +335,6 @@ export interface MrPlan {
   /** Tickets in the source branch commits that are not in the release: would be carried along. */
   outOfScope: OutOfScope[];
   title: string;
-  description: string;
   /** GitLab's "new merge request" form, filled in (no write scope needed). */
   formUrl: string;
   /** The token has the `api` scope; undefined when GitLab can't tell. */
