@@ -25,14 +25,22 @@ Modul **Rilis** mengelola satu rilis lintas service: MR ke branch produksi (defa
 | Migrasi | File di folder migrasi (`migrations/`, `db/migrate/`, `flyway/`, `prisma/migrations/`, …) atau pola nama `V1__x.sql` / `20261012_x.sql`; migrasi lama yang diubah ditandai |
 | Query manual | File `.sql` di luar folder migrasi dan folder test |
 | Model tanpa migrasi | File model/entity/schema berubah tanpa migrasi di MR yang sama |
-| Commit tanpa Jira key | Judul commit tanpa key (merge commit diabaikan) |
+| Commit tanpa Jira key | Judul commit tanpa key (merge commit diabaikan); informasi saja, tidak lagi memblokir scope |
 | Status MR | state, draft, konflik, pipeline, approval vs minimal, branch target |
 
 Diff yang terpotong (GitLab atau batas Cockpit) ditandai supaya env dicek manual.
 
 ## 🎯 Scope vs kode
 
-Rilis dianggap **scope sesuai** hanya bila: semua tiket scope ada di kode MR rilis, tidak ada tiket di luar scope yang terbawa, dan tidak ada commit tanpa Jira key. "Kode" = Jira key di judul commit (termasuk merge commit dari branch fitur) dan nama branch sumber (`codeKeys`); judul/deskripsi MR tidak dihitung (deskripsi MR buatan Cockpit memuat daftar tiket).
+Tiket dicari di **isi kode** yang akan dirilis, bukan di pesan commit ([`src/lib/release/evidence.ts`](../../../src/lib/release/evidence.ts)). Kode per service (`ReleaseReport.sources`): diff MR hidup ke target, atau bila belum ada MR, GitLab compare `target...branch sumber service` (ref `group/repo@branch`). Tiket hanya dicari di kode service-nya sendiri (semua service bila tiket tidak menyebut service).
+
+- **Kuat** (`strength: 'strong'`, tiket dihitung ada di kode): endpoint dari Detail Task TAD (`taskEndpoints`, juga ekor path-nya karena prefix router group) ada di baris yang ditambah, atau satu identifier/path/route memuat semua kata nama tiket (`GetDetailCashinChannel`, `get_detail_cashin_channel`, `/cashin/channel/detail`). Kata jenis pekerjaan dibuang (Develop, Enhance, API, Membuat, …), kata petunjuk opsional (get, model, scheduler, response, …), kata Indonesia diterjemahkan (kode→code, transaksi→transaction, …). Minimal dua kata; satu kata tidak bisa membedakan tiket.
+- **Samar** (`weak`, `unsure`): semua kata ada di satu file tapi tersebar, atau hanya di file test. Ditampilkan "perlu dicek" dan memblokir scope sesuai sampai dicek.
+- Jira key di commit/branch tetap dibaca sebagai pendukung (`byKey`), termasuk key yang menempel `_` (`[MU-1859_MU-1860]`) dan key huruf kecil di nama branch untuk prefix proyek scope.
+- Tiket yang service-nya tidak ada di rilis (mis. IOS/ANDROID) ditandai `noRepo`, diperingatkan, tidak dihitung hilang.
+- File yang berubah tapi tidak terkait tiket scope mana pun (`unattributed`, tetangga folder yang namanya memuat kata tiket dianggap bagian fiturnya) ditampilkan sebagai kandidat perubahan yang ikut terbawa.
+
+Rilis dianggap **scope sesuai** bila semua tiket scope terlihat di kode (bukti kuat atau key), tidak ada yang hanya samar, dan tidak ada tiket di luar scope yang terbawa (key di commit/branch, `codeKeys`; judul/deskripsi MR tidak dihitung).
 
 - Tiket di kode yang bukan scope (`outOfScope`) diambil judul/statusnya dari Jira. Yang codename-nya milik rilis (lebih tua dari jangkauan pencarian codename) otomatis masuk scope.
 - Aksi di tab Tiket: **Masukkan ke scope** (ke `jiraKeys`) atau **Sengaja ikut** (ke `accepted`, dengan alasan) supaya tidak terus jadi peringatan.
@@ -40,7 +48,7 @@ Rilis dianggap **scope sesuai** hanya bila: semua tiket scope ada di kode MR ril
 
 ## 🔀 Buat MR
 
-Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service yang belum ada di commit, dan tiket di luar scope yang akan terbawa. Judul mengikuti format tim `[{TARGET}] - {RELEASE}` (mis. `[MASTER] - Cashin Toko`), bisa diganti per rilis lewat `mrTitleTemplate` (placeholder `{TARGET}` `{RELEASE}` `{VERSION}` `{SERVICE}` `{CODENAME}`, kolom "Judul MR" di header rilis). Judul dan deskripsi (tiket, checklist server, commit) tetap bisa diedit sebelum dibuat.
+Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). Rencana membandingkan branch sumber (default `staging`, per rilis) dengan branch target lewat GitLab compare: commit, file, env/migrasi/query, tiket service dicek dari diff (bukti file + nama/endpoint yang cocok), file tanpa tiket, dan tiket di luar scope yang akan terbawa. Judul mengikuti format tim `[{TARGET}] - {RELEASE}` (mis. `[MASTER] - Cashin Toko`), bisa diganti per rilis lewat `mrTitleTemplate` (placeholder `{TARGET}` `{RELEASE}` `{VERSION}` `{SERVICE}` `{CODENAME}`, kolom "Judul MR" di header rilis). Judul dan deskripsi (tiket, checklist server, commit) tetap bisa diedit sebelum dibuat.
 - **Buat MR**: lewat API, butuh token scope `api` (dicek dari `/personal_access_tokens/self`), selalu dikonfirmasi, audit `gitlab.mr.create`. MR terbuka untuk branch yang sama ditautkan, bukan dibuat dua kali.
 - **Buka form di GitLab**: form "new merge request" GitLab yang sudah terisi; tidak butuh scope tulis.
 - **Review perubahan**: di jendela Buat MR, daftar file yang berubah (dengan diff, total maks. ±1,5 MB) bisa disaring dan dibuka per file sebelum MR dibuat. Di Papan, tombol **Review** per MR membuka MR itu di MR Review (diff, review AI termasuk di background, kesesuaian TAD) lewat `OPEN_MR_KEY`.
@@ -57,9 +65,11 @@ Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). 
 
 - Tiket dari TAD, codename (dicari longgar `summary ~ "CODE"` lalu dicocokkan persis di tag judul mana pun: `[TYPE][SERVICE][CODENAME] - Nama` maupun pola mobile `[IOS][CODENAME][UI] Nama`), dan tiket tambahan.
 - Service tiket: tag sebelum codename; untuk pola mobile, platformnya (ANDROID, IOS). Nama service dianggap sama hanya bila persis sama (tanpa beda huruf/tanda baca) atau beda kata generik (`-service`, `-api`, …): `core-tcico` ≠ `core-tcico-ultimate`. Pemetaan ke folder repo (`matchRepo`) memakai aturan yang sama; nama platform boleh cocok ke folder yang memuatnya.
-- Tiket "di MR" bila key-nya muncul di commit, judul, branch, atau deskripsi MR rilis.
+- Tiket "di kode" dari bukti di diff (lihat Scope vs kode); key di commit/branch sebagai pendukung.
 - `devDone` memakai aturan status laporan progres (`jiraDevStage`).
-- Service yang disentuh tiket tapi tidak punya MR hidup ke branch target, dan judul tiket di luar format, dilaporkan.
+- Service rilis yang tidak punya MR hidup ke branch target, dan judul tiket di luar format, dilaporkan. Laporan yang disimpan disaring ke service rilis saat ini (`forCurrentServices`), jadi service yang sudah dihapus tidak muncul lagi.
+- Item checklist dan langkah milik service yang tidak ada di rilis dibuang saat disimpan (store), `removeServices` mencocokkan nama service tanpa beda huruf.
+- Discover hanya memakai judul dan branch MR untuk menambah service baru, bukan deskripsi MR.
 
 ## 🗂️ Format dokumen Deployment ([`src/lib/release/deployment.ts`](../../../src/lib/release/deployment.ts))
 
@@ -93,7 +103,8 @@ HTML dibangun dari data dengan semua nilai di-escape; hanya `p`, `b`, `a` (http/
 | [`src/releases/PublishReleaseModal.svelte`](../../../src/releases/PublishReleaseModal.svelte) | Publish/perbarui dokumen rilis di Confluence |
 | [`src/lib/release/`](../../../src/lib/release/) | Tipe, cek MR, cakupan, import, pesan share, dokumen Markdown, client |
 | [`connector/releases/store.ts`](../../../connector/releases/store.ts) | `~/.tech-lead-cockpit/releases/<id>.json` (0600), validasi |
-| [`connector/releases/manager.ts`](../../../connector/releases/manager.ts) | Tiket, discover, check (laporan di `releases/reports/`), import, share |
+| [`connector/releases/manager.ts`](../../../connector/releases/manager.ts) | Tiket, discover, check (baca kode per service, laporan di `releases/reports/`), import, share |
+| [`src/lib/release/evidence.ts`](../../../src/lib/release/evidence.ts) | Cari tiket di diff: endpoint TAD, kata nama tiket di identifier/path, file tanpa tiket |
 | [`connector/releases/repos.ts`](../../../connector/releases/repos.ts) | `git remote get-url origin` per repo di folder Services → path project GitLab |
 | [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch`, `compare` (dengan `parentIds`), `branchExists`, `openMrFor`, `tokenScopes`; tulis (scope `api`, setelah konfirmasi): `createMr`, `createBranch`, `cherryPick` |
 | [`src/releases/CreateMrModal.svelte`](../../../src/releases/CreateMrModal.svelte) | Buat MR per service: perbandingan, temuan, scope, judul/deskripsi, API atau form GitLab |

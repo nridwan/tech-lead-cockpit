@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RELEASE_STATUSES, type DeployInfo, type DeployPerson, type Release, type ReleaseItem, type ReleaseMrRef, type ReleaseService, type ReleaseStep } from '../../src/lib/release/types.ts';
+import { sameService } from '../../src/lib/release/coverage.ts';
 import { DATA_DIR } from '../paths.ts';
 
 /** Releases, one JSON file each (0600) under ~/.tech-lead-cockpit/releases/. */
@@ -99,6 +100,9 @@ export function validateRelease(raw: Partial<Release>): Release {
     if (!t) return [];
     return [{ id: id(st.id), kind: st.kind === 'rollback' ? 'rollback' : 'deploy', text: t, ...(st.service ? { service: text(st.service, 100) } : {}), done: st.done === true, ...(st.done && stamp(st.doneAt) ? { doneAt: stamp(st.doneAt) } : {}) }];
   });
+  // Items and steps of a service that is not in the release (left by an old import or a removed
+  // service) are dropped, so the checklist and the document only hold this release's services.
+  const own = (x: { service?: string }) => !x.service || services.some((s) => sameService(s.name, x.service!));
   const now = new Date().toISOString();
   const src = raw.source;
   const pub = raw.published;
@@ -116,8 +120,8 @@ export function validateRelease(raw: Partial<Release>): Release {
     codenames: [...new Set(arr<string>(raw.codenames, 20).map((c) => text(c, 40).toUpperCase()).filter((c) => /^[A-Z0-9][A-Z0-9_-]{0,39}$/.test(c)))],
     jiraKeys: [...new Set(arr<string>(raw.jiraKeys, 500).map(String).filter((k) => KEY.test(k)))],
     services,
-    items,
-    steps,
+    items: items.filter(own),
+    steps: steps.filter(own),
     ...(typeof raw.docMarkdown === 'string' && raw.docMarkdown.trim() ? { docMarkdown: raw.docMarkdown.slice(0, 500_000) } : {}),
     ...(src && (src.kind === 'confluence' || src.kind === 'markdown')
       ? { source: { kind: src.kind, title: text(src.title, 200), ...(src.pageId && /^\d{1,20}$/.test(String(src.pageId)) ? { pageId: String(src.pageId) } : {}), ...(Number.isInteger(src.version) ? { version: Number(src.version) } : {}), ...(src.url ? { url: text(src.url, 500) } : {}), importedAt: stamp(src.importedAt) ?? now } }

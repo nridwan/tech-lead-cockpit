@@ -29,7 +29,7 @@ export function mrDescription(
   const lines = [`Rilis **${release.name}${release.version ? ` ${release.version}` : ''}**${release.date ? ` (${release.date})` : ''} untuk **${service.name}**.`, ''];
   if (data.tickets.length) {
     lines.push('### Tiket', '');
-    for (const t of data.tickets) lines.push(`- ${t.key} ${t.summary} (${t.status})${t.inSource ? '' : ' ⚠️ belum ada di commit'}`);
+    for (const t of data.tickets) lines.push(`- ${t.key} ${t.summary} (${t.status})${t.inSource ? '' : t.unsure ? ' ⚠️ perlu dicek, cocok samar di kode' : ' ⚠️ belum terlihat di kode'}`);
     lines.push('');
   }
   const f = data.findings;

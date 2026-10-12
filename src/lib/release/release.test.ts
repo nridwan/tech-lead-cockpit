@@ -271,16 +271,20 @@ describe('release report', () => {
       ['MU-13', [], false, 'MOBILE-APP'],
       ['MU-14', [], false, undefined],
     ]);
-    expect(rep.servicesWithoutMr).toEqual(['MOBILE-APP']);
+    // Only release services need an MR; a service only named by a ticket is a ticket without a repo.
+    expect(rep.servicesWithoutMr).toEqual([]);
+    expect(rep.tickets.find((t) => t.key === 'MU-13')!.noRepo).toBe(true);
     expect(rep.badTitles).toEqual([{ key: 'MU-14', summary: 'perbaiki refund' }]);
     expect(rep.warnings).toEqual([
       'payments/core-payment!12 punya konflik dengan master.',
       'payments/core-payment!12: pipeline failed.',
       'payments/core-payment!12: 1/2 approval.',
-      '2 tiket scope belum ada di kode MR rilis mana pun.',
+      '1 tiket scope tidak terlihat di kode yang akan dirilis: MU-14.',
+      '1 tiket untuk MOBILE-APP tidak punya service di rilis ini: tidak dicek ke kode.',
       '2 tiket belum selesai development di Jira.',
-      'Service MOBILE-APP belum punya MR ke master.',
     ]);
+    const lonely = buildReport({ ...r, services: [...r.services, { id: 's2', name: 'core-auth', mrs: [], order: 2 }] }, tickets, [check({})]);
+    expect(lonely.servicesWithoutMr).toEqual(['core-auth']);
   });
 });
 
@@ -313,10 +317,9 @@ describe('scope check against the code', () => {
     expect(accepted.scope).toMatchObject({ carried: 0, accepted: 1, matched: true });
   });
 
-  it('is not matched while commits have no Jira key, and ignores closed MRs', () => {
+  it('does not block on commits without a Jira key, and ignores closed MRs', () => {
     const rep = buildReport(r, scopeTickets, [check({ keyCommits: { 'MU-12': ['a'], 'MU-13': ['b'] }, commitsWithoutKey: ['fix typo'] })]);
-    expect(rep.scope).toMatchObject({ commitsWithoutKey: 1, matched: false });
-    expect(rep.warnings).toContain('1 commit tanpa Jira key: scope-nya tidak bisa dipastikan.');
+    expect(rep.scope).toMatchObject({ commitsWithoutKey: 1, matched: true });
     const closed = buildReport(r, scopeTickets, [check({ state: 'closed', keyCommits: { 'MU-99': ['x'] } })]);
     expect(closed.outOfScope).toEqual([]);
   });

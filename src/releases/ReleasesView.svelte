@@ -189,7 +189,7 @@
     if (!current) return;
     const next = el.value as Release['status'];
     if ((next === 'ready' || next === 'released') && (!report || !report.scope?.matched)) {
-      const why = !report ? 'Cek rilis belum dijalankan.' : `Scope belum sesuai: ${report.scope.missing} tiket belum ada di kode, ${report.scope.carried} tiket di luar scope terbawa, ${report.scope.commitsWithoutKey} commit tanpa Jira key.`;
+      const why = !report ? 'Cek rilis belum dijalankan.' : `Scope belum sesuai: ${report.scope.missing} tiket tidak terlihat di kode, ${report.scope.unsure ?? 0} perlu dicek manual, ${report.scope.carried} tiket di luar scope terbawa.`;
       const ok = await confirmDialog({ title: `Tandai "${RELEASE_STATUS_LABELS[next]}"?`, message: `${why} Tetap ubah status?`, confirmText: 'Tetap ubah', danger: true });
       if (!ok) {
         el.value = current.status;
@@ -420,10 +420,10 @@
         <div class="scope-card" class:ok={sc.matched}>
           <strong><Icon name={sc.matched ? 'check' : 'alert'} size={14} /> {sc.matched ? 'Scope sesuai: kode di MR rilis sama dengan scope rilis.' : 'Scope belum sesuai dengan kode yang akan dirilis.'}</strong>
           <span class="small">
-            {sc.inCode}/{sc.tickets} tiket scope ada di kode ·
-            <span class:bad={sc.missing}>{sc.missing} belum ada di kode</span> ·
-            <span class:bad={sc.carried}>{sc.carried} di luar scope terbawa</span> ·
-            <span class:bad={sc.commitsWithoutKey}>{sc.commitsWithoutKey} commit tanpa Jira key</span>{sc.accepted ? ` · ${sc.accepted} sengaja ikut` : ''}
+            {sc.inCode}/{sc.tickets} tiket scope terlihat di kode ·
+            <span class:bad={sc.missing}>{sc.missing} tidak terlihat</span> ·
+            <span class:bad={sc.unsure}>{sc.unsure ?? 0} perlu dicek</span> ·
+            <span class:bad={sc.carried}>{sc.carried} di luar scope terbawa</span>{sc.noRepo ? ` · ${sc.noRepo} tanpa repo di rilis` : ''}{sc.accepted ? ` · ${sc.accepted} sengaja ikut` : ''}
           </span>
           {#if !sc.matched}<button class="link-btn small" onclick={() => (tab = 'tickets')}>Lihat detail</button>{/if}
         </div>
@@ -565,16 +565,44 @@
           {#if !report}
             <p class="muted">Klik <strong>Jalankan cek</strong> untuk melihat tiket rilis (dari TAD, codename, dan tiket tambahan) dan apakah sudah masuk MR.</p>
           {:else}
+            <p class="muted small">Tiket dicari di <strong>isi kode</strong> yang akan dirilis (diff MR, atau compare branch sumber dengan {current.targetBranch} kalau belum ada MR): endpoint dari Detail Task TAD, atau nama tiket di nama fungsi, struct, route, dan path file. Jira key di commit hanya pendukung.</p>
+            {#if report.sources?.length}
+              <ul class="sources small">
+                {#each report.sources as src (src.ref)}
+                  <li>
+                    <strong>{src.service}</strong> · <span class="mono">{src.ref}</span> · {src.error ? `gagal: ${src.error}` : `${src.files} file berubah`}
+                    {#if src.unattributed.length}
+                      <details><summary>{src.unattributed.length}{src.unattributed.length >= 30 ? '+' : ''} file tidak terkait tiket scope mana pun</summary><ul class="mono">{#each src.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
             <table class="tbl">
-              <thead><tr><th>Tiket</th><th>Judul</th><th>Status</th><th>Sumber</th><th>Di MR rilis</th></tr></thead>
+              <thead><tr><th>Tiket</th><th>Judul</th><th>Status</th><th>Sumber</th><th>Di kode</th></tr></thead>
               <tbody>
                 {#each report.tickets as t (t.key)}
-                  <tr class:missing={!t.inMrs.length}>
+                  <tr class:missing={!t.inMrs.length && !t.noRepo} class:unsure={t.unsure}>
                     <td class="mono">{t.key}</td>
                     <td>{t.summary}</td>
                     <td><span class="badge" class:b-ok={t.devDone} class:b-warn={!t.devDone}>{t.status}</span></td>
                     <td class="small">{t.from === 'tad' ? 'TAD' : t.from === 'codename' ? 'codename' : 'tambahan'}</td>
-                    <td class="small">{t.inMrs.length ? t.inMrs.join(', ') : 'belum'}</td>
+                    <td class="small">
+                      {#if t.noRepo}
+                        <span class="muted">{t.service} tidak ada di rilis</span>
+                      {:else if t.code?.length || t.byKey?.length}
+                        {#if t.inMrs.length}<strong>ada</strong>{:else}<strong class="warn-text">perlu dicek</strong>{/if}
+                        {#each t.code ?? [] as e (e.ref)}
+                          <div class="evidence" title={e.ref}>
+                            {e.strength === 'strong' ? '✓' : '≈'}
+                            {#each e.hits.slice(0, 2) as h (h.path)}<span class="mono">{h.path}</span> <span class="muted">({h.match})</span> {/each}
+                          </div>
+                        {/each}
+                        {#if t.byKey?.length && !t.code?.some((e) => e.strength === 'strong')}<div class="muted">key di commit {t.byKey.join(', ')}</div>{/if}
+                      {:else}
+                        tidak terlihat
+                      {/if}
+                    </td>
                   </tr>
                 {:else}
                   <tr><td colspan="5" class="muted">Tidak ada tiket. Pilih proyek, isi codename, atau tambah tiket.</td></tr>
@@ -1074,6 +1102,22 @@
   }
   .tbl tr.missing td {
     background: var(--err-soft);
+  }
+  .tbl tr.unsure td {
+    background: var(--warn-soft, var(--err-soft));
+  }
+  .evidence {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+  }
+  .sources {
+    margin: 0 0 10px;
+    padding-left: 18px;
+  }
+  .sources details ul {
+    max-height: 180px;
+    overflow: auto;
+    margin: 4px 0;
   }
   .docs {
     display: grid;

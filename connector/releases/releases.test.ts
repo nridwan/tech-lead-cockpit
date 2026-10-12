@@ -221,6 +221,47 @@ describe('ReleaseManager', () => {
     expect(created.release.services[0].mrs.map((x) => x.ref)).toEqual(['payments/core-payment!40']);
   });
 
+  it('reads the code of a service without an MR from its source branch and finds tickets in it', async () => {
+    // "Refund API" alone is one word; the TAD Detail Task's endpoint finds it.
+    const tad = `${TAD}\n# Detail Task\n\n## [BACKEND][CORE-PAYMENT][SWITCHING] - Refund API\n\n#### Endpoint\nPOST /v1/payment/refund\n`;
+    const m = manager({
+      drafts: async () => [{ id: 'd1', markdown: tad }],
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async () => true,
+        compare: async (_p, target, source) => ({
+          commits: [{ id: '1', shortId: 'a1', title: 'feat: refund', authorName: 'Budi', createdAt: '' }],
+          changes:
+            source === 'release/switching' && target === 'master'
+              ? [
+                  { oldPath: 'api/refund.go', newPath: 'api/refund.go', newFile: true, renamedFile: false, deletedFile: false, diff: '+v1.POST("/payment/refund", RefundApi)\n+func RetryRefund() {}', additions: 2, deletions: 0 },
+                  { oldPath: 'api/promo.go', newPath: 'promo/banner.go', newFile: true, renamedFile: false, deletedFile: false, diff: '+func Banner() {}', additions: 1, deletions: 0 },
+                ]
+              : [],
+          truncated: false,
+        }),
+      }),
+    });
+    const r = await m.store.save({
+      name: 'Switching',
+      projectIds: ['p1'],
+      services: [
+        { id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', sourceBranch: 'release/switching', mrs: [], order: 1 },
+        { id: 's2', name: 'core-ledger', gitlabPath: 'payments/core-ledger', mrs: [], order: 2 },
+      ],
+    } as never);
+    const { report } = await m.check(r.id);
+    const ref = 'payments/core-payment@release/switching';
+    // No commit carries a key: the tickets are found in the diff.
+    expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: [ref], code: [{ ref, strength: 'strong', hits: [{ path: 'api/refund.go', match: '/payment/refund' }] }] });
+    expect(report.sources).toEqual([
+      { service: 'core-payment', ref, kind: 'branch', files: 2, unattributed: ['promo/banner.go'] },
+      { service: 'core-ledger', ref: 'payments/core-ledger@staging', kind: 'branch', files: 0, unattributed: [] },
+    ]);
+    expect(report.warnings).toContain('core-ledger: staging tidak punya perubahan dibanding master.');
+  });
+
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
     const calls: string[] = [];
     const m = manager({

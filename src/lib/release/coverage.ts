@@ -1,7 +1,7 @@
 import { parseTaskTitle } from '../tad/template';
 import { jiraDevStage } from '../tad/progress-report';
 import { jiraKeysIn } from './checks';
-import type { MrCheck, OutOfScope, Release, ReleaseReport, TicketCoverage } from './types';
+import type { CodeEvidence, CodeSource, MrCheck, OutOfScope, Release, ReleaseReport, TicketCoverage } from './types';
 
 /**
  * Puts the MR checks and the release's tickets together: which tickets reached a release MR,
@@ -17,6 +17,8 @@ export interface ReleaseTicket {
   /** Service from the TAD row, else from the [TYPE][SERVICE][CODENAME] title. */
   service?: string;
   from: TicketCoverage['from'];
+  /** Endpoints from the ticket's TAD Detail Task, to find it in the code. */
+  endpoints?: string[];
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -67,12 +69,21 @@ export function ticketService(summary: string, codenames: string[] = []): string
 }
 
 /**
- * Jira keys an MR carries in its code: its commits (merge commits name the feature branches) and
- * its source branch. Not the MR title or description: a description listing tickets says nothing
- * about the code.
+ * Jira keys an MR carries in its commits (merge commits name the feature branches) and its source
+ * branch. Not the MR title or description: a description listing tickets says nothing about the
+ * code. Branch names are often lowercase (feature/mu-1859-x): with `prefixes` (the scope's Jira
+ * projects) those count too.
  */
-export function codeKeys(c: MrCheck): string[] {
-  return [...new Set([...Object.keys(c.keyCommits ?? {}), ...jiraKeysIn(c.sourceBranch)])];
+export function codeKeys(c: MrCheck, prefixes: Iterable<string> = []): string[] {
+  const known = new Set(prefixes);
+  const lower = known.size ? jiraKeysIn(c.sourceBranch.toUpperCase()).filter((k) => known.has(k.split('-')[0])) : [];
+  return [...new Set([...Object.keys(c.keyCommits ?? {}), ...jiraKeysIn(c.sourceBranch), ...lower])];
+}
+
+/** What the connector read from the code: per service source, and per ticket key what showed. */
+export interface CodeFindings {
+  sources: CodeSource[];
+  evidence: Map<string, CodeEvidence[]>;
 }
 
 const live = (c: MrCheck) => !c.error && (c.state === 'opened' || c.state === 'merged');
@@ -80,8 +91,16 @@ const live = (c: MrCheck) => !c.error && (c.state === 'opened' || c.state === 'm
 /**
  * @param extra summary/status of keys found in the code but not in the scope (fetched by the caller).
  */
-export function buildReport(release: Release, tickets: ReleaseTicket[], checks: MrCheck[], now = new Date().toISOString(), extra: Map<string, { summary: string; status: string }> = new Map()): ReleaseReport {
-  const keysByMr = new Map(checks.filter(live).map((c) => [c.ref, new Set(codeKeys(c))]));
+export function buildReport(
+  release: Release,
+  tickets: ReleaseTicket[],
+  checks: MrCheck[],
+  now = new Date().toISOString(),
+  extra: Map<string, { summary: string; status: string }> = new Map(),
+  code: CodeFindings = { sources: [], evidence: new Map() },
+): ReleaseReport {
+  const prefixes = new Set(tickets.map((t) => t.key.split('-')[0]));
+  const keysByMr = new Map(checks.filter(live).map((c) => [c.ref, new Set(codeKeys(c, prefixes))]));
   const seen = new Set<string>();
   const coverage: TicketCoverage[] = [];
   const badTitles: ReleaseReport['badTitles'] = [];
@@ -91,24 +110,31 @@ export function buildReport(release: Release, tickets: ReleaseTicket[], checks: 
     const parsed = parseTaskTitle(t.summary);
     // Tags in another order (e.g. mobile [IOS][CODENAME][UI]) are a convention, not a broken title.
     if (!parsed && t.from !== 'tad' && ticketTags(t.summary).length < 3) badTitles.push({ key: t.key, summary: t.summary });
+    const service = t.service || parsed?.service;
+    const evidence = code.evidence.get(t.key) ?? [];
+    const byKey = [...keysByMr].filter(([, keys]) => keys.has(t.key)).map(([ref]) => ref);
+    // The code decides; a key in a commit only adds where it is.
+    const inMrs = [...new Set([...evidence.filter((e) => e.strength === 'strong').map((e) => e.ref), ...byKey])];
+    const noRepo = Boolean(service) && !release.services.some((s) => sameService(s.name, service!));
     coverage.push({
       key: t.key,
       summary: t.summary,
       status: t.status,
-      service: t.service || parsed?.service,
+      service,
       from: t.from,
-      inMrs: [...keysByMr].filter(([, keys]) => keys.has(t.key)).map(([ref]) => ref),
+      inMrs,
+      ...(evidence.length ? { code: evidence } : {}),
+      ...(byKey.length ? { byKey } : {}),
+      ...(!inMrs.length && evidence.length ? { unsure: true } : {}),
+      ...(noRepo ? { noRepo: true } : {}),
       devDone: jiraDevStage({ status: t.status, statusCategory: t.statusCategory } as Parameters<typeof jiraDevStage>[0]) === 'merged',
     });
   }
 
-  // A service needs a live MR (open or merged) into the target branch.
+  // Each release service needs a live MR (open or merged) into the target branch. Services only
+  // named by tickets are not in the release: they are reported as tickets without a repo.
   const liveRefs = new Set(checks.filter((c) => c.state === 'opened' || c.state === 'merged').map((c) => c.ref));
-  const touched = [...new Set([...release.services.map((s) => s.name), ...coverage.map((c) => c.service).filter((s): s is string => Boolean(s))])];
-  const servicesWithoutMr = touched.filter((name) => {
-    const svc = release.services.find((s) => sameService(s.name, name));
-    return !svc || !svc.mrs.some((m) => liveRefs.has(m.ref) || !checks.some((c) => c.ref === m.ref));
-  });
+  const servicesWithoutMr = release.services.filter((svc) => !svc.mrs.some((m) => liveRefs.has(m.ref) || !checks.some((c) => c.ref === m.ref))).map((s) => s.name);
 
   const warnings: string[] = [];
   for (const c of checks) {
@@ -140,22 +166,51 @@ export function buildReport(release: Release, tickets: ReleaseTicket[], checks: 
   }
   const outOfScope = [...carried.values()].filter((o) => !accepted.has(o.key)).sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
   const commitsWithoutKey = checks.filter(live).reduce((n, c) => n + c.commitsWithoutKey.length, 0);
-  const missing = coverage.filter((c) => !c.inMrs.length);
-  if (missing.length) warnings.push(`${missing.length} tiket scope belum ada di kode MR rilis mana pun.`);
+  const missing = coverage.filter((c) => !c.inMrs.length && !c.unsure && !c.noRepo);
+  const unsure = coverage.filter((c) => c.unsure && !c.noRepo);
+  const noRepo = coverage.filter((c) => c.noRepo);
+  if (missing.length) warnings.push(`${missing.length} tiket scope tidak terlihat di kode yang akan dirilis: ${missing.map((c) => c.key).join(', ')}.`);
+  if (unsure.length) warnings.push(`${unsure.length} tiket hanya cocok samar di kode, perlu dicek manual: ${unsure.map((c) => c.key).join(', ')}.`);
+  if (noRepo.length) {
+    const names = [...new Set(noRepo.map((c) => c.service!))];
+    warnings.push(`${noRepo.length} tiket untuk ${names.join(', ')} tidak punya service di rilis ini: tidak dicek ke kode.`);
+  }
   if (outOfScope.length) warnings.push(`${outOfScope.length} tiket di luar scope ikut terbawa: ${outOfScope.map((o) => o.key).join(', ')}.`);
-  if (commitsWithoutKey) warnings.push(`${commitsWithoutKey} commit tanpa Jira key: scope-nya tidak bisa dipastikan.`);
+  for (const src of code.sources) {
+    if (src.error) warnings.push(`${src.service}: kode tidak terbaca (${src.error}).`);
+    else if (src.kind === 'branch' && !src.files) warnings.push(`${src.service}: ${src.ref.split('@')[1]} tidak punya perubahan dibanding ${release.targetBranch}.`);
+  }
   const notDone = coverage.filter((c) => !c.devDone);
   if (notDone.length) warnings.push(`${notDone.length} tiket belum selesai development di Jira.`);
   for (const s of servicesWithoutMr) warnings.push(`Service ${s} belum punya MR ke ${release.targetBranch}.`);
 
   const scope = {
     tickets: coverage.length,
-    inCode: coverage.length - missing.length,
+    inCode: coverage.filter((c) => c.inMrs.length).length,
     missing: missing.length,
     carried: outOfScope.length,
     accepted: [...carried.keys()].filter((k) => accepted.has(k)).length,
     commitsWithoutKey,
-    matched: coverage.length > 0 && !missing.length && !outOfScope.length && !commitsWithoutKey,
+    unsure: unsure.length,
+    noRepo: noRepo.length,
+    matched: coverage.length > 0 && !missing.length && !unsure.length && !outOfScope.length,
   };
-  return { releaseId: release.id, checkedAt: now, mrs: checks, tickets: coverage, servicesWithoutMr, badTitles, outOfScope, scope, warnings };
+  return { releaseId: release.id, checkedAt: now, mrs: checks, tickets: coverage, servicesWithoutMr, sources: code.sources, badTitles, outOfScope, scope, warnings };
+}
+
+/**
+ * A kept report after services left the release: what it said about those services no longer
+ * applies (their missing MR, their code). Ticket lines stay until the next check.
+ */
+export function forCurrentServices(release: Release, report: ReleaseReport): ReleaseReport {
+  const inRelease = (name: string) => release.services.some((s) => sameService(s.name, name));
+  const gone = (report.servicesWithoutMr ?? []).filter((n) => !inRelease(n));
+  const sources = (report.sources ?? []).filter((s) => inRelease(s.service));
+  if (!gone.length && sources.length === (report.sources ?? []).length) return report;
+  return {
+    ...report,
+    servicesWithoutMr: report.servicesWithoutMr.filter((n) => !gone.includes(n)),
+    sources,
+    warnings: report.warnings.filter((w) => !gone.some((n) => w.startsWith(`Service ${n} `))),
+  };
 }

@@ -6,13 +6,14 @@ import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.t
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { buildReport, codeKeys, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
+import { findEvidence, indexChanges, unattributedFiles, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
-import type { MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
+import type { CodeEvidence, CodeSource, MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
-import { parseScopeTasks } from '../../src/lib/tad/task-links.ts';
+import { parseScopeTasks, taskEndpoints } from '../../src/lib/tad/task-links.ts';
 import { matchRepo } from '../roster/git-activity.ts';
 import { ReleaseInputError, ReleaseStore } from './store.ts';
 
@@ -72,15 +73,19 @@ export class ReleaseManager {
     return r;
   }
 
-  /** TAD tasks of the release's projects: Jira keys, service, and the CODENAMEs they use. */
-  private async tadTasks(release: Release): Promise<{ key: string; service: string; title: string }[]> {
+  /** TAD tasks of the release's projects: Jira keys, service, the CODENAMEs they use, and their endpoints. */
+  private async tadTasks(release: Release): Promise<{ key: string; service: string; title: string; endpoints: string[] }[]> {
     if (!release.projectIds.length) return [];
     const [projects, drafts] = await Promise.all([this.deps.projects(), this.deps.drafts()]);
     const draftIds = new Set(projects.filter((p) => release.projectIds.includes(p.id)).flatMap((p) => p.draftIds));
     return drafts
       .filter((d) => draftIds.has(d.id))
-      .flatMap((d) => parseScopeTasks(d.markdown, d.scopePlan))
-      .flatMap((t) => t.jiraKeys.map((key) => ({ key, service: t.service || parseTaskTitle(t.title)?.service || '', title: t.title })));
+      .flatMap((d) =>
+        parseScopeTasks(d.markdown, d.scopePlan).flatMap((t) => {
+          const endpoints = taskEndpoints(d.markdown, t.title);
+          return t.jiraKeys.map((key) => ({ key, service: t.service || parseTaskTitle(t.title)?.service || '', title: t.title, endpoints }));
+        }),
+      );
   }
 
   /** The release's CODENAMEs: typed in, plus those of its TAD task titles. */
@@ -147,7 +152,8 @@ export class ReleaseManager {
     const push = (t: ReleaseTicket) => !seen.has(t.key) && (seen.add(t.key), out.push(t));
     for (const t of tad) {
       const i = byKey.get(t.key);
-      push(i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' });
+      const base = i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' as const };
+      push(t.endpoints.length ? { ...base, endpoints: t.endpoints } : base);
     }
     for (const i of byCodename) push(toTicket(i, 'codename'));
     for (const k of release.jiraKeys) {
@@ -189,7 +195,9 @@ export class ReleaseManager {
       try {
         for (const mr of await gitlab.mrsToBranch(release.targetBranch, 30)) {
           if (mr.state === 'merged' && mr.updatedAt < since) continue;
-          const mentions = jiraKeysIn(`${mr.title} ${mr.sourceBranch} ${mr.description}`).some((k) => keys.has(k));
+          // The MR's own branch and title, not its description: a description listing tickets
+          // (or copied from another release) says nothing about the repo.
+          const mentions = jiraKeysIn(`${mr.title} ${mr.sourceBranch}`).some((k) => keys.has(k));
           const svc = services.find((s) => s.gitlabPath === mr.projectPath) ?? (mentions ? serviceForPath(services, mr.projectPath) : undefined);
           if (!svc && !mentions) continue;
           let target = svc;
@@ -212,11 +220,17 @@ export class ReleaseManager {
     return { release: saved, addedMrs, addedServices, warnings };
   }
 
-  /** Checks every MR, refreshes the env/migration/SQL items and keeps the report. */
+  /**
+   * Checks every MR, reads the code of every service (its live MRs' diffs, or the compare of its
+   * source branch with the target when it has no MR yet), finds each ticket in that code,
+   * refreshes the env/migration/SQL items and keeps the report.
+   */
   async check(id: string): Promise<{ release: Release; report: ReleaseReport }> {
     const release = await this.get(id);
     const gitlab = await this.deps.gitlab();
     const checks: MrCheck[] = [];
+    const diffs = new Map<string, FileText[]>();
+    const changed = new Map<string, MrFileChange[]>();
     const refs = release.services.flatMap((s) => s.mrs);
     for (const m of refs) {
       if (!gitlab) {
@@ -224,7 +238,12 @@ export class ReleaseManager {
         continue;
       }
       try {
-        checks.push(checkMr(await gitlab.mr(m.projectPath, m.iid)));
+        const detail = await gitlab.mr(m.projectPath, m.iid);
+        checks.push(checkMr(detail));
+        if (detail.state === 'opened' || detail.state === 'merged') {
+          diffs.set(m.ref, indexChanges(detail.changes));
+          changed.set(m.ref, detail.changes);
+        }
       } catch (e) {
         checks.push(blankCheck(m.ref, m.webUrl, m.title, release.targetBranch, (e as Error).message));
       }
@@ -242,10 +261,55 @@ export class ReleaseManager {
         for (const p of c.sqlOutside) add('sql', p, s.name);
       }
     }
+
+    // The code of each service: its live MRs, else what its source branch would bring.
+    const sources: CodeSource[] = [];
+    const serviceRefs = new Map<string, string[]>();
+    for (const s of release.services) {
+      const live = s.mrs.filter((m) => diffs.has(m.ref)).map((m) => m.ref);
+      if (live.length) {
+        serviceRefs.set(s.id, live);
+        for (const ref of live) sources.push({ service: s.name, ref, kind: 'mr', files: changed.get(ref)!.length, unattributed: [] });
+        continue;
+      }
+      if (!s.gitlabPath || !gitlab?.compare) continue;
+      const branch = (s.sourceBranch || release.sourceBranch || 'staging').trim();
+      const ref = `${s.gitlabPath}@${branch}`;
+      try {
+        if (gitlab.branchExists && !(await gitlab.branchExists(s.gitlabPath, branch))) throw new Error(`branch ${branch} tidak ada`);
+        const cmp = await gitlab.compare(s.gitlabPath, release.targetBranch, branch);
+        diffs.set(ref, indexChanges(cmp.changes));
+        changed.set(ref, cmp.changes);
+        serviceRefs.set(s.id, [ref]);
+        sources.push({ service: s.name, ref, kind: 'branch', files: cmp.changes.length, unattributed: [] });
+      } catch (e) {
+        sources.push({ service: s.name, ref, kind: 'branch', files: 0, unattributed: [], error: (e as Error).message });
+      }
+    }
+
     const { tickets, warnings } = await this.tickets(release);
     const live = checks.filter((c) => !c.error && c.state !== 'closed');
-    const extra = await this.resolveOutside(release, tickets, live.flatMap(codeKeys), warnings);
-    const report = buildReport(release, tickets, checks, this.now(), extra);
+    const prefixes = new Set(tickets.map((t) => t.key.split('-')[0]));
+    const extra = await this.resolveOutside(release, tickets, live.flatMap((c) => codeKeys(c, prefixes)), warnings);
+
+    // Each ticket is looked for in the code of its own service (all services when it names none).
+    const evidence = new Map<string, CodeEvidence[]>();
+    const byRef = new Map<string, { summary: string; evidence: CodeEvidence }[]>();
+    for (const t of tickets) {
+      const services = release.services.filter((s) => !t.service || sameService(s.name, t.service));
+      for (const s of services) {
+        for (const ref of serviceRefs.get(s.id) ?? []) {
+          const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, diffs.get(ref)!);
+          if (!found) continue;
+          const e = { ref, ...found };
+          evidence.set(t.key, [...(evidence.get(t.key) ?? []), e]);
+          byRef.set(ref, [...(byRef.get(ref) ?? []), { summary: t.summary, evidence: e }]);
+        }
+      }
+    }
+    for (const src of sources) if (!src.error) src.unattributed = unattributedFiles(changed.get(src.ref) ?? [], byRef.get(src.ref) ?? []).slice(0, 30);
+
+    const report = buildReport(release, tickets, checks, this.now(), extra, { sources, evidence });
     report.warnings.unshift(...warnings);
     const saved = await this.deps.store.save({ ...release, items, services: release.services.map((s) => ({ ...s, mrs: s.mrs.map((m) => ({ ...m, title: checks.find((c) => c.ref === m.ref && !c.error)?.title ?? m.title })) })) });
     await this.saveReport(report);
@@ -254,7 +318,8 @@ export class ReleaseManager {
 
   async report(id: string): Promise<ReleaseReport | null> {
     try {
-      return JSON.parse(await readFile(join(this.deps.reportDir, `${(await this.get(id)).id}.json`), 'utf8')) as ReleaseReport;
+      const release = await this.get(id);
+      return forCurrentServices(release, JSON.parse(await readFile(join(this.deps.reportDir, `${release.id}.json`), 'utf8')) as ReleaseReport);
     } catch {
       return null;
     }
@@ -333,7 +398,7 @@ export class ReleaseManager {
     const findings = { envAdded: c.envAdded, envReadInCode: c.envReadInCode, migrations: c.migrations, sqlOutside: c.sqlOutside, modelWithoutMigration: c.modelWithoutMigration, commitsWithoutKey: c.commitsWithoutKey, jiraKeys: c.jiraKeys };
     const { tickets: all, warnings: tw } = await this.tickets(release).catch((e: Error) => ({ tickets: [] as ReleaseTicket[], warnings: [e.message] }));
     warnings.push(...tw);
-    const keysInCode = codeKeys(c);
+    const keysInCode = codeKeys(c, new Set(all.map((t) => t.key.split('-')[0])));
     const extra = await this.resolveOutside(release, all, keysInCode, warnings);
     const scopeKeys = new Set(all.map((t) => t.key));
     const accepted = new Set((release.accepted ?? []).map((a) => a.key));
@@ -341,10 +406,22 @@ export class ReleaseManager {
       .filter((k) => !scopeKeys.has(k) && !accepted.has(k))
       .map((k) => ({ key: k, ...(extra.get(k) ?? {}), ...(extra.get(k) && parseTaskTitle(extra.get(k)!.summary) ? { codename: parseTaskTitle(extra.get(k)!.summary)!.codeName } : {}), mrs: [], commits: c.keyCommits[k] ?? [] }));
     if (outOfScope.length) warnings.push(`${outOfScope.length} tiket di luar scope akan ikut terbawa dari ${source}: ${outOfScope.map((o) => o.key).join(', ')}.`);
-    if (c.commitsWithoutKey.length) warnings.push(`${c.commitsWithoutKey.length} commit tanpa Jira key: scope-nya tidak bisa dipastikan.`);
-    const tickets = all.filter((t) => t.service && sameService(t.service, service.name)).map((t) => ({ key: t.key, summary: t.summary, status: t.status, inSource: keysInCode.includes(t.key) }));
-    const missing = tickets.filter((t) => !t.inSource);
-    if (missing.length) warnings.push(`${missing.length} tiket ${service.name} tidak ada di commit ${source}: ${missing.map((t) => t.key).join(', ')}.`);
+    // Tickets are found in the diff itself; a key in a commit only supports it.
+    const files = indexChanges(cmp.changes);
+    const ref = `${path}@${source}`;
+    const tickets = all
+      .filter((t) => t.service && sameService(t.service, service.name))
+      .map((t) => {
+        const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, files);
+        const byKey = keysInCode.includes(t.key);
+        const inSource = found?.strength === 'strong' || byKey;
+        return { key: t.key, summary: t.summary, status: t.status, inSource, ...(found ? { code: { ref, ...found } } : {}), ...(byKey ? { byKey } : {}), ...(!inSource && found ? { unsure: true } : {}) };
+      });
+    const missing = tickets.filter((t) => !t.inSource && !t.unsure);
+    const unsure = tickets.filter((t) => t.unsure);
+    if (missing.length) warnings.push(`${missing.length} tiket ${service.name} tidak terlihat di kode ${source}: ${missing.map((t) => t.key).join(', ')}.`);
+    if (unsure.length) warnings.push(`${unsure.length} tiket hanya cocok samar di kode ${source}, cek manual: ${unsure.map((t) => t.key).join(', ')}.`);
+    const unattributed = unattributedFiles(cmp.changes, tickets.flatMap((t) => (t.code ? [{ summary: t.summary, evidence: t.code }] : []))).slice(0, 50);
     const title = mrTitle(release, service);
     const description = mrDescription(release, service, { commits: cmp.commits, findings, tickets });
     const base = (await this.deps.gitlabBaseUrl?.().catch(() => '')) ?? '';
@@ -362,6 +439,7 @@ export class ReleaseManager {
       truncated: cmp.truncated,
       findings,
       tickets,
+      unattributed,
       outOfScope,
       title,
       description,

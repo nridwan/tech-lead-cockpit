@@ -297,12 +297,15 @@ export function servicesOutsideScope(release: Release, report: { tickets: { serv
 /** Removes services (and their checklist items) from a release. */
 export function removeServices(release: Release, ids: string[]): Release {
   const gone = new Set(ids);
-  const names = new Set(release.services.filter((s) => gone.has(s.id)).map((s) => s.name));
+  const names = release.services.filter((s) => gone.has(s.id)).map((s) => s.name);
+  const kept = release.services.filter((s) => !gone.has(s.id));
+  // Items and steps of a removed service go too, whatever case their service name is written in.
+  const orphan = (service?: string) => Boolean(service) && names.some((n) => sameService(n, service!)) && !kept.some((s) => sameService(s.name, service!));
   return {
     ...release,
-    services: release.services.filter((s) => !gone.has(s.id)).map((s, i) => ({ ...s, order: i + 1 })),
-    items: release.items.filter((i) => !i.service || !names.has(i.service)),
-    steps: release.steps.filter((x) => !x.service || !names.has(x.service)),
+    services: kept.map((s, i) => ({ ...s, order: i + 1 })),
+    items: release.items.filter((i) => !orphan(i.service)),
+    steps: release.steps.filter((x) => !orphan(x.service)),
   };
 }
 

@@ -206,10 +206,19 @@
             </ul>
           {/if}
           {#if plan.tickets.length}
-            <h4>Tiket {service.name}</h4>
+            <h4>Tiket {service.name} <span class="muted small">· dicek dari isi diff {plan.sourceBranch}</span></h4>
             <ul class="small tickets">
-              {#each plan.tickets as t (t.key)}<li class:missing={!t.inSource}><span class="mono">{t.key}</span> {t.summary} <span class="muted">· {t.status}{t.inSource ? '' : ' · belum ada di commit'}</span></li>{/each}
+              {#each plan.tickets as t (t.key)}
+                <li class:missing={!t.inSource && !t.unsure} class:unsure={t.unsure}>
+                  <span class="mono">{t.key}</span> {t.summary}
+                  <span class="muted">· {t.status} · {t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
+                  {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h (h.path)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
+                </li>
+              {/each}
             </ul>
+            {#if plan.unattributed?.length}
+              <details class="small"><summary>{plan.unattributed.length} file tidak terkait tiket {service.name} mana pun (cek apakah ikut terbawa)</summary><ul class="mono">{#each plan.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
+            {/if}
           {/if}
           {#if plan.commits.length}
             <h4>Commit</h4>
@@ -307,6 +316,12 @@
     overflow: auto;
   }
   .findings .w,
+  .tickets .unsure {
+    color: var(--warn);
+  }
+  .evidence {
+    overflow-wrap: anywhere;
+  }
   .tickets .missing {
     color: var(--warn, #b45309);
   }

@@ -6,7 +6,8 @@ import type { MrCheck } from './types';
  * patterns only, so the result is predictable and the same on every run.
  */
 
-export const JIRA_KEY = /\b(?!(?:UTF|ISO|SHA|TLS|SSL|HTTP|RFC|PCI|AES|RSA|MD|CVE)-)[A-Z][A-Z0-9]{1,9}-\d{1,6}\b/g;
+/** A Jira key, also when glued to `_` or `/` ([MU-1859_MU-1860], feature/MU-12-x). */
+export const JIRA_KEY = /(?<![A-Za-z0-9])(?!(?:UTF|ISO|SHA|TLS|SSL|HTTP|RFC|PCI|AES|RSA|MD|CVE)-)[A-Z][A-Z0-9]{1,9}-\d{1,6}(?!\d)/g;
 
 /** .env, .env.example, .env.staging.sample, config/env.example, … */
 const ENV_FILE = /(^|\/)(\.env(\.[\w-]+)*|[\w-]*\.?env\.(example|sample|template|dist))$/i;

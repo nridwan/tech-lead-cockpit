@@ -258,8 +258,8 @@ function htmlToText(html: string): string {
 
 const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-/** The Detail Task for a scope task: its `## title` section, from a tadgen table or `#### Label` blocks. */
-export function detailTaskSpec(markdown: string, title: string): TaskSpec | undefined {
+/** Lines of the Detail Task section for a scope task: `## title` up to the next heading. DOM-free. */
+export function detailTaskSection(markdown: string, title: string): { heading: string; body: string } | undefined {
   const lines = markdown.split('\n');
   const want = normTitle(title);
   let start = lines.findIndex((l) => /^##\s/.test(l) && normTitle(l.replace(/^##\s+/, '')) === want);
@@ -274,7 +274,28 @@ export function detailTaskSpec(markdown: string, title: string): TaskSpec | unde
   if (start < 0) return undefined;
   let end = lines.findIndex((l, i) => i > start && /^#{1,2}\s/.test(l));
   if (end < 0) end = lines.length;
-  const body = lines.slice(start + 1, end).join('\n');
+  return { heading: lines[start].replace(/^##\s+/, '').trim(), body: lines.slice(start + 1, end).join('\n') };
+}
+
+/** API paths written in a Detail Task (Endpoint field, payload notes): /v1/cashin/channel/detail. */
+export function taskEndpoints(markdown: string, title: string): string[] {
+  const section = detailTaskSection(markdown, title);
+  if (!section) return [];
+  const text = section.body.replace(/<[^>]+>/g, ' ').replace(/&#10;|&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  const out = new Set<string>();
+  for (const m of text.matchAll(/(?:^|[\s"'`(|:])((?:\/[A-Za-z0-9_\-{}:.]+){2,})/g)) {
+    const path = m[1].replace(/[.:]+$/, '');
+    // Paths of files and dates are not endpoints.
+    if (!/\.(go|ts|js|php|java|kt|swift|json|ya?ml|sql|md|png|jpg)$/i.test(path)) out.add(path);
+  }
+  return [...out].slice(0, 10);
+}
+
+/** The Detail Task for a scope task: its `## title` section, from a tadgen table or `#### Label` blocks. */
+export function detailTaskSpec(markdown: string, title: string): TaskSpec | undefined {
+  const section = detailTaskSection(markdown, title);
+  if (!section) return undefined;
+  const body = section.body;
   const fields: Record<string, string> = {};
 
   const table = body.match(/<table[\s\S]*<\/table>/)?.[0];
@@ -307,7 +328,7 @@ export function detailTaskSpec(markdown: string, title: string): TaskSpec | unde
   const text = Object.entries(fields)
     .map(([k, v]) => `### ${k}\n${v}`)
     .join('\n\n');
-  return { title: lines[start].replace(/^##\s+/, '').trim(), fields, text: text || htmlToText(body) };
+  return { title: section.heading, fields, text: text || htmlToText(body) };
 }
 
 export interface TadFlowStep {

@@ -199,10 +199,45 @@ export interface TicketCoverage {
   service?: string;
   /** Where the ticket comes from. */
   from: 'tad' | 'codename' | 'release';
-  /** Release MRs whose commits, title or branch mention it. */
+  /**
+   * Where the work is: release MRs (or `path@branch` when a service has no MR yet) whose diff
+   * shows it (strong code evidence) or whose commits / source branch carry its key.
+   */
   inMrs: string[];
+  /** What the diff shows, per MR or branch: the files and the name or endpoint that matched. */
+  code?: CodeEvidence[];
+  /** Refs whose commits or source branch carry the key (supporting signal, never required). */
+  byKey?: string[];
+  /** Only weak code evidence: the words are spread over a file. Needs a human look. */
+  unsure?: boolean;
+  /** None of the release's services is this ticket's service (e.g. mobile apps): no code to read. */
+  noRepo?: boolean;
   /** Jira says development is finished (ready to test, QA, done…). */
   devDone: boolean;
+}
+
+export interface CodeHit {
+  path: string;
+  /** The endpoint, identifier or path that matched. */
+  match: string;
+}
+
+export interface CodeEvidence {
+  /** MR ref, or `group/repo@branch` for a service without an MR. */
+  ref: string;
+  strength: 'strong' | 'weak';
+  hits: CodeHit[];
+}
+
+/** Code read for a service: its live MR, or the compare of its source branch with the target. */
+export interface CodeSource {
+  service: string;
+  ref: string;
+  kind: 'mr' | 'branch';
+  files: number;
+  /** Changed files no scope ticket accounts for (first 30). */
+  unattributed: string[];
+  error?: string;
 }
 
 /** A ticket whose commits ride along in a release MR without being in the release. */
@@ -228,9 +263,13 @@ export interface ScopeSummary {
   carried: number;
   /** Carried tickets the user accepted on purpose. */
   accepted: number;
-  /** Commits without a Jira key: their scope cannot be told. */
+  /** Commits without a Jira key (informational: tickets are found from the code). */
   commitsWithoutKey: number;
-  /** Nothing missing, nothing carried, no unknown commits. */
+  /** Scope tickets found only by weak code evidence: need a look. */
+  unsure?: number;
+  /** Scope tickets whose service is not in the release (no repo to read). */
+  noRepo?: number;
+  /** Nothing missing, nothing carried. */
   matched: boolean;
 }
 
@@ -239,8 +278,10 @@ export interface ReleaseReport {
   checkedAt: string;
   mrs: MrCheck[];
   tickets: TicketCoverage[];
-  /** Services touched by the tickets that have no MR into the target branch. */
+  /** Release services without a live MR into the target branch. */
   servicesWithoutMr: string[];
+  /** The code read per service (MR diff or branch compare). */
+  sources?: CodeSource[];
   /** Tickets whose title does not follow [TYPE][SERVICE][CODENAME] - Name. */
   badTitles: { key: string; summary: string }[];
   /** Jira keys in release MRs that are not part of the release: changes carried along. */
@@ -266,8 +307,10 @@ export interface MrPlan {
   changes: MrFileChange[];
   truncated: boolean;
   findings: Pick<MrCheck, 'envAdded' | 'envReadInCode' | 'migrations' | 'sqlOutside' | 'modelWithoutMigration' | 'commitsWithoutKey' | 'jiraKeys'>;
-  /** Release tickets of this service, and whether their key is in the source branch commits. */
-  tickets: { key: string; summary: string; status: string; inSource: boolean }[];
+  /** Release tickets of this service, and whether the source branch's diff shows them. */
+  tickets: { key: string; summary: string; status: string; inSource: boolean; unsure?: boolean; code?: CodeEvidence; byKey?: boolean }[];
+  /** Changed files no ticket of this service accounts for. */
+  unattributed?: string[];
   /** Tickets in the source branch commits that are not in the release: would be carried along. */
   outOfScope: OutOfScope[];
   title: string;
