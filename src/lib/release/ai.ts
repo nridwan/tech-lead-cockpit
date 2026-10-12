@@ -524,3 +524,41 @@ export function parsePatchReply(reply: string, ids: string[]): { chosen: Map<str
   }
   return { chosen, notes: strs(json.notes, 15) };
 }
+
+export function safetyPrompt(input: { repo: string; branch: string; from: string; target: string; tickets: AiTicketInput[]; releaseDiff: string; leftOut: string }): string {
+  return [
+    `Repo: ${input.repo}. Branch rilis ${input.branch} dibuat dari ${input.target} dengan hanya SEBAGIAN perubahan ${input.from}. Kombinasi ini belum pernah dites utuh.`,
+    '',
+    'Tiket scope rilis untuk repo ini:',
+    ...input.tickets.map((t) => `- ${t.key}: ${t.summary}`),
+    '',
+    `Perubahan yang IKUT di branch rilis (${input.target} → ${input.branch}):`,
+    input.releaseDiff || '(tidak ada)',
+    '',
+    `Perubahan di ${input.from} yang SENGAJA TIDAK IKUT (${input.branch} → ${input.from}):`,
+    input.leftOut || '(tidak ada)',
+    '',
+    'Tugas: periksa ketergantungan. Apakah kode yang ikut memakai sesuatu yang hanya ada di perubahan yang tidak ikut, atau yang belum ada di target?',
+    '- Fungsi, method, struct/kelas, konstanta, import/package, interface yang dipanggil tapi didefinisikan di perubahan yang tidak ikut.',
+    '- Route/endpoint/handler, kolom atau tabel database, migrasi, env/config, file template, atau dependency yang dirujuk tapi tidak ikut.',
+    '- Untuk config gateway/proxy: backend/endpoint yang dirujuk harus ada; pola route tidak bentrok.',
+    '- Perubahan yang ikut tapi setengah (mis. pemanggil ikut, implementasinya tidak).',
+    'verdict: "aman" bila tidak ada ketergantungan putus; "putus" bila ada yang pasti putus; "perlu dicek" bila ragu atau bukti tidak cukup. Sebut file dan nama yang jadi bukti.',
+    '',
+    'Skema jawaban:',
+    '{"verdict":"aman|perlu dicek|putus","summary":"...","issues":[{"path":"path/file","reason":"..."}]}',
+  ].join('\n');
+}
+
+/** The dependency verdict and its issues (paths kept as given; they are only shown). */
+export function parseSafetyReply(reply: string): { verdict: 'aman' | 'perlu dicek' | 'putus'; summary: string; issues: { path: string; reason: string }[] } | null {
+  const json = parseJsonReply(reply);
+  if (!json) return null;
+  const v = str(json.verdict, 20).toLowerCase();
+  const verdict = v === 'aman' ? 'aman' : v === 'putus' ? 'putus' : 'perlu dicek';
+  const issues = (Array.isArray(json.issues) ? json.issues : [])
+    .map((i) => ({ path: str((i as Record<string, unknown>).path, 300), reason: str((i as Record<string, unknown>).reason, 800) }))
+    .filter((i) => i.reason)
+    .slice(0, 30);
+  return { verdict, summary: str(json.summary, 800), issues };
+}

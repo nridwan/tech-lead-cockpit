@@ -1,3 +1,4 @@
+import type { SafetyResult } from './safety';
 import type { MrFileChange } from '../gitlab/types';
 import type { ReleaseBranchPlan } from './branch';
 
@@ -36,6 +37,8 @@ export interface ReleaseService {
   gitlabPath?: string;
   /** Branch this service's release MR comes from (staging, a release branch…); default the release's. */
   sourceBranch?: string;
+  /** The branch a release branch was built from (cherry-pick or chosen hunks): what it is checked against. */
+  releaseFrom?: string;
   /** Deployment page fields (typed in or imported). */
   commitId?: string;
   /** The env code block of the deployment page, values included (local file only). */
@@ -365,7 +368,7 @@ export interface AiPick {
 export interface ReleaseAiJob {
   id: string;
   releaseId: string;
-  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover';
+  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover' | 'safety';
   serviceId?: string;
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */
@@ -380,6 +383,8 @@ export interface ReleaseAiJob {
   picks?: AiPick[];
   /** document: proposed fixes per service, applied only when the user confirms. */
   fixes?: ReleaseDocFix[];
+  /** safety: the release branch's safety layers. */
+  safety?: SafetyResult;
   /** patch: the changed files split in hunks, with the AI's choice per hunk. */
   patch?: { files: PatchFile[]; skipped: string[] };
   /** mr: the AI's reading of the source branch diff for one service. */

@@ -44,8 +44,8 @@ export const releases = {
   createMr: (id: string, serviceId: string, req: { sourceBranch: string; title: string }) =>
     call<{ release: Release; ref: string; webUrl: string; created: boolean }>('/mr/create', { id, serviceId, ...req }),
   /** Release branch from the target with the chosen commits cherry-picked (token with scope api). */
-  createReleaseBranch: (id: string, serviceId: string, branch: string, picks: { sha: string; title?: string }[]) =>
-    call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks }),
+  createReleaseBranch: (id: string, serviceId: string, branch: string, picks: { sha: string; title?: string }[], sourceBranch?: string) =>
+    call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks, sourceBranch }),
   /** The chosen hunks applied without writing: result vs target per file, JSON problems. */
   previewPatch: (id: string, serviceId: string, req: { sourceBranch: string; hunks: string[] }) =>
     call<{ files: { path: string; status: string; diff: string; problem?: string; changes?: string[] }[] }>('/patch/preview', { id, serviceId, ...req }),

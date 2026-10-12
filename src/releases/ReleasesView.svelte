@@ -3,6 +3,7 @@
   import Icon from '../components/Icon.svelte';
   import AiPicker from '../components/AiPicker.svelte';
   import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
+  import { safetyOk } from '../lib/release/safety';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { estimate } from '../lib/estimate/client';
@@ -257,8 +258,18 @@
   async function changeStatus(el: HTMLSelectElement) {
     if (!current) return;
     const next = el.value as Release['status'];
-    if ((next === 'ready' || next === 'released') && (!report || !report.scope?.matched)) {
-      const why = !report ? 'Cek rilis belum dijalankan.' : `Scope belum sesuai: ${report.scope.missing} tiket tidak terlihat di kode, ${report.scope.unsure ?? 0} perlu dicek manual, ${report.scope.carried} tiket di luar scope terbawa.`;
+    // Release branches (cherry-pick or chosen hunks) must have passed their safety check.
+    const unsafe: string[] = [];
+    if (next === 'ready' || next === 'released') {
+      for (const svc of current.services.filter((x) => x.releaseFrom && x.sourceBranch && x.sourceBranch !== x.releaseFrom)) {
+        const job = await releases.aiJob(current.id, 'safety', svc.id).catch(() => null);
+        const res = job?.status === 'done' && job.safety?.branch === svc.sourceBranch ? job.safety : null;
+        if (!res || !safetyOk(res)) unsafe.push(`${svc.name} (${svc.sourceBranch}${res ? '' : ', belum dicek'})`);
+      }
+    }
+    if ((next === 'ready' || next === 'released') && (!report || !report.scope?.matched || unsafe.length)) {
+      const scopeWhy = !report ? 'Cek rilis belum dijalankan.' : !report.scope?.matched ? `Scope belum sesuai: ${report.scope.missing} tiket tidak terlihat di kode, ${report.scope.unsure ?? 0} perlu dicek manual, ${report.scope.carried} tiket di luar scope terbawa.` : '';
+      const why = [scopeWhy, unsafe.length ? `Branch rilis belum lolos cek keamanan: ${unsafe.join(', ')}.` : ''].filter(Boolean).join(' ');
       const ok = await confirmDialog({ title: `Tandai "${RELEASE_STATUS_LABELS[next]}"?`, message: `${why} Tetap ubah status?`, confirmText: 'Tetap ubah', danger: true });
       if (!ok) {
         el.value = current.status;

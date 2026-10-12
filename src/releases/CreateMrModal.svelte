@@ -3,6 +3,7 @@
   import Icon from '../components/Icon.svelte';
   import AiPicker from '../components/AiPicker.svelte';
   import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
+  import { safetyOk } from '../lib/release/safety';
   import Modal from '../components/Modal.svelte';
   import DiffFile from '../mr/DiffFile.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
@@ -93,6 +94,7 @@
       aiPick.stop();
       aiMr.stop();
       aiPatch.stop();
+      aiSafety.stop();
     };
   });
   $effect(() => {
@@ -116,6 +118,7 @@
         applyPicks(aiPick.job);
         showBranch = true;
       }
+      await aiSafety.load();
       patchSel = {};
       await aiPatch.load();
       if (aiPatch.job?.status === 'done' && aiPatch.job.sourceBranch === plan.sourceBranch) {
@@ -133,8 +136,39 @@
     }
   }
 
+  // Safety of a release branch (made by cherry-pick or chosen hunks): runs after it is made.
+  const aiSafety = new AiJobWatch(
+    () => release.id,
+    'safety',
+    () => service.id,
+    (job) => {
+      if (job.status === 'done' && job.safety) toasts.show(safetyOk(job.safety) ? `Branch ${job.safety.branch} lolos cek keamanan.` : `Branch ${job.safety.branch} belum lolos cek keamanan. Periksa kartu Keamanan.`, safetyOk(job.safety) ? 'ok' : 'info', 6000);
+      else if (job.status === 'error') toasts.show(`Cek keamanan gagal: ${job.error}`, 'err', 6000);
+    },
+  );
+  /** The source is a release branch, not the release's usual source (staging…). */
+  const onReleaseBranch = $derived(Boolean(plan) && plan!.sourceBranch !== (release.sourceBranch || 'staging'));
+  const safety = $derived(aiSafety.job?.status === 'done' && aiSafety.job.safety?.branch === plan?.sourceBranch ? aiSafety.job.safety : null);
+
+  async function startSafety() {
+    if (!plan) return;
+    saveReleaseAi(ai);
+    await aiSafety.start(ai, { sourceBranch: plan.sourceBranch });
+    if (aiSafety.error) toasts.show(aiSafety.error, 'err');
+  }
+
   async function create() {
     if (!plan) return;
+    // A release branch that has not passed its safety check needs a second look.
+    if (onReleaseBranch && (!safety || !safetyOk(safety))) {
+      const go = await confirmDialog({
+        title: 'Branch rilis belum lolos cek keamanan',
+        message: !safety ? `Cek keamanan ${plan.sourceBranch} belum dijalankan.` : `${safety.subset.length} perubahan bukan dari ${safety.from}, ${safety.files.length} masalah file, ketergantungan: ${safety.deps?.verdict ?? '-'}, pipeline: ${safety.pipeline?.status ?? 'belum ada'}. Tetap buat MR?`,
+        confirmText: 'Tetap lanjut',
+        danger: true,
+      });
+      if (!go) return;
+    }
     const ok = await confirmDialog({
       title: 'Buat MR di GitLab?',
       message: `MR ${plan.sourceBranch} → ${plan.targetBranch} akan dibuat di ${plan.projectPath} atas nama token GitLab kamu (${plan.commits.length} commit, ${plan.files} file).`,
@@ -174,7 +208,7 @@
     branching = true;
     branchResult = null;
     try {
-      const r = await releases.createReleaseBranch(release.id, service.id, branchName.trim(), chosen.map((p) => ({ sha: p.sha, title: p.title })));
+      const r = await releases.createReleaseBranch(release.id, service.id, branchName.trim(), chosen.map((p) => ({ sha: p.sha, title: p.title })), plan.sourceBranch);
       branchResult = { picked: r.picked.length, failed: r.failed };
       oncreatedBranch(r.release);
       if (r.failed) {
@@ -184,6 +218,7 @@
         source = r.branch;
         showBranch = false;
         await load();
+        void startSafety();
       }
     } catch (e) {
       error = (e as Error).message;
@@ -252,6 +287,7 @@
       source = r.branch;
       showBranch = false;
       await load();
+      void startSafety();
     } catch (e) {
       const msg = (e as Error).message;
       if (!force && /bukan JSON valid/.test(msg)) {
@@ -283,6 +319,42 @@
     {#if error}<p class="err small">{error}</p>{/if}
 
     {#if plan}
+      {#if onReleaseBranch}
+        <section class="safety" class:ok={safety && safetyOk(safety)}>
+          <div class="row">
+            <strong>Keamanan branch rilis {plan.sourceBranch}</strong>
+            {#if aiSafety.running}
+              <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiSafety.job?.progress ?? 'Mengecek…'}</span>
+            {:else}
+              <button class="btn btn-sm" onclick={startSafety}><Icon name="check" size={12} /> {safety ? 'Cek ulang' : 'Cek keamanan'}</button>
+            {/if}
+          </div>
+          {#if safety}
+            <ul class="small layers">
+              <li class:bad={safety.subset.length}>
+                {safety.subset.length ? '✗' : '✓'} <strong>Isi dari {safety.from}:</strong> {safety.subset.length ? `${safety.subset.length} perubahan tidak ada di ${safety.from} (belum pernah dites)` : `semua perubahan berasal dari ${safety.from}`}
+                {#if safety.subset.length}<ul>{#each safety.subset.slice(0, 10) as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> {x.text ? `— ${x.text}` : ''} <span class="muted">({x.reason})</span></li>{/each}</ul>{/if}
+              </li>
+              <li class:bad={safety.files.length}>
+                {safety.files.length ? '✗' : '✓'} <strong>File:</strong> {safety.files.length ? `${safety.files.length} masalah` : 'tidak ada penanda konflik, JSON valid'}
+                {#if safety.files.length}<ul>{#each safety.files as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> — {x.reason}</li>{/each}</ul>{/if}
+              </li>
+              <li class:bad={safety.deps?.verdict === 'putus'} class:warn={safety.deps?.verdict === 'perlu dicek'}>
+                {safety.deps?.verdict === 'aman' ? '✓' : safety.deps?.verdict === 'putus' ? '✗' : '≈'} <strong>Ketergantungan (AI):</strong> {safety.deps?.verdict ?? '-'}{safety.deps?.summary ? ` — ${safety.deps.summary}` : ''}
+                {#if safety.deps?.issues.length}<ul>{#each safety.deps.issues as x, i (i)}<li>{#if x.path}<span class="mono">{x.path}</span> — {/if}{x.reason}</li>{/each}</ul>{/if}
+              </li>
+              <li class:bad={safety.pipeline?.status && safety.pipeline.status !== 'success'} class:warn={!safety.pipeline?.status}>
+                {safety.pipeline?.status === 'success' ? '✓' : safety.pipeline?.status ? '✗' : '≈'} <strong>Pipeline:</strong>
+                {#if safety.pipeline?.status}<a href={safety.pipeline.url} target="_blank" rel="noreferrer">{safety.pipeline.status}</a>{:else}{safety.pipeline?.note}{/if}
+              </li>
+            </ul>
+            {#if safety.skipped.length}<p class="muted small">Tidak dibandingkan (biner/lock/terlalu besar): {safety.skipped.slice(0, 6).join(', ')}{safety.skipped.length > 6 ? ', …' : ''}</p>{/if}
+            <p class="small"><strong>{safetyOk(safety) ? 'Aman untuk dibuat MR ke ' + plan.targetBranch + '.' : 'Belum aman: selesaikan yang bertanda ✗ / ≈ dulu.'}</strong></p>
+          {:else if !aiSafety.running}
+            <p class="muted small">Cek: semua perubahan berasal dari branch sumbernya, file valid, ketergantungan tidak putus (AI), dan pipeline branch ini lulus.</p>
+          {/if}
+        </section>
+      {/if}
       {#if plan.existing}
         <div class="note"><Icon name="alert" size={13} /> Sudah ada MR terbuka untuk branch ini: <a href={plan.existing.webUrl} target="_blank" rel="noreferrer">{plan.existing.ref}</a>. "Buat MR" akan menautkannya ke rilis, bukan membuat MR kedua.</div>
       {/if}
@@ -628,6 +700,35 @@
   }
   .patch h4 {
     margin: 0;
+  }
+  .safety {
+    border: 1px solid var(--warn, #b45309);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .safety.ok {
+    border-color: var(--ok, #15803d);
+  }
+  .layers {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .layers li.bad {
+    color: var(--err);
+  }
+  .layers li.warn {
+    color: var(--warn);
+  }
+  .layers ul {
+    padding-left: 18px;
+    color: var(--text-2, inherit);
   }
   .pfile {
     border: 1px solid var(--border);

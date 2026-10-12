@@ -1597,11 +1597,11 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       }
     }
     if (route === 'POST /releases/mr/branch') {
-      const body = await readJson<{ id?: string; serviceId?: string; branch?: string; picks?: { sha?: string; title?: string }[] }>(req, 128 * 1024);
+      const body = await readJson<{ id?: string; serviceId?: string; branch?: string; picks?: { sha?: string; title?: string }[]; sourceBranch?: string }>(req, 128 * 1024);
       const picks = (Array.isArray(body.picks) ? body.picks : []).slice(0, 300).map((p) => ({ sha: String(p?.sha ?? ''), title: p?.title ? String(p.title).slice(0, 200) : undefined })).filter((p) => /^[0-9a-f]{7,40}$/i.test(p.sha));
       const base = { ts: new Date().toISOString(), action: 'gitlab.branch.create' as const, spaceKey: 'GitLab', title: String(body.branch ?? '').slice(0, 100), attachments: 0 };
       try {
-        const r = await rm.createReleaseBranch(idOf(body.id), String(body.serviceId ?? ''), { branch: String(body.branch ?? ''), picks });
+        const r = await rm.createReleaseBranch(idOf(body.id), String(body.serviceId ?? ''), { branch: String(body.branch ?? ''), picks, ...(body.sourceBranch ? { sourceBranch: String(body.sourceBranch) } : {}) });
         await audit({ ...base, title: `Branch ${r.branch}: ${r.picked.length}/${picks.length} commit${r.failed ? ', berhenti di konflik' : ''}`, result: r.failed ? 'failure' : 'success', ...(r.failed ? { error: r.failed.error } : {}) }).catch(() => {});
         return send(res, 200, r);
       } catch (e) {

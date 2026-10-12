@@ -6,9 +6,10 @@ import { mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, patchPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
+import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, parseSafetyReply, patchPrompt, safetyPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
+import { fileProblems, notFromSource, type SafetyIssue } from '../../src/lib/release/safety.ts';
 import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
 import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, ticketType, typeInScope, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
@@ -40,6 +41,7 @@ export interface ReleaseGitLab {
   createBranch?(path: string, branch: string, ref: string): Promise<void>;
   cherryPick?(path: string, sha: string, branch: string): Promise<{ id: string }>;
   rawFile?(path: string, filePath: string, ref: string): Promise<string | undefined>;
+  latestPipeline?(path: string, ref: string): Promise<{ status: string; webUrl: string } | undefined>;
   commitFiles?(path: string, req: { branch: string; start: string; message: string; actions: { action: 'create' | 'update' | 'delete'; path: string; content?: string }[] }): Promise<{ id: string }>;
 }
 
@@ -65,6 +67,8 @@ const AI_TIMEOUT_MS = 10 * 60_000;
 const AI_MAX_COMMITS = 40;
 const VERDICT_RANK = { tidak: 0, sebagian: 1, ada: 2 } as const;
 type AiKind = ReleaseAiJob['kind'];
+/** AI jobs that are about one service (their last result is kept per service). */
+const PER_SERVICE = new Set<AiKind>(['picks', 'mr', 'patch', 'safety']);
 interface AiLive {
   job: ReleaseAiJob;
   cancel?: () => void;
@@ -561,7 +565,7 @@ export class ReleaseManager {
    * user confirmed). Stops at the first failure (usually a conflict) and says which commit; what
    * was picked stays on the branch. The service then releases from that branch.
    */
-  async createReleaseBranch(id: string, serviceId: string, req: { branch: string; picks: { sha: string; title?: string }[] }): Promise<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }> {
+  async createReleaseBranch(id: string, serviceId: string, req: { branch: string; picks: { sha: string; title?: string }[]; sourceBranch?: string }): Promise<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }> {
     const release = await this.get(id);
     const service = this.service(release, serviceId);
     const path = service.gitlabPath!;
@@ -583,14 +587,16 @@ export class ReleaseManager {
         break;
       }
     }
-    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch } : s)) });
+    // Remember what it was built from: the safety check compares the release branch with it.
+    const from = (req.sourceBranch && /^[\w./-]{1,100}$/.test(req.sourceBranch) ? req.sourceBranch : service.sourceBranch) || release.sourceBranch || 'staging';
+    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch, releaseFrom: from } : s)) });
     return { release: saved, branch, picked, ...(failed ? { failed } : {}) };
   }
 
   // ---- AI jobs: read the tickets and deploy needs, pick release-branch commits, fix the document.
 
   private aiKey(releaseId: string, kind: AiKind, serviceId?: string) {
-    return `${releaseId}.ai-${kind}${(kind === 'picks' || kind === 'mr' || kind === 'patch') && serviceId ? `-${serviceId}` : ''}`;
+    return `${releaseId}.ai-${kind}${PER_SERVICE.has(kind) && serviceId ? `-${serviceId}` : ''}`;
   }
 
   private async saveAiJob(job: ReleaseAiJob) {
@@ -635,9 +641,9 @@ export class ReleaseManager {
   async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string }): Promise<ReleaseAiJob> {
     const release = await this.get(id);
     if (!this.deps.runAi) throw new ReleaseInputError('AI belum tersedia di connector ini.');
-    if (!['tickets', 'picks', 'document', 'mr', 'patch', 'discover'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
+    if (!['tickets', 'picks', 'document', 'mr', 'patch', 'discover', 'safety'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
     if (!isAiSelection(opts.ai)) throw new ReleaseInputError('Pilihan AI tidak valid.');
-    if (kind === 'picks' || kind === 'mr' || kind === 'patch') this.service(release, opts.serviceId ?? '');
+    if (PER_SERVICE.has(kind)) this.service(release, opts.serviceId ?? '');
     const instruction = (opts.instruction ?? '').trim().slice(0, 4000);
     if (kind === 'document' && !instruction) throw new ReleaseInputError('Tulis instruksi perbaikan dokumen dulu.');
     const source = (opts.sourceBranch ?? '').trim();
@@ -648,7 +654,7 @@ export class ReleaseManager {
       id: newId(),
       releaseId: release.id,
       kind,
-      ...(kind === 'picks' || kind === 'mr' || kind === 'patch' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
+      ...(PER_SERVICE.has(kind) ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
       ...(instruction && (kind === 'picks' || kind === 'document' || kind === 'patch') ? { instruction } : {}),
       model: opts.ai.model ? `${opts.ai.provider}/${opts.ai.model}` : opts.ai.provider,
       status: 'running',
@@ -670,6 +676,7 @@ export class ReleaseManager {
       else if (job.kind === 'picks') await this.aiPicks(live, ai, instruction);
       else if (job.kind === 'mr') await this.aiMr(live, ai);
       else if (job.kind === 'patch') await this.aiPatch(live, ai, instruction);
+      else if (job.kind === 'safety') await this.aiSafety(live, ai);
       else await this.aiDocument(live, ai, instruction);
       if (live.cancelled) throw new Error('Dibatalkan.');
       await this.finishAiJob(job, { status: 'done' });
@@ -992,6 +999,64 @@ export class ReleaseManager {
     live.job.notes = [...located, ...(skipped.length ? [`${skipped.length} file tidak bisa dipilih per hunk (biner/lock/terlalu besar): ${skipped.slice(0, 8).join(', ')}.`] : []), ...parsed.notes];
   }
 
+  /**
+   * Is the release branch safe? 1) every change vs the target comes from the branch it was built
+   * from (tested there); 2) no conflict markers, config files parse; 3) the AI checks that the
+   * code that came along does not depend on what was left out; 4) the branch's pipeline.
+   */
+  private async aiSafety(live: AiLive, ai: AiSelection) {
+    const release = await this.get(live.job.releaseId);
+    const service = this.service(release, live.job.serviceId ?? '');
+    const path = service.gitlabPath!;
+    const branch = live.job.sourceBranch || service.sourceBranch;
+    const from = service.releaseFrom || release.sourceBranch || 'staging';
+    if (!branch || branch === from) throw new Error(`${service.name} belum memakai branch rilis (sumbernya ${from}); buat branch rilis dulu.`);
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare || !gitlab.rawFile) throw new Error('GitLab belum terhubung.');
+    live.job.progress = `Membandingkan ${branch} dengan ${from}…`;
+    const cmp = await gitlab.compare(path, release.targetBranch, branch);
+    const subset: SafetyIssue[] = [];
+    const files: SafetyIssue[] = [];
+    const skipped: string[] = [];
+    for (const c of cmp.changes.slice(0, 80)) {
+      if (BINARY_PATH.test(c.newPath)) {
+        skipped.push(c.newPath);
+        continue;
+      }
+      const read = (p: string, ref: string) => gitlab.rawFile!(path, p, ref).catch(() => null);
+      const [target, rel, src] = await Promise.all([c.newFile ? undefined : read(c.oldPath, release.targetBranch), c.deletedFile ? undefined : read(c.newPath, branch), read(c.deletedFile ? c.oldPath : c.newPath, from)]);
+      if (target === null || rel === null || src === null || (!c.newFile && target === undefined) || (!c.deletedFile && rel === undefined)) {
+        skipped.push(c.newPath);
+        continue;
+      }
+      subset.push(...notFromSource(c.newPath, target, rel, src));
+      files.push(...fileProblems(c.newPath, rel));
+    }
+    skipped.push(...cmp.changes.slice(80).map((c) => c.newPath));
+
+    live.job.progress = 'AI memeriksa ketergantungan…';
+    const { tickets: all } = await this.tickets(release);
+    const names = release.services.map((x) => x.name);
+    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name, false, names));
+    const focus = focusTerms(tickets.flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']));
+    const left = await gitlab.compare(path, branch, from).catch(() => ({ commits: [], changes: [], truncated: false }));
+    const [relChanges, leftChanges] = await Promise.all([this.fillMissingDiffs(path, release.targetBranch, branch, cmp.changes), this.fillMissingDiffs(path, branch, from, left.changes)]);
+    const out = await this.ask(live, ai, safetyPrompt({ repo: path, branch, from, target: release.targetBranch, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary })), releaseDiff: diffText(relChanges, 100_000, '', focus).text, leftOut: diffText(leftChanges, 60_000, '', focus).text }));
+    const parsed = out.error ? null : parseSafetyReply(out.reply);
+
+    live.job.progress = 'Membaca pipeline…';
+    const pipe = await gitlab.latestPipeline?.(path, branch).catch(() => undefined);
+    live.job.safety = {
+      branch,
+      from,
+      subset,
+      files,
+      deps: parsed ? { verdict: parsed.verdict, issues: parsed.issues, ...(parsed.summary ? { summary: parsed.summary } : {}) } : { verdict: 'perlu dicek', issues: [{ path: '', reason: `AI tidak memberi jawaban yang terbaca${out.error ? ` (${out.error})` : ''}.` }] },
+      pipeline: pipe ? { status: pipe.status, url: pipe.webUrl } : { note: `Belum ada pipeline untuk ${branch}. Pastikan .gitlab-ci.yml menjalankan build/test untuk branch rilis.` },
+      skipped,
+    };
+  }
+
   private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {
     const release = await this.get(live.job.releaseId);
     live.job.progress = 'Membaca kode semua service dari GitLab…';
@@ -1079,7 +1144,7 @@ export class ReleaseManager {
     const keys = tickets.filter((t) => belongsTo(t, service.name, false, release.services.map((x) => x.name))).map((t) => t.key);
     const message = `Rilis ${release.name}: perubahan pilihan dari ${source}${keys.length ? `\n\nJira: ${keys.join(', ')}` : ''}`;
     const commit = await gitlab.commitFiles(path, { branch, start: release.targetBranch, message, actions });
-    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch } : s)) });
+    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch, releaseFrom: source } : s)) });
     return { release: saved, branch, files: actions.map((a) => a.path), commit: commit.id };
   }
 

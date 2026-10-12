@@ -459,6 +459,47 @@ describe('ReleaseManager', () => {
     expect(report.types).toEqual(expect.arrayContaining([{ type: 'BACKEND', count: 1, excluded: false }, { type: 'MOBILE-FE', count: 1, excluded: true }]));
   });
 
+  it('checks a release branch: changes from its source, files, dependencies (AI) and pipeline', async () => {
+    const files: Record<string, string> = {
+      'master:api/a.go': 'func A() {}',
+      'release/x:api/a.go': 'func A() {}\nfunc Topup() {}\nfunc Patched() {}',
+      'staging:api/a.go': 'func A() {}\nfunc Topup() {}\nfunc Kyc() {}',
+    };
+    let prompt = '';
+    const m = manager({
+      runAi: (_ai, p) => ((prompt = p), { done: Promise.resolve({ reply: JSON.stringify({ verdict: 'aman', summary: 'Topup berdiri sendiri', issues: [] }) }), cancel: () => {} }),
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async () => true,
+        compare: async (_p, from, to) => ({
+          commits: [],
+          changes: [{ oldPath: 'api/a.go', newPath: 'api/a.go', newFile: false, renamedFile: false, deletedFile: false, diff: from === 'master' ? '+func Topup() {}\n+func Patched() {}' : `+func Kyc() {} (${to})`, additions: 1, deletions: 0 }],
+          truncated: false,
+        }),
+        rawFile: async (_p, f, ref) => files[`${ref}:${f}`],
+        latestPipeline: async () => ({ status: 'success', webUrl: 'https://gitlab.example.com/p/1' }),
+      }),
+    });
+    const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', sourceBranch: 'release/x', releaseFrom: 'staging', mrs: [], order: 1 }] } as never);
+    await m.aiStart(r.id, 'safety', { ai: { provider: 'claude', model: 'x' }, serviceId: 's1' });
+    let job = await m.aiJob(r.id, 'safety', 's1');
+    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'safety', 's1'));
+    expect(job?.status).toBe('done');
+    // Patched() was never on staging: not tested there.
+    expect(job?.safety).toMatchObject({ branch: 'release/x', from: 'staging', files: [], deps: { verdict: 'aman' }, pipeline: { status: 'success' } });
+    expect(job?.safety?.subset.map((x) => x.text)).toEqual(['func Patched() {}']);
+    // The AI sees what came along and what was left out.
+    expect(prompt).toContain('+func Topup() {}');
+    expect(prompt).toContain('func Kyc()');
+    // A service still on its usual source has no release branch to check.
+    const plain = await m.store.save({ name: 'B', services: [{ id: 's2', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    await m.aiStart(plain.id, 'safety', { ai: { provider: 'claude', model: 'x' }, serviceId: 's2' });
+    let j2 = await m.aiJob(plain.id, 'safety', 's2');
+    for (let i = 0; i < 50 && j2?.status === 'running'; i++) j2 = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(plain.id, 'safety', 's2'));
+    expect(j2?.error).toMatch(/belum memakai branch rilis/);
+  });
+
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
     const calls: string[] = [];
     const m = manager({

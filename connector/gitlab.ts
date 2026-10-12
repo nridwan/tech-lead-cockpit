@@ -297,6 +297,12 @@ export class GitLabClient {
     return text.length > max ? undefined : text;
   }
 
+  /** The latest pipeline of a branch (read only), if there is one. */
+  async latestPipeline(projectPath: string, ref: string): Promise<{ status: string; webUrl: string } | undefined> {
+    const { body } = await this.get<{ status: string; web_url: string }[]>(`/projects/${encodeURIComponent(projectPath)}/pipelines?ref=${encodeURIComponent(ref)}&order_by=id&sort=desc&per_page=1`);
+    return body[0] ? { status: body[0].status, webUrl: body[0].web_url } : undefined;
+  }
+
   /** The open MR from `source` into `target`, if there is one. */
   async openMrFor(projectPath: string, source: string, target: string): Promise<MrSummary | undefined> {
     const { body } = await this.get<ApiMr[]>(`/projects/${encodeURIComponent(projectPath)}/merge_requests?state=opened&source_branch=${encodeURIComponent(source)}&target_branch=${encodeURIComponent(target)}&per_page=5`);

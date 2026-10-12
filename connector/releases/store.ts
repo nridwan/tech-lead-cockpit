@@ -78,6 +78,7 @@ export function validateRelease(raw: Partial<Release>): Release {
       .map(validMr)
       .filter((m): m is ReleaseMrRef => Boolean(m) && !seen.has(m!.ref) && Boolean(seen.add(m!.ref)));
     const sourceBranch = text(s.sourceBranch, 100);
+    const releaseFrom = text(s.releaseFrom, 100);
     const commitId = text(s.commitId, 64);
     const updatedBy = person(s.updatedBy);
     const deployFields = {
@@ -88,7 +89,7 @@ export function validateRelease(raw: Partial<Release>): Release {
       ...(text(s.failover, 300) ? { failover: text(s.failover, 300) } : {}),
       ...(updatedBy ? { updatedBy } : {}),
     };
-    return [{ id: id(s.id), name: sName, ...(PATH.test(gitlabPath) ? { gitlabPath } : {}), ...(sourceBranch && BRANCH.test(sourceBranch) ? { sourceBranch } : {}), ...deployFields, mrs, order: Number.isInteger(s.order) && Number(s.order) > 0 ? Number(s.order) : i + 1, ...(s.pic ? { pic: text(s.pic, 80) } : {}), ...(s.note ? { note: text(s.note, 500) } : {}) }];
+    return [{ id: id(s.id), name: sName, ...(PATH.test(gitlabPath) ? { gitlabPath } : {}), ...(sourceBranch && BRANCH.test(sourceBranch) ? { sourceBranch } : {}), ...(releaseFrom && BRANCH.test(releaseFrom) ? { releaseFrom } : {}), ...deployFields, mrs, order: Number.isInteger(s.order) && Number(s.order) > 0 ? Number(s.order) : i + 1, ...(s.pic ? { pic: text(s.pic, 80) } : {}), ...(s.note ? { note: text(s.note, 500) } : {}) }];
   });
   const items: ReleaseItem[] = arr<Partial<ReleaseItem>>(raw.items, 300).flatMap((it) => {
     const label = text(it.label, 300);
