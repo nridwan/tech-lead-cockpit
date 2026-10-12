@@ -21,17 +21,23 @@ export interface ReleaseTicket {
   endpoints?: string[];
   /** The TAD Detail Task as plain text, for the AI. */
   detail?: string;
-  /** The service the title names when the TAD row says another one ([GO-WORKER] vs TAD's core). */
+  /** The TAD row's service when the Jira title names another one (also checked). */
   alsoService?: string;
 }
 
+/** Type tags of front-end work, and the repo suffixes a front-end of a service goes by. */
+const FRONT_TYPES = new Set(['frontend', 'fe', 'webfe', 'web', 'cms']);
+const FRONT_SUFFIXES = ['frontend', 'fe', 'web'];
+
 /**
- * Does the ticket belong to this service? Its TAD service or the one its title names (a TAD row
- * can put a worker task under the main service). `orNone`: a ticket naming no service matches.
+ * Does the ticket belong to this service? The service its Jira title names, or the TAD row's (a
+ * TAD row can put a worker task under the main service). A [FRONTEND][X] ticket also belongs to
+ * the front-end repo of X (x-frontend, x-fe, x-web). `orNone`: a ticket naming no service matches.
  */
-export function belongsTo(t: { service?: string; alsoService?: string }, name: string, orNone = false): boolean {
+export function belongsTo(t: { service?: string; alsoService?: string; summary?: string }, name: string, orNone = false): boolean {
   if (!t.service && !t.alsoService) return orNone;
-  return [t.service, t.alsoService].some((x) => x && sameService(x, name));
+  const front = Boolean(t.summary) && FRONT_TYPES.has(norm(ticketTags(t.summary!)[0] ?? ''));
+  return [t.service, t.alsoService].some((x) => x && (sameService(x, name) || (front && FRONT_SUFFIXES.some((sfx) => sameService(`${x}-${sfx}`, name)))));
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -130,11 +136,11 @@ export function buildReport(
     const byKey = [...keysByMr].filter(([, keys]) => keys.has(t.key)).map(([ref]) => ref);
     // The code decides; a key in a commit only adds where it is.
     const found = [...new Set([...evidence.filter((e) => e.strength === 'strong').map((e) => e.ref), ...byKey])];
-    const noRepo = Boolean(service || t.alsoService) && !release.services.some((s) => belongsTo({ service, alsoService: t.alsoService }, s.name));
+    const noRepo = Boolean(service || t.alsoService) && !release.services.some((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name));
     // The AI's reading decides when there is one: "ada" is in the code, "sebagian" needs a look,
     // "tidak" is missing unless the pattern match found it (then the two disagree: needs a look).
     const ai = code.ai?.get(t.key);
-    const own = release.services.filter((s) => belongsTo({ service, alsoService: t.alsoService }, s.name)).map((s) => s.name);
+    const own = release.services.filter((s) => belongsTo({ service, alsoService: t.alsoService, summary: t.summary }, s.name)).map((s) => s.name);
     const aiRefs = (code.sources ?? []).filter((x) => own.includes(x.service) && !x.error).map((x) => x.ref);
     const inMrs = !ai ? found : ai.verdict === 'ada' ? [...new Set([...found, ...(found.length ? [] : aiRefs.slice(0, 1))])] : [];
     const unsure = !ai ? !found.length && evidence.length > 0 : ai.verdict === 'sebagian' || (ai.verdict === 'tidak' && found.length > 0);
@@ -143,6 +149,7 @@ export function buildReport(
       summary: t.summary,
       status: t.status,
       service,
+      ...(t.alsoService ? { alsoService: t.alsoService } : {}),
       from: t.from,
       inMrs,
       ...(evidence.length ? { code: evidence } : {}),

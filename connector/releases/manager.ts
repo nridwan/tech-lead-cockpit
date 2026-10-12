@@ -167,16 +167,20 @@ export class ReleaseManager {
         warnings.push(`Pencarian tiket per codename gagal: ${(e as Error).message}`);
       }
     }
-    const toTicket = (i: JiraIssue, from: ReleaseTicket['from'], service?: string): ReleaseTicket => ({ key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service: service || ticketService(i.summary, codenames), from });
+    // The service is what the Jira title says ([TYPE][SERVICE][CODENAME]); the TAD row's service
+    // only fills in when the title names none, and is also checked when it differs.
+    const toTicket = (i: JiraIssue, from: ReleaseTicket['from'], tadService?: string): ReleaseTicket => {
+      const named = ticketService(i.summary, codenames);
+      const service = named || tadService;
+      const also = named && tadService && !sameService(named, tadService) ? tadService : undefined;
+      return { key: i.key, summary: i.summary, status: i.status, statusCategory: i.statusCategory, service, ...(also ? { alsoService: also } : {}), from };
+    };
     const out: ReleaseTicket[] = [];
     const seen = new Set<string>();
     const push = (t: ReleaseTicket) => !seen.has(t.key) && (seen.add(t.key), out.push(t));
     for (const t of tad) {
       const i = byKey.get(t.key);
-      const base = i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' as const };
-      // The title may name another service than the TAD row ([GO-WORKER] under the main service).
-      const named = ticketService(base.summary, codenames);
-      if (named && base.service && !sameService(named, base.service)) Object.assign(base, { alsoService: named });
+      const base: ReleaseTicket = i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' };
       push({ ...base, ...(t.endpoints.length ? { endpoints: t.endpoints } : {}), ...(t.detail ? { detail: t.detail } : {}) });
     }
     for (const i of byCodename) push(toTicket(i, 'codename'));

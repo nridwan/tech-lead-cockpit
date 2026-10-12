@@ -115,6 +115,21 @@ const release = (over: Partial<Release> = {}): Release => ({
 } as Release);
 
 describe('ticket service', () => {
+  it('marks a service out of scope only when no ticket names it, the Jira title included', async () => {
+    const { servicesOutsideScope } = await import('./import');
+    const r = release({ services: [{ id: 's1', name: 'GO-WORKER', mrs: [], order: 1 }, { id: 's2', name: 'core-other', mrs: [], order: 2 }] });
+    // A report kept from before: the TAD row says another service, the Jira title says GO-WORKER.
+    const out = servicesOutsideScope(r, { tickets: [{ service: 'CORE-TOPUP', summary: '[BACKEND][GO-WORKER][TOKO] - Scheduler' }] });
+    expect(out.map((s) => s.name)).toEqual(['core-other']);
+  });
+
+  it('puts a [FRONTEND][X] ticket in the front-end repo of X too', () => {
+    const t = { service: 'PORTAL', summary: '[FRONTEND][PORTAL][TOKO] - Edit Konfigurasi' };
+    expect(belongsTo(t, 'portal-frontend')).toBe(true);
+    expect(belongsTo(t, 'PORTAL')).toBe(true);
+    expect(belongsTo({ service: 'PORTAL', summary: '[BACKEND][PORTAL][TOKO] - API' }, 'portal-frontend')).toBe(false);
+  });
+
   it('matches the TAD service or the one the title names', () => {
     const t = { service: 'CORE-TOPUP-ULTIMATE', alsoService: 'GO-WORKER' };
     expect(belongsTo(t, 'go-worker')).toBe(true);

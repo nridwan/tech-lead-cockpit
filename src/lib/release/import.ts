@@ -1,5 +1,5 @@
 import { JIRA_KEY } from './checks';
-import { sameService } from './coverage';
+import { belongsTo, sameService, ticketService } from './coverage';
 import type { Release, ReleaseItem, ReleaseMrRef, ReleaseService, ReleaseSource, ReleaseStep } from './types';
 
 /**
@@ -289,9 +289,11 @@ export function mergeReleaseDoc(release: Release, doc: ParsedReleaseDoc, markdow
  * Services with no release MR that no scope ticket points to (needs a report): what an older
  * import (or a typo) left behind.
  */
-export function servicesOutsideScope(release: Release, report: { tickets: { service?: string }[] } | null | undefined): ReleaseService[] {
+export function servicesOutsideScope(release: Release, report: { tickets: { service?: string; alsoService?: string; summary?: string }[] } | null | undefined): ReleaseService[] {
   if (!report) return [];
-  return release.services.filter((s) => !s.mrs.length && !report.tickets.some((t) => t.service && sameService(t.service, s.name)));
+  // The Jira title decides too (a report kept from before may only have the TAD row's service).
+  const owns = (t: { service?: string; alsoService?: string; summary?: string }, name: string) => belongsTo(t, name) || Boolean(t.summary && belongsTo({ service: ticketService(t.summary, release.codenames), summary: t.summary }, name));
+  return release.services.filter((s) => !s.mrs.length && !report.tickets.some((t) => owns(t, s.name)));
 }
 
 /** Removes services (and their checklist items) from a release. */

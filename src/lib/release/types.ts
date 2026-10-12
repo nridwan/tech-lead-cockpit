@@ -200,7 +200,10 @@ export interface TicketCoverage {
   key: string;
   summary: string;
   status: string;
+  /** From the Jira title ([TYPE][SERVICE][CODENAME]), else the TAD row. */
   service?: string;
+  /** The TAD row's service when the Jira title names another one. */
+  alsoService?: string;
   /** Where the ticket comes from. */
   from: 'tad' | 'codename' | 'release';
   /**

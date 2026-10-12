@@ -155,7 +155,8 @@ describe('ReleaseManager', () => {
     const found = await m.discover(r.id);
     expect(found.warnings).toEqual([]);
     expect(found.release.services.map((s) => [s.name, s.gitlabPath, s.mrs.map((x) => x.ref)])).toEqual([
-      ['core-payment', 'payments/core-payment', ['payments/core-payment!12']],
+      // Named as the Jira title says ([BACKEND][CORE-PAYMENT][…]), not the TAD row.
+      ['CORE-PAYMENT', 'payments/core-payment', ['payments/core-payment!12']],
       ['MOBILE-APP', 'mobile/app', ['mobile/app!7']],
     ]);
     expect(found.addedMrs).toBe(2);
@@ -174,7 +175,7 @@ describe('ReleaseManager', () => {
     // Env found in the code goes straight into each service's .env block of the document.
     expect(release.items).toEqual([]);
     expect(release.services.map((s) => [s.name, s.envBlock])).toEqual([
-      ['core-payment', 'REFUND_LIMIT='],
+      ['CORE-PAYMENT', 'REFUND_LIMIT='],
       ['MOBILE-APP', 'REFUND_LIMIT='],
     ]);
     expect(await m.report(r.id)).toMatchObject({ releaseId: r.id });
