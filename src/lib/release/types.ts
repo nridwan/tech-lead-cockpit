@@ -247,6 +247,8 @@ export interface CodeSource {
   aiUnrelated?: { path: string; reason: string }[];
   /** Review findings of the AI (leaked secrets, bugs, risks, decisions to make). */
   aiRisks?: { path: string; reason: string }[];
+  /** Deploy needs the AI found in a branch without a release MR: they enter the document once the MR exists. */
+  aiPending?: ReleaseAiNeed[];
   error?: string;
 }
 

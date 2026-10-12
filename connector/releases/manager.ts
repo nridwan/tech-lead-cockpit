@@ -14,7 +14,7 @@ import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, typ
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
-import type { AiTicketVerdict, CodeEvidence, CodeSource, MrCheck, MrPlan, ReleaseAiJob, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
+import type { AiTicketVerdict, CodeEvidence, ReleaseAiNeed, CodeSource, MrCheck, MrPlan, ReleaseAiJob, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
 import { parseScopeTasks, taskDetailText, taskEndpoints } from '../../src/lib/tad/task-links.ts';
 import { matchRepo } from '../roster/git-activity.ts';
@@ -348,6 +348,8 @@ export class ReleaseManager {
         if (u) src.aiUnrelated = u;
         const r = ai.risks.get(src.service);
         if (r?.length) src.aiRisks = r;
+        const p = ai.pending.get(src.service);
+        if (p?.length) src.aiPending = p;
       }
       report.warnings.unshift(...ai.errors);
     }
@@ -754,7 +756,7 @@ export class ReleaseManager {
     live.job.progress = 'Membaca kode semua service dari GitLab…';
     const code = await this.readCode(release);
     let items = this.checkItems(release, code.checks);
-    const read: AiRead = { model: live.job.model, tickets: new Map(), unrelated: new Map(), risks: new Map(), errors: [], steps: new Map() };
+    const read: AiRead = { model: live.job.model, tickets: new Map(), unrelated: new Map(), risks: new Map(), pending: new Map(), errors: [], steps: new Map() };
     const services = release.services.filter((s) => (code.serviceRefs.get(s.id) ?? []).length);
     for (const [i, s] of services.entries()) {
       const refs = code.serviceRefs.get(s.id)!;
@@ -782,6 +784,11 @@ export class ReleaseManager {
       read.risks.set(s.name, parsed.risks);
       // This check's queries replace those of the last AI check for the service.
       items = items.filter((x) => !(x.source === 'ai' && x.service && sameService(x.service, s.name)));
+      // The document holds what the release MR brings. Without one, the needs are only a preview.
+      if (!refs.every((r) => code.sources.find((x) => x.ref === r)?.kind === 'mr')) {
+        read.pending.set(s.name, parsed.needs);
+        continue;
+      }
       const steps = { pre: [] as string[], post: [] as string[] };
       for (const n of parsed.needs) {
         const note = [n.kind === 'env' ? n.detail : '', n.files.length ? `File: ${n.files.join(', ')}` : ''].filter(Boolean).join(' · ').slice(0, 1000);
@@ -873,7 +880,10 @@ export class ReleaseManager {
     const release = await this.get(live.job.releaseId);
     live.job.progress = 'Membaca kode semua service dari GitLab…';
     const code = await this.readCode(release);
-    const services: AiDocService[] = release.services.map((s) => {
+    // Only services with a release MR: the document is about the code proposed for the release.
+    const withMr = release.services.filter((s) => (code.serviceRefs.get(s.id) ?? []).some((r) => code.sources.find((x) => x.ref === r)?.kind === 'mr'));
+    if (!withMr.length) throw new Error(`Belum ada MR rilis ke ${release.targetBranch}: dokumen diisi setelah MR dibuat.`);
+    const services: AiDocService[] = withMr.map((s) => {
       const changes = (code.serviceRefs.get(s.id) ?? []).flatMap((r) => code.changed.get(r) ?? []);
       const pseudo = { ref: '', title: '', webUrl: '', state: 'opened', draft: false, author: { id: 0, username: '', name: '' }, sourceBranch: '', targetBranch: release.targetBranch, description: '', commits: [], changes, diffTruncated: false } as unknown as MrDetail;
       const c = checkMr(pseudo);
@@ -890,7 +900,7 @@ export class ReleaseManager {
     live.job.progress = 'AI memperbaiki dokumen…';
     const out = await this.ask(live, ai, documentPrompt({ instruction, release: release.name, services }));
     if (out.error) throw new Error(`AI gagal: ${out.error}`);
-    const parsed = parseDocumentReply(out.reply, release.services);
+    const parsed = parseDocumentReply(out.reply, withMr);
     if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
     live.job.fixes = parsed.fixes;
     live.job.notes = parsed.summary;
@@ -923,6 +933,7 @@ interface AiRead {
   tickets: Map<string, AiTicketVerdict>;
   unrelated: Map<string, { path: string; reason: string }[]>;
   risks: Map<string, { path: string; reason: string }[]>;
+  pending: Map<string, ReleaseAiNeed[]>;
   errors: string[];
   steps: Map<string, { pre: string[]; post: string[] }>;
 }

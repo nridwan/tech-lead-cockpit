@@ -141,7 +141,9 @@ describe('reading a deployment page', () => {
 });
 
 describe('writing a deployment page', () => {
-  const imported = mergeReleaseDoc(release(), parseDeploymentStorage(PAGE, 'x')!, '', { kind: 'confluence', title: 'x' }, undefined, { addServices: ['core-auth', 'core-report', 'edge-gateway'] });
+  // Each service has its release MR: only then does the document carry its deploy details.
+  const withMrs = (r: Release): Release => ({ ...r, services: r.services.map((s) => ({ ...s, mrs: [{ ref: `g/${s.name}!1`, projectPath: `g/${s.name}`, iid: 1, webUrl: 'https://gitlab.example.com/x', via: 'auto' as const }] })) });
+  const imported = withMrs(mergeReleaseDoc(release(), parseDeploymentStorage(PAGE, 'x')!, '', { kind: 'confluence', title: 'x' }, undefined, { addServices: ['core-auth', 'core-report', 'edge-gateway'] }));
 
   it('round-trips: what Cockpit writes reads back the same', () => {
     const xhtml = deploymentStorage(imported, null, { jiraBaseUrl: 'https://jira.example.com' });
@@ -189,6 +191,15 @@ describe('writing a deployment page', () => {
     expect(xhtml).toContain('<time datetime="2026-10-20" />');
   });
 
+  it('says "Menunggu MR" instead of details for a service without a release MR', () => {
+    const r = release({ services: [{ id: 's', name: 'go-worker', mrs: [], order: 1, envBlock: 'A=1', preDeploy: ['Restart'] }] });
+    const xhtml = deploymentStorage(r);
+    expect(xhtml).toContain('Menunggu MR ke master');
+    expect(xhtml).not.toContain('Restart');
+    expect(xhtml).not.toContain('A=1');
+    expect(releaseMarkdown(r)).toContain('Menunggu MR ke master');
+  });
+
   it('fills the commit id only once the release MR is merged, and renders a Confluence-like preview', async () => {
     const svc = { id: 's1', name: 'core-payment', mrs: [{ ref: 'p/core!1', projectPath: 'p/core', iid: 1, webUrl: 'u', via: 'auto' as const }], order: 1, commitId: 'old0000' };
     // Still in review: TBA, not the head or a typed sha.
@@ -207,7 +218,7 @@ describe('writing a deployment page', () => {
   });
 
   it('escapes text, keeps CDATA safe, and names the page by date', () => {
-    const r = release({ date: '2026-08-12', services: [{ id: 's', name: 'svc <x>', mrs: [], order: 1, envBlock: 'A="]]>"' }] });
+    const r = withMrs(release({ date: '2026-08-12', services: [{ id: 's', name: 'svc <x>', mrs: [], order: 1, envBlock: 'A="]]>"' }] }));
     const xhtml = deploymentStorage(r);
     expect(xhtml).toContain('<code>svc &lt;x&gt;</code>');
     expect(xhtml).toContain('<![CDATA[A="]]]]><![CDATA[>"]]>');

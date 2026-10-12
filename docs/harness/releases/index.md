@@ -28,6 +28,7 @@ Semua pengecekan rilis lewat AI (provider dari pemilih AI, default dari setup wi
 
 Aturan hasil:
 - Tiket dicek di service TAD-nya **dan** service yang disebut judulnya (`alsoService`, `belongsTo`): baris TAD bisa menaruh task worker di bawah service utama.
+- **Dokumen hanya dari MR rilis.** Service tanpa MR hidup ke target tetap dicek (tiket, risiko, perubahan tanpa tiket dari compare branch), tapi kebutuhan deploy-nya hanya pratinjau (`CodeSource.aiPending`, "masuk dokumen setelah MR dibuat"); query AI lamanya dibuang. Dokumen menulis "Menunggu MR ke <target>" untuk service itu tanpa .env/query/langkah (`hasReleaseMr`), dan **Perbaiki dengan AI** hanya untuk service yang punya MR.
 - Tiap cek AI mengganti hasil AI sebelumnya untuk service yang dibaca (query `source: 'ai'`, Pre/Post-deploy), tidak menumpuk.
 - Temuan review (secret di repo, bug, risiko, keputusan, perubahan kontrak) dipisah ke `risks` (`CodeSource.aiRisks`, `ReleaseAiJob.risks`), bukan langkah deploy.
 - Verdict AI menentukan status tiket (`TicketCoverage.ai`): `ada` = di kode; `sebagian` = perlu dicek; `tidak` = hilang, kecuali pola menemukannya (berbeda pendapat → perlu dicek).

@@ -550,6 +550,9 @@
                 {#each report.sources as src (src.ref)}
                   <li>
                     <strong>{src.service}</strong> · <span class="mono">{src.ref}</span> · {src.error ? `gagal: ${src.error}` : `${src.files} file berubah`}
+                    {#if src.aiPending?.length}
+                      <details><summary>Belum ada MR: {src.aiPending.length} kebutuhan deploy masuk dokumen setelah MR dibuat</summary><ul>{#each src.aiPending as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sql">{n.detail}</pre>{/if}</li>{/each}</ul></details>
+                    {/if}
                     {#if src.aiRisks?.length}
                       <details open><summary class="err-text">AI: {src.aiRisks.length} risiko/temuan review</summary><ul>{#each src.aiRisks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}<span>{r.reason}</span></li>{/each}</ul></details>
                     {/if}

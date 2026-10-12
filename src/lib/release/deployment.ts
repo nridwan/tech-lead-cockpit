@@ -273,6 +273,17 @@ function code(body: string, language?: string): string {
   return `<ac:structured-macro ac:name="code" ac:schema-version="1">${language ? `<ac:parameter ac:name="language">${esc(language)}</ac:parameter>` : ''}<ac:parameter ac:name="wrap">true</ac:parameter><ac:plain-text-body>${cdata(body)}</ac:plain-text-body></ac:structured-macro>`;
 }
 
+/**
+ * The service has a release MR into the target that is not closed: only then does the document
+ * carry its deploy details (they come from the code proposed for the release).
+ */
+export function hasReleaseMr(service: ReleaseService, checks: MrCheck[]): boolean {
+  return service.mrs.some((m) => {
+    const c = checks.find((x) => x.ref === m.ref);
+    return !c || c.error !== undefined || c.state !== 'closed';
+  });
+}
+
 /** Commit id for a service: the merge commit of its merged release MR, else none (TBA). */
 export function serviceCommit(service: ReleaseService, checks: MrCheck[]): string | undefined {
   // Before the review is merged the document says TBA: an open MR's head or a typed sha goes stale.
@@ -362,12 +373,15 @@ export function deploymentStorage(release: Release, report?: ReleaseReport | nul
   );
   for (const s of services) {
     const pre: { text: string; done?: boolean; after?: string }[] = [];
-    const env = serviceEnvBlock(release, s);
+    const waiting = !hasReleaseMr(s, checks);
+    const env = waiting ? null : serviceEnvBlock(release, s);
     if (env) pre.push({ text: 'Update .env', done: env.done, after: code(env.text) });
-    for (const m of release.items.filter((i) => i.kind === 'migration' && i.service === s.name)) pre.push({ text: `Jalankan migrasi ${m.label}`, done: m.done });
-    for (const q of release.items.filter((i) => i.kind === 'sql' && i.service === s.name)) pre.push({ text: q.detail ? q.label : `Jalankan query ${q.label}`, done: q.done, ...(q.detail ? { after: code(q.detail, 'sql') } : {}) });
-    for (const p of s.preDeploy ?? []) pre.push({ text: p });
-    const post = (s.postDeploy ?? []).map((text) => ({ text }));
+    const mine = (kind: string) => (waiting ? [] : release.items.filter((i) => i.kind === kind && i.service?.toLowerCase() === s.name.toLowerCase()));
+    for (const m of mine('migration')) pre.push({ text: `Jalankan migrasi ${m.label}`, done: m.done });
+    for (const q of mine('sql')) pre.push({ text: q.detail ? q.label : `Jalankan query ${q.label}`, done: q.done, ...(q.detail ? { after: code(q.detail, 'sql') } : {}) });
+    for (const p of waiting ? [] : (s.preDeploy ?? [])) pre.push({ text: p });
+    if (waiting) pre.push({ text: `Menunggu MR ke ${release.targetBranch}` });
+    const post = (waiting ? [] : (s.postDeploy ?? [])).map((text) => ({ text }));
     const rollback = release.steps.filter((x) => x.kind === 'rollback' && x.service === s.name).map((x) => x.text);
     out.push(
       '<table data-table-width="760" data-layout="center"><colgroup><col style="width: 233.0px;" /><col style="width: 527.0px;" /></colgroup><tbody>',

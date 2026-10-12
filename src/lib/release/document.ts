@@ -1,4 +1,4 @@
-import { DEFAULT_FAILOVER, DEFAULT_ROLES, changeLogRows, deploymentTitle, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
+import { DEFAULT_FAILOVER, DEFAULT_ROLES, changeLogRows, deploymentTitle, hasReleaseMr, serviceCommit, serviceEnvBlock, tanggal } from './deployment';
 import { RELEASE_STATUS_LABELS, type Release, type ReleaseReport } from './types';
 
 /**
@@ -32,17 +32,23 @@ export function releaseMarkdown(r: Release, report?: ReleaseReport | null): stri
   for (const s of services) {
     lines.push(`### \`${s.name}\``, '');
     lines.push('**Pre-deploy**', '');
+    if (!hasReleaseMr(s, checks)) {
+      // Details come from the code in the release MR: none yet.
+      lines.push(`- [ ] Menunggu MR ke ${r.targetBranch}`, '', '**Commit id**: `TBA`', '');
+      lines.push(`**Updated by**: ${s.updatedBy ? `@${s.updatedBy.name}` : '-'}`, '');
+      continue;
+    }
     let any = false;
     const env = serviceEnvBlock(r, s);
     if (env) {
       any = true;
       lines.push(`- ${box(env.done)} Update .env`, '', '```', env.text, '```', '');
     }
-    for (const m of r.items.filter((i) => i.kind === 'migration' && i.service === s.name)) {
+    for (const m of r.items.filter((i) => i.kind === 'migration' && i.service?.toLowerCase() === s.name.toLowerCase())) {
       any = true;
       lines.push(`- ${box(m.done)} Jalankan migrasi \`${m.label}\``);
     }
-    for (const q of r.items.filter((i) => i.kind === 'sql' && i.service === s.name)) {
+    for (const q of r.items.filter((i) => i.kind === 'sql' && i.service?.toLowerCase() === s.name.toLowerCase())) {
       any = true;
       lines.push(`- ${box(q.done)} ${q.detail ? q.label : `Jalankan query \`${q.label}\``}`);
       if (q.detail) lines.push('', '```sql', q.detail, '```', '');

@@ -279,7 +279,7 @@ describe('ReleaseManager', () => {
       runAi,
       gitlab: async () => ({
         mrsToBranch: async () => [],
-        mr: async () => detail(summary('payments/core-payment', 12)),
+        mr: async () => detail(summary('payments/core-payment', 12), { changes }),
         branchExists: async () => true,
         compare: async (_p, from, to) =>
           from === 'master'
@@ -287,7 +287,8 @@ describe('ReleaseManager', () => {
             : { commits: [], changes: [changes[to === 'c1c1c1c1aa' ? 0 : 1]], truncated: false },
       }),
     });
-    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    const mr = { ref: 'payments/core-payment!12', projectPath: 'payments/core-payment', iid: 12, webUrl: 'https://gitlab.example.com/payments/core-payment/-/merge_requests/12', via: 'auto' as const };
+    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [mr], order: 1 }] } as never);
     const ai = { provider: 'claude' as const, model: 'x' };
     const settle = async (kind: 'tickets' | 'picks' | 'document', serviceId?: string) => {
       for (let i = 0; i < 50; i++) {
@@ -319,12 +320,12 @@ describe('ReleaseManager', () => {
     expect(prompts[1]).toContain('+func RefundApi()');
     const report = (await m.report(r.id))!;
     expect(report.ai?.model).toBe('claude/x');
-    expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: ['payments/core-payment@staging'], ai: { verdict: 'ada' } });
+    expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: ['payments/core-payment!12'], ai: { verdict: 'ada' } });
     expect(report.sources?.[0].aiUnrelated).toEqual([{ path: 'api/promo.go', reason: 'promo bukan scope' }]);
     const saved = await m.get(r.id);
     // Straight into the document: the query in Pre-deploy, the env in the .env block.
     expect(saved.items.map((i) => [i.kind, i.label, i.source, i.detail])).toEqual([['sql', 'Buat tabel refund_logs', 'ai', 'CREATE TABLE refund_logs (id bigint);']]);
-    expect(saved.services[0].envBlock).toBe('REFUND_MAX=');
+    expect(saved.services[0].envBlock?.split('\n')).toContain('REFUND_MAX=');
     expect(saved.services[0].postDeploy).toEqual(['Smoke test refund']);
     expect(report.sources?.[0].aiRisks).toEqual([{ path: 'api/promo.go', reason: 'kredensial di kode' }]);
 
@@ -335,8 +336,8 @@ describe('ReleaseManager', () => {
     await settle('tickets');
     const again = await m.get(r.id);
     expect(again.services[0].postDeploy).toEqual(['Cek log refund']);
-    expect(again.items).toEqual([]);
-    expect(again.services[0].envBlock).toBe('REFUND_MAX=');
+    expect(again.items.filter((i) => i.source === 'ai')).toEqual([]);
+    expect(again.services[0].envBlock).toContain('REFUND_MAX=');
     prompts.splice(1, 2);
 
     replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));
@@ -355,6 +356,31 @@ describe('ReleaseManager', () => {
     expect(doc.fixes).toEqual([{ serviceId: 's1', name: 'core-payment', envBlock: 'REFUND_MAX=' }]);
     expect(prompts[3]).toContain('Instruksi Tech Lead: lengkapi .env');
     expect((await m.get(r.id)).services[0]).toEqual(before);
+  });
+
+  it('keeps the document empty for a service without a release MR (preview only)', async () => {
+    // No tickets and no MR candidates: the discovery step asks no AI.
+    const replies = [JSON.stringify({ tickets: [], needs: [{ kind: 'env', when: 'pre', label: 'X_KEY', files: [] }, { kind: 'other', when: 'post', label: 'Restart worker', files: [] }] })];
+    const m = manager({
+      runAi: () => ({ done: Promise.resolve({ reply: replies.shift() ?? '{}' }), cancel: () => {} }),
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async () => true,
+        compare: async () => ({ commits: [], changes: [{ oldPath: 'a.go', newPath: 'a.go', newFile: true, renamedFile: false, deletedFile: false, diff: '+os.Getenv("X_KEY")', additions: 1, deletions: 0 }], truncated: false }),
+      }),
+    });
+    const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    await m.aiStart(r.id, 'tickets', { ai: { provider: 'claude', model: 'x' } });
+    for (let i = 0; i < 50 && (await m.aiJob(r.id, 'tickets'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 5));
+    const saved = await m.get(r.id);
+    expect(saved.services[0].envBlock).toBeUndefined();
+    expect(saved.services[0].postDeploy).toBeUndefined();
+    expect((await m.report(r.id))?.sources?.[0].aiPending?.map((n) => n.label)).toEqual(['X_KEY', 'Restart worker']);
+    await expect(m.aiStart(r.id, 'document', { ai: { provider: 'claude', model: 'x' }, instruction: 'lengkapi' }).then(async () => {
+      for (let i = 0; i < 50 && (await m.aiJob(r.id, 'document'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 5));
+      return (await m.aiJob(r.id, 'document'))?.error;
+    })).resolves.toMatch(/Belum ada MR rilis/);
   });
 
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
