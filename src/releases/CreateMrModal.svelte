@@ -25,7 +25,10 @@
   // The release's source branch is only the starting value; the field is edited here.
   let source = $state(untrack(() => service.sourceBranch ?? release.sourceBranch ?? 'staging'));
   // Release branch (when the source also holds work outside the release).
-  let showBranch = $state(false);
+  // Layout: a summary with the next step, three tabs, and the MR title + create button at the bottom.
+  let tab = $state<'check' | 'changes' | 'branch'>('check');
+  /** How the release branch is made: whole commits (cherry-pick) or chosen changes (hunks). */
+  let method = $state<'commit' | 'hunk'>('commit');
   let branchName = $state('');
   let picks = $state<BranchPick[]>([]);
   let branching = $state(false);
@@ -36,7 +39,6 @@
   let error = $state('');
   let title = $state('');
   let creating = $state(false);
-  let showChanges = $state(false);
   let changeFilter = $state('');
   const shownChanges = $derived((plan?.changes ?? []).filter((c) => !changeFilter.trim() || c.newPath.toLowerCase().includes(changeFilter.trim().toLowerCase())));
 
@@ -110,20 +112,19 @@
       branchName = plan.releaseBranch.branch;
       picks = plan.releaseBranch.commits.map((c) => ({ ...c }));
       // A dirty source: suggest the release branch right away.
-      showBranch = plan.outOfScope.length > 0 || plan.releaseBranch.commits.some((c) => c.reason === 'out-of-scope' || c.reason === 'mixed');
+      tab = 'check';
       // The last AI pick for this branch still applies to the same commits.
       aiPicks = {};
       await aiPick.load();
       if (aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch) {
         applyPicks(aiPick.job);
-        showBranch = true;
       }
       await aiSafety.load();
       patchSel = {};
       await aiPatch.load();
       if (aiPatch.job?.status === 'done' && aiPatch.job.sourceBranch === plan.sourceBranch) {
         applyPatch(aiPatch.job);
-        showBranch = true;
+        method = 'hunk';
       }
       // The AI read of this branch: reuse the last one, else start it.
       await aiMr.load();
@@ -216,8 +217,8 @@
       } else {
         toasts.show(`Branch ${r.branch} siap dengan ${r.picked.length} commit.`, 'ok', 4000);
         source = r.branch;
-        showBranch = false;
         await load();
+        tab = 'branch';
         void startSafety();
       }
     } catch (e) {
@@ -285,8 +286,8 @@
       oncreatedBranch(r.release);
       toasts.show(`Branch ${r.branch} siap: ${r.files.length} file, commit ${r.commit.slice(0, 8)}.`, 'ok', 5000);
       source = r.branch;
-      showBranch = false;
       await load();
+      tab = 'branch';
       void startSafety();
     } catch (e) {
       const msg = (e as Error).message;
@@ -306,6 +307,30 @@
   }
 
   const f = $derived(plan?.findings);
+
+  /** What the summary shows: ticket results (AI first), changes without a ticket, risks. */
+  const ticketsIn = $derived(plan ? plan.tickets.filter((t) => (verdictOf(t.key) ? verdictOf(t.key)!.verdict === 'ada' : t.inSource)).length : 0);
+  const ticketsMissing = $derived(plan ? plan.tickets.filter((t) => (verdictOf(t.key) ? verdictOf(t.key)!.verdict === 'tidak' : !t.inSource && !t.unsure)) : []);
+  const loose = $derived(aiMrDone?.unrelated?.filter((u) => !u.flag) ?? []);
+  const flagged = $derived(aiMrDone?.unrelated?.filter((u) => u.flag) ?? []);
+  const risks = $derived(aiMrDone?.risks ?? []);
+  /** The source brings work outside the release: a release branch is the way out. */
+  const dirty = $derived(Boolean(plan) && !onReleaseBranch && (plan!.outOfScope.length > 0 || loose.length > 0));
+
+  /** One sentence on what to do now, and the button for it. */
+  const next = $derived.by((): { text: string; action?: { label: string; run: () => void } ; ok?: boolean } => {
+    if (!plan) return { text: '' };
+    if (!plan.commits.length && !plan.existing) return { text: `${plan.sourceBranch} tidak membawa perubahan baru ke ${plan.targetBranch}.` };
+    if (aiMr.running) return { text: 'AI sedang membaca diff. Hasil pemeriksaan muncul di tab Pemeriksaan.' };
+    if (onReleaseBranch) {
+      if (aiSafety.running) return { text: 'Cek keamanan branch rilis sedang berjalan.' };
+      if (!safety) return { text: `Sumbernya branch rilis ${plan.sourceBranch}: jalankan cek keamanan dulu.`, action: { label: 'Cek keamanan', run: () => ((tab = 'branch'), void startSafety()) } };
+      if (!safetyOk(safety)) return { text: 'Branch rilis belum lolos cek keamanan: selesaikan yang bertanda ✗ / ≈.', action: { label: 'Lihat cek keamanan', run: () => (tab = 'branch') } };
+    }
+    if (dirty) return { text: `${plan.sourceBranch} membawa perubahan di luar scope (${plan.outOfScope.length + loose.length}). Siapkan branch rilis yang hanya berisi scope.`, action: { label: 'Siapkan branch rilis', run: () => (tab = 'branch') } };
+    if (ticketsMissing.length) return { text: `${ticketsMissing.length} tiket belum terlihat di kode (${ticketsMissing.map((t) => t.key).join(', ')}). Pastikan memang tidak ikut rilis ini, lalu buat MR.` };
+    return { text: `Siap: buat MR ${plan.sourceBranch} → ${plan.targetBranch}.`, ok: true };
+  });
 </script>
 
 <Modal bind:open title="Buat MR ke {release.targetBranch}" subtitle="{service.name} · {service.gitlabPath}" width={860}>
@@ -319,56 +344,172 @@
     {#if error}<p class="err small">{error}</p>{/if}
 
     {#if plan}
-      {#if onReleaseBranch}
-        <section class="safety" class:ok={safety && safetyOk(safety)}>
-          <div class="row">
-            <strong>Keamanan branch rilis {plan.sourceBranch}</strong>
-            {#if aiSafety.running}
-              <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiSafety.job?.progress ?? 'Mengecek…'}</span>
-            {:else}
-              <button class="btn btn-sm" onclick={startSafety}><Icon name="check" size={12} /> {safety ? 'Cek ulang' : 'Cek keamanan'}</button>
-            {/if}
-          </div>
-          {#if safety}
-            <ul class="small layers">
-              <li class:bad={safety.subset.length}>
-                {safety.subset.length ? '✗' : '✓'} <strong>Isi dari {safety.from}:</strong> {safety.subset.length ? `${safety.subset.length} perubahan tidak ada di ${safety.from} (belum pernah dites)` : `semua perubahan berasal dari ${safety.from}`}
-                {#if safety.subset.length}<ul>{#each safety.subset.slice(0, 10) as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> {x.text ? `— ${x.text}` : ''} <span class="muted">({x.reason})</span></li>{/each}</ul>{/if}
-              </li>
-              <li class:bad={safety.files.length}>
-                {safety.files.length ? '✗' : '✓'} <strong>File:</strong> {safety.files.length ? `${safety.files.length} masalah` : 'tidak ada penanda konflik, JSON valid'}
-                {#if safety.files.length}<ul>{#each safety.files as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> — {x.reason}</li>{/each}</ul>{/if}
-              </li>
-              <li class:bad={safety.deps?.verdict === 'putus'} class:warn={safety.deps?.verdict === 'perlu dicek'}>
-                {safety.deps?.verdict === 'aman' ? '✓' : safety.deps?.verdict === 'putus' ? '✗' : '≈'} <strong>Ketergantungan (AI):</strong> {safety.deps?.verdict ?? '-'}{safety.deps?.summary ? ` — ${safety.deps.summary}` : ''}
-                {#if safety.deps?.issues.length}<ul>{#each safety.deps.issues as x, i (i)}<li>{#if x.path}<span class="mono">{x.path}</span> — {/if}{x.reason}</li>{/each}</ul>{/if}
-              </li>
-              <li class:bad={safety.pipeline?.status && safety.pipeline.status !== 'success'} class:warn={!safety.pipeline?.status}>
-                {safety.pipeline?.status === 'success' ? '✓' : safety.pipeline?.status ? '✗' : '≈'} <strong>Pipeline:</strong>
-                {#if safety.pipeline?.status}<a href={safety.pipeline.url} target="_blank" rel="noreferrer">{safety.pipeline.status}</a>{:else}{safety.pipeline?.note}{/if}
-              </li>
-            </ul>
-            {#if safety.skipped.length}<p class="muted small">Tidak dibandingkan (biner/lock/terlalu besar): {safety.skipped.slice(0, 6).join(', ')}{safety.skipped.length > 6 ? ', …' : ''}</p>{/if}
-            <p class="small"><strong>{safetyOk(safety) ? 'Aman untuk dibuat MR ke ' + plan.targetBranch + '.' : 'Belum aman: selesaikan yang bertanda ✗ / ≈ dulu.'}</strong></p>
-          {:else if !aiSafety.running}
-            <p class="muted small">Cek: semua perubahan berasal dari branch sumbernya, file valid, ketergantungan tidak putus (AI), dan pipeline branch ini lulus.</p>
-          {/if}
-        </section>
-      {/if}
       {#if plan.existing}
         <div class="note"><Icon name="alert" size={13} /> Sudah ada MR terbuka untuk branch ini: <a href={plan.existing.webUrl} target="_blank" rel="noreferrer">{plan.existing.ref}</a>. "Buat MR" akan menautkannya ke rilis, bukan membuat MR kedua.</div>
       {/if}
-      {#if plan.warnings.length}
-        <div class="warn">{#each plan.warnings as w (w)}<p><Icon name="alert" size={12} /> {w}</p>{/each}</div>
-      {/if}
 
-      <section class="branch">
-        <button class="link-btn" onclick={() => (showBranch = !showBranch)}>{showBranch ? '▾' : '▸'} {plan.sourceBranch} juga berisi perubahan di luar rilis? Buat branch rilis dari {plan.targetBranch}</button>
-        {#if showBranch}
-          <p class="muted small">Commit jalur utama {plan.sourceBranch} (lama ke baru). Merge commit dihitung bersama isi branch fiturnya, jadi satu pilihan membawa satu fitur utuh. Klik <strong>Pilih dengan AI</strong>: AI membaca diff tiap commit dan memilih yang benar-benar milik scope, dengan alasannya.</p>
+      <section class="summary" class:ok={next.ok}>
+        <div class="chips-row small">
+          <span class="chip" class:good={plan.tickets.length > 0 && ticketsIn === plan.tickets.length} class:badc={ticketsMissing.length > 0}>Tiket {ticketsIn}/{plan.tickets.length} ada{aiMrDone ? ' (AI)' : aiMr.running ? ' · AI membaca…' : ''}</span>
+          <span class="chip" class:badc={plan.outOfScope.length + loose.length > 0}>{plan.outOfScope.length + loose.length} di luar scope</span>
+          {#if flagged.length}<span class="chip">{flagged.length} di balik flag</span>{/if}
+          {#if risks.length}<span class="chip badc">{risks.length} risiko</span>{/if}
+          <span class="chip">{plan.commits.length} commit · {plan.files} file</span>
+          {#if onReleaseBranch}<span class="chip" class:good={safety && safetyOk(safety)} class:badc={safety && !safetyOk(safety)}>Keamanan: {aiSafety.running ? 'dicek…' : safety ? (safetyOk(safety) ? 'lolos' : 'belum') : 'belum dicek'}</span>{/if}
+        </div>
+        <div class="next">
+          <span><strong>Langkah berikutnya:</strong> {next.text}</span>
+          {#if next.action}<button class="btn btn-sm btn-primary" onclick={next.action.run}>{next.action.label}</button>{/if}
+        </div>
+      </section>
+
+      <div class="tabbar" role="tablist">
+        <button role="tab" class:active={tab === 'check'} onclick={() => (tab = 'check')}>Pemeriksaan{ticketsMissing.length + risks.length + loose.length ? ` (${ticketsMissing.length + risks.length + loose.length})` : ''}</button>
+        <button role="tab" class:active={tab === 'changes'} onclick={() => (tab = 'changes')}>Perubahan ({plan.files} file)</button>
+        <button role="tab" class:active={tab === 'branch'} onclick={() => (tab = 'branch')}>Branch rilis{onReleaseBranch ? ' ✓' : dirty ? ' ⚠' : ''}</button>
+      </div>
+
+      {#if tab === 'check'}
+        {#if plan.warnings.length}
+          <details class="warn"><summary class="small">{plan.warnings.length} catatan dari perbandingan</summary>{#each plan.warnings as w (w)}<p><Icon name="alert" size={12} /> {w}</p>{/each}</details>
+        {/if}
+        <section>
+          {#if plan.tickets.length}
+            <h4>Tiket {service.name} <span class="muted small">· dicek dari isi diff {plan.sourceBranch}</span></h4>
+            <div class="row small">
+              {#if aiMr.running}
+                <span class="ai-status"><Icon name="sparkles" size={12} /> {aiMr.job?.progress ?? 'AI membaca diff…'}</span>
+              {:else if aiMrDone}
+                <span class="muted">Dicek AI ({aiMrDone.model})</span>
+                <button class="link-btn" onclick={startAiMr}>Cek ulang</button>
+              {:else}
+                <button class="link-btn" onclick={startAiMr}><Icon name="sparkles" size={12} /> Cek dengan AI</button>
+              {/if}
+            </div>
+            <ul class="small tickets">
+              {#each plan.tickets as t (t.key)}
+                {@const v = verdictOf(t.key)}
+                <li class:missing={v ? v.verdict === 'tidak' : !t.inSource && !t.unsure} class:unsure={v ? v.verdict === 'sebagian' : t.unsure}>
+                  <span class="mono">{t.key}</span> {t.summary}
+                  <span class="muted">· {t.status} · {v ? `AI: ${v.verdict}` : t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
+                  {#if v?.reason}<div class="muted evidence"><Icon name="sparkles" size={11} /> {v.reason}</div>{/if}
+                  {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h, i (i)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
+                </li>
+              {/each}
+            </ul>
+            {#if loose.length}
+              <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length}</h4>
+              <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+            {/if}
+            {#if flagged.length}
+              <h4>Di balik feature flag (aman ikut selama flag mati) — {flagged.length}</h4>
+              <ul class="small tickets">{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> — {u.reason}</li>{/each}</ul>
+            {/if}
+            {#if aiMrDone?.risks?.length}
+              <h4 class="bad">Risiko / temuan review (AI) — {aiMrDone.risks.length}</h4>
+              <ul class="small tickets">{#each aiMrDone.risks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}{r.reason}</li>{/each}</ul>
+            {/if}
+            {#if aiMrDone?.needs?.length}
+              <h4>Perlu di server (AI)</h4>
+              <ul class="small tickets">{#each aiMrDone.needs as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sqlbox">{n.detail}</pre>{/if}</li>{/each}</ul>
+            {/if}
+            {#if !aiMrDone && plan.unattributed?.length}
+              <details class="small"><summary>{plan.unattributed.length} file tidak terkait tiket {service.name} mana pun (cek apakah ikut terbawa)</summary><ul class="mono">{#each plan.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
+            {/if}
+          {/if}
+          {#if plan.outOfScope.length}
+            <h4 class="bad">Di luar scope, akan ikut terbawa ({plan.outOfScope.length})</h4>
+            <ul class="small tickets">
+              {#each plan.outOfScope as o (o.key)}<li class="missing"><span class="mono">{o.key}</span> {o.summary ?? 'tidak termuat dari Jira'}{o.commits[0] ? ` · ${o.commits[0]}` : ''}</li>{/each}
+            </ul>
+          {/if}
+          <h4>Temuan pola (env, migrasi, query)</h4>
+          {#if f}
+            <ul class="small findings">
+              {#if f.envAdded.length}<li><strong>Env baru:</strong> <span class="mono">{f.envAdded.join(', ')}</span></li>{/if}
+              {#if f.envReadInCode.length}<li><strong>Env dibaca di kode:</strong> <span class="mono">{f.envReadInCode.join(', ')}</span></li>{/if}
+              {#if f.migrations.length}<li><strong>Migrasi:</strong> <span class="mono">{f.migrations.join(', ')}</span></li>{/if}
+              {#if f.sqlOutside.length}<li class="w"><strong>Query manual:</strong> <span class="mono">{f.sqlOutside.join(', ')}</span></li>{/if}
+              {#if f.modelWithoutMigration.length}<li class="w"><strong>Model berubah tanpa migrasi:</strong> <span class="mono">{f.modelWithoutMigration.join(', ')}</span></li>{/if}
+              {#if f.commitsWithoutKey.length}<li class="w"><strong>{f.commitsWithoutKey.length} commit tanpa Jira key</strong></li>{/if}
+              {#if !f.envAdded.length && !f.envReadInCode.length && !f.migrations.length && !f.sqlOutside.length}<li class="muted">Tidak membawa env, migrasi, atau query.</li>{/if}
+            </ul>
+          {/if}
+        </section>
+      {:else if tab === 'changes'}
+        <section class="changes">
+          {#if plan.commits.length}
+            <h4>Commit</h4>
+            <ul class="small commits">
+              {#each plan.commits.slice(0, 30) as c (c.shortId)}<li><span class="mono">{c.shortId}</span> {c.title}</li>{/each}
+              {#if plan.commits.length > 30}<li class="muted">… {plan.commits.length - 30} commit lain</li>{/if}
+            </ul>
+          {/if}
+          <h4>File ({plan.files}, {plan.changes.reduce((n, c) => n + c.additions, 0)}+ / {plan.changes.reduce((n, c) => n + c.deletions, 0)}−)</h4>
+          <div class="row">
+            <input class="input" bind:value={changeFilter} placeholder="Saring file, mis. migrations atau .env" />
+            <span class="muted small">{shownChanges.length} file{plan.truncated ? ' · perbandingan dari GitLab terpotong' : ''}</span>
+          </div>
+          <div class="diffs">
+            {#each shownChanges as c (c.newPath)}
+              <DiffFile file={c} open={false} />
+            {:else}
+              <p class="muted small">Tidak ada file yang cocok.</p>
+            {/each}
+          </div>
+        </section>
+      {:else}
+        <section class="branch">
+          {#if onReleaseBranch}
+            <section class="safety" class:ok={safety && safetyOk(safety)}>
+              <div class="row">
+                <strong>Keamanan branch rilis {plan.sourceBranch}</strong>
+                {#if aiSafety.running}
+                  <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiSafety.job?.progress ?? 'Mengecek…'}</span>
+                {:else}
+                  <button class="btn btn-sm" onclick={startSafety}><Icon name="check" size={12} /> {safety ? 'Cek ulang' : 'Cek keamanan'}</button>
+                {/if}
+              </div>
+              {#if safety}
+                <ul class="small layers">
+                  <li class:bad={safety.subset.length}>
+                    {safety.subset.length ? '✗' : '✓'} <strong>Isi dari {safety.from}:</strong> {safety.subset.length ? `${safety.subset.length} perubahan tidak ada di ${safety.from} (belum pernah dites)` : `semua perubahan berasal dari ${safety.from}`}
+                    {#if safety.subset.length}<ul>{#each safety.subset.slice(0, 10) as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> {x.text ? `— ${x.text}` : ''} <span class="muted">({x.reason})</span></li>{/each}</ul>{/if}
+                  </li>
+                  <li class:bad={safety.files.length}>
+                    {safety.files.length ? '✗' : '✓'} <strong>File:</strong> {safety.files.length ? `${safety.files.length} masalah` : 'tidak ada penanda konflik, JSON valid'}
+                    {#if safety.files.length}<ul>{#each safety.files as x, i (i)}<li><span class="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> — {x.reason}</li>{/each}</ul>{/if}
+                  </li>
+                  <li class:bad={safety.deps?.verdict === 'putus'} class:warn={safety.deps?.verdict === 'perlu dicek'}>
+                    {safety.deps?.verdict === 'aman' ? '✓' : safety.deps?.verdict === 'putus' ? '✗' : '≈'} <strong>Ketergantungan (AI):</strong> {safety.deps?.verdict ?? '-'}{safety.deps?.summary ? ` — ${safety.deps.summary}` : ''}
+                    {#if safety.deps?.issues.length}<ul>{#each safety.deps.issues as x, i (i)}<li>{#if x.path}<span class="mono">{x.path}</span> — {/if}{x.reason}</li>{/each}</ul>{/if}
+                  </li>
+                  <li class:bad={safety.pipeline?.status && safety.pipeline.status !== 'success'} class:warn={!safety.pipeline?.status}>
+                    {safety.pipeline?.status === 'success' ? '✓' : safety.pipeline?.status ? '✗' : '≈'} <strong>Pipeline:</strong>
+                    {#if safety.pipeline?.status}<a href={safety.pipeline.url} target="_blank" rel="noreferrer">{safety.pipeline.status}</a>{:else}{safety.pipeline?.note}{/if}
+                  </li>
+                </ul>
+                {#if safety.skipped.length}<p class="muted small">Tidak dibandingkan (biner/lock/terlalu besar): {safety.skipped.slice(0, 6).join(', ')}{safety.skipped.length > 6 ? ', …' : ''}</p>{/if}
+                <p class="small"><strong>{safetyOk(safety) ? 'Aman untuk dibuat MR ke ' + plan.targetBranch + '.' : 'Belum aman: selesaikan yang bertanda ✗ / ≈ dulu.'}</strong></p>
+              {:else if !aiSafety.running}
+                <p class="muted small">Cek: semua perubahan berasal dari branch sumbernya, file valid, ketergantungan tidak putus (AI), dan pipeline branch ini lulus.</p>
+              {/if}
+            </section>
+          {/if}
+          {#if !onReleaseBranch}
+            <p class="small">Buat branch rilis dari <span class="mono">{plan.targetBranch}</span> yang hanya berisi scope, bila <span class="mono">{plan.sourceBranch}</span> juga membawa perubahan lain. Setelah dibuat, branch itu jadi sumber MR dan dicek keamanannya.</p>
+          {/if}
+          <div class="method small" role="radiogroup">
+            <label><input type="radio" bind:group={method} value="commit" /> <strong>Per commit</strong> (cherry-pick): bila fitur rapi per commit/merge</label>
+            <label><input type="radio" bind:group={method} value="hunk" /> <strong>Per perubahan</strong> (hunk): bila commit campuran, atau perlu sebagian isi commit</label>
+          </div>
           <textarea class="input pick-ins" rows="2" bind:value={pickInstruction} placeholder="Instruksi untuk AI (opsional), mis. perubahan CI/Dockerfile tanpa task tetap ikut; commit refactor logger jangan ikut"></textarea>
           <div class="row">
-            <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiPick.running} />
+            <label class="inline small">Nama branch rilis <input class="input mono bname" bind:value={branchName} /></label>
+            <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiPick.running || aiPatch.running} />
+          </div>
+          {#if method === 'commit'}
+          <div class="row">
             {#if aiPick.running}
               <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiPick.job?.progress ?? 'AI berjalan…'}</span>
               <button class="btn btn-sm" onclick={() => aiPick.cancel()}><Icon name="x" size={12} /> Batalkan</button>
@@ -380,10 +521,6 @@
           {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch && aiPick.job.notes?.length}
             <ul class="small ai-notes">{#each aiPick.job.notes as n, i (i)}<li>{n}</li>{/each}</ul>
           {/if}
-          <div class="row">
-            <label class="inline small">Nama branch <input class="input mono bname" bind:value={branchName} /></label>
-            <span class="small">{chosen.length} dari {picks.length} commit dipilih</span>
-          </div>
           <ul class="picks">
             {#each picks as p (p.sha)}
               <li class:off={!p.include}>
@@ -406,9 +543,13 @@
           {#if branchResult?.failed}
             <p class="err small">Berhenti di <span class="mono">{branchResult.failed.sha.slice(0, 8)}</span> {branchResult.failed.title ?? ''}: {branchResult.failed.error}. {branchResult.picked} commit sebelumnya sudah masuk ke branch {branchName}. Selesaikan konfliknya secara lokal (git cherry-pick), push, lalu Bandingkan dengan branch itu.</p>
           {/if}
+          <p class="small">{chosen.length} dari {picks.length} commit dipilih</p>
+          <div class="row">
+            <button class="btn btn-sm" onclick={copyCommands} disabled={!chosen.length}><Icon name="copy" size={12} /> Salin perintah git</button>
+            <button class="btn btn-sm btn-primary" onclick={makeBranch} disabled={branching || !chosen.length || !branchName.trim() || plan.canCreate === false}><Icon name="merge" size={12} /> {branching ? 'Membuat…' : 'Buat branch & cherry-pick di GitLab'}</button>
+          </div>
+          {:else}
           <div class="patch">
-            <h4>Ambil perubahan tertentu saja (per hunk)</h4>
-            <p class="muted small">Untuk commit campuran, atau perubahan tanpa tiket yang diminta instruksi: AI memilih hunk perubahan {plan.targetBranch} → {plan.sourceBranch} yang masuk scope + instruksi di atas. Branch rilis dibuat dari {plan.targetBranch} dengan hanya perubahan itu, dalam satu commit.</p>
             <div class="row">
               {#if aiPatch.running}
                 <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiPatch.job?.progress ?? 'AI berjalan…'}</span>
@@ -448,111 +589,13 @@
               </div>
             {/if}
           </div>
-          <div class="row">
-            <button class="btn btn-sm" onclick={copyCommands} disabled={!chosen.length}><Icon name="copy" size={12} /> Salin perintah git</button>
-            <button class="btn btn-sm btn-primary" onclick={makeBranch} disabled={branching || !chosen.length || !branchName.trim() || plan.canCreate === false}><Icon name="merge" size={12} /> {branching ? 'Membuat…' : 'Buat branch & cherry-pick di GitLab'}</button>
-          </div>
-        {/if}
-      </section>
-
-      <div class="grid">
-        <section>
-          <h4>Perbandingan</h4>
-          <p class="small">{plan.commits.length} commit · {plan.files} file{plan.truncated ? ' (sebagian, perbandingan terpotong)' : ''}</p>
-          {#if f}
-            <ul class="small findings">
-              {#if f.envAdded.length}<li><strong>Env baru:</strong> <span class="mono">{f.envAdded.join(', ')}</span></li>{/if}
-              {#if f.envReadInCode.length}<li><strong>Env dibaca di kode:</strong> <span class="mono">{f.envReadInCode.join(', ')}</span></li>{/if}
-              {#if f.migrations.length}<li><strong>Migrasi:</strong> <span class="mono">{f.migrations.join(', ')}</span></li>{/if}
-              {#if f.sqlOutside.length}<li class="w"><strong>Query manual:</strong> <span class="mono">{f.sqlOutside.join(', ')}</span></li>{/if}
-              {#if f.modelWithoutMigration.length}<li class="w"><strong>Model berubah tanpa migrasi:</strong> <span class="mono">{f.modelWithoutMigration.join(', ')}</span></li>{/if}
-              {#if f.commitsWithoutKey.length}<li class="w"><strong>{f.commitsWithoutKey.length} commit tanpa Jira key</strong></li>{/if}
-              {#if !f.envAdded.length && !f.envReadInCode.length && !f.migrations.length && !f.sqlOutside.length}<li class="muted">Tidak membawa env, migrasi, atau query.</li>{/if}
-            </ul>
-          {/if}
-          {#if plan.outOfScope.length}
-            <h4 class="bad">Di luar scope, akan ikut terbawa ({plan.outOfScope.length})</h4>
-            <ul class="small tickets">
-              {#each plan.outOfScope as o (o.key)}<li class="missing"><span class="mono">{o.key}</span> {o.summary ?? 'tidak termuat dari Jira'}{o.commits[0] ? ` · ${o.commits[0]}` : ''}</li>{/each}
-            </ul>
-          {/if}
-          {#if plan.tickets.length}
-            <h4>Tiket {service.name} <span class="muted small">· dicek dari isi diff {plan.sourceBranch}</span></h4>
-            <div class="row small">
-              {#if aiMr.running}
-                <span class="ai-status"><Icon name="sparkles" size={12} /> {aiMr.job?.progress ?? 'AI membaca diff…'}</span>
-              {:else if aiMrDone}
-                <span class="muted">Dicek AI ({aiMrDone.model})</span>
-                <button class="link-btn" onclick={startAiMr}>Cek ulang</button>
-              {:else}
-                <button class="link-btn" onclick={startAiMr}><Icon name="sparkles" size={12} /> Cek dengan AI</button>
-              {/if}
-            </div>
-            <ul class="small tickets">
-              {#each plan.tickets as t (t.key)}
-                {@const v = verdictOf(t.key)}
-                <li class:missing={v ? v.verdict === 'tidak' : !t.inSource && !t.unsure} class:unsure={v ? v.verdict === 'sebagian' : t.unsure}>
-                  <span class="mono">{t.key}</span> {t.summary}
-                  <span class="muted">· {t.status} · {v ? `AI: ${v.verdict}` : t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
-                  {#if v?.reason}<div class="muted evidence"><Icon name="sparkles" size={11} /> {v.reason}</div>{/if}
-                  {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h, i (i)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
-                </li>
-              {/each}
-            </ul>
-            {#if aiMrDone?.unrelated?.some((u) => !u.flag)}
-              {@const loose = aiMrDone.unrelated.filter((u) => !u.flag)}
-              <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length}</h4>
-              <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
-            {/if}
-            {#if aiMrDone?.unrelated?.some((u) => u.flag)}
-              {@const flagged = aiMrDone.unrelated.filter((u) => u.flag)}
-              <h4>Di balik feature flag (aman ikut selama flag mati) — {flagged.length}</h4>
-              <ul class="small tickets">{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> — {u.reason}</li>{/each}</ul>
-            {/if}
-            {#if aiMrDone?.risks?.length}
-              <h4 class="bad">Risiko / temuan review (AI) — {aiMrDone.risks.length}</h4>
-              <ul class="small tickets">{#each aiMrDone.risks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}{r.reason}</li>{/each}</ul>
-            {/if}
-            {#if aiMrDone?.needs?.length}
-              <h4>Perlu di server (AI)</h4>
-              <ul class="small tickets">{#each aiMrDone.needs as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sqlbox">{n.detail}</pre>{/if}</li>{/each}</ul>
-            {/if}
-            {#if !aiMrDone && plan.unattributed?.length}
-              <details class="small"><summary>{plan.unattributed.length} file tidak terkait tiket {service.name} mana pun (cek apakah ikut terbawa)</summary><ul class="mono">{#each plan.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
-            {/if}
-          {/if}
-          {#if plan.commits.length}
-            <h4>Commit</h4>
-            <ul class="small commits">
-              {#each plan.commits.slice(0, 30) as c (c.shortId)}<li><span class="mono">{c.shortId}</span> {c.title}</li>{/each}
-              {#if plan.commits.length > 30}<li class="muted">… {plan.commits.length - 30} commit lain</li>{/if}
-            </ul>
           {/if}
         </section>
-        <section>
-          <label class="field"><span>Judul MR</span><input class="input" bind:value={title} /></label>
-        </section>
-      </div>
-
-      <section class="changes">
-        <button class="link-btn" onclick={() => (showChanges = !showChanges)}>{showChanges ? '▾' : '▸'} Review perubahan ({plan.files} file, {plan.changes.reduce((n, c) => n + c.additions, 0)}+ / {plan.changes.reduce((n, c) => n + c.deletions, 0)}−) yang akan masuk ke {plan.targetBranch}</button>
-        {#if showChanges}
-          <div class="row">
-            <input class="input" bind:value={changeFilter} placeholder="Saring file, mis. migrations atau .env" />
-            <span class="muted small">{shownChanges.length} file{plan.truncated ? ' · perbandingan dari GitLab terpotong' : ''}</span>
-          </div>
-          <div class="diffs">
-            {#each shownChanges as c (c.newPath)}
-              <DiffFile file={c} open={false} />
-            {:else}
-              <p class="muted small">Tidak ada file yang cocok.</p>
-            {/each}
-          </div>
-        {/if}
-      </section>
+      {/if}
 
       <div class="actions">
-        <span class="muted small grow">
+        <label class="field grow"><span class="small">Judul MR</span><input class="input" bind:value={title} /></label>
+        <span class="muted small token-note">
           {#if plan.canCreate === false}Token GitLab tidak punya scope <code>api</code>: pakai "Buka form di GitLab", atau buat token baru dengan scope api lalu simpan di Koneksi.{:else if plan.canCreate === undefined}Scope token tidak bisa dicek; kalau GitLab menolak, pakai "Buka form di GitLab".{/if}
         </span>
         <button class="btn btn-sm" onclick={openForm} disabled={!plan.formUrl}><Icon name="external" size={12} /> Buka form di GitLab</button>
@@ -573,11 +616,18 @@
     gap: 10px;
   }
   .row,
+  /* The MR title and the create button stay in view while the tabs scroll. */
   .actions {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 8px;
     flex-wrap: wrap;
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    padding: 10px 0 2px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
   }
   .inline {
     display: inline-flex;
@@ -590,11 +640,6 @@
   .grow {
     flex: 1;
     min-width: 200px;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 1.2fr;
-    gap: 16px;
   }
   section {
     display: flex;
@@ -704,8 +749,73 @@
     flex-direction: column;
     gap: 6px;
   }
-  .patch h4 {
-    margin: 0;
+  .summary {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .summary.ok {
+    border-color: var(--ok, #15803d);
+  }
+  .chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip {
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .chip.good {
+    color: var(--ok, #15803d);
+    border-color: var(--ok, #15803d);
+  }
+  .chip.badc {
+    color: var(--err);
+    border-color: var(--err);
+  }
+  .next {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .tabbar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabbar button {
+    border: none;
+    background: none;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text-2, inherit);
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+  }
+  .tabbar button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .method {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .token-note {
+    flex-basis: 100%;
+    order: 9;
   }
   .safety {
     border: 1px solid var(--warn, #b45309);
@@ -817,8 +927,5 @@
     color: var(--err);
   }
   @media (max-width: 760px) {
-    .grid {
-      grid-template-columns: 1fr;
     }
-  }
 </style>
