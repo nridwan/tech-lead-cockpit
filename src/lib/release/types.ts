@@ -359,7 +359,7 @@ export interface AiPick {
 export interface ReleaseAiJob {
   id: string;
   releaseId: string;
-  kind: 'tickets' | 'picks' | 'document' | 'mr';
+  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch';
   serviceId?: string;
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */
@@ -374,6 +374,8 @@ export interface ReleaseAiJob {
   picks?: AiPick[];
   /** document: proposed fixes per service, applied only when the user confirms. */
   fixes?: ReleaseDocFix[];
+  /** patch: the changed files split in hunks, with the AI's choice per hunk. */
+  patch?: { files: PatchFile[]; skipped: string[] };
   /** mr: the AI's reading of the source branch diff for one service. */
   verdicts?: ({ key: string } & AiTicketVerdict)[];
   unrelated?: { path: string; reason: string }[];
@@ -398,4 +400,25 @@ export interface ReleaseAiNeed {
   label: string;
   detail?: string;
   files: string[];
+}
+
+/** One hunk of a release patch: lines it adds/removes in the target's file, and the AI's choice. */
+export interface PatchHunk {
+  /** `path#n`. */
+  id: string;
+  /** Line in the target's file where it starts. */
+  at: number;
+  added: string[];
+  removed: string[];
+  /** Lines left out of the preview. */
+  more: number;
+  include: boolean;
+  keys?: string[];
+  reason?: string;
+}
+
+export interface PatchFile {
+  path: string;
+  status: 'new' | 'deleted' | 'modified';
+  hunks: PatchHunk[];
 }

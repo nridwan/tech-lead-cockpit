@@ -6,9 +6,10 @@ import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.t
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
+import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, patchPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
+import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
 import { belongsTo, buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
@@ -39,6 +40,7 @@ export interface ReleaseGitLab {
   createBranch?(path: string, branch: string, ref: string): Promise<void>;
   cherryPick?(path: string, sha: string, branch: string): Promise<{ id: string }>;
   rawFile?(path: string, filePath: string, ref: string): Promise<string | undefined>;
+  commitFiles?(path: string, req: { branch: string; start: string; message: string; actions: { action: 'create' | 'update' | 'delete'; path: string; content?: string }[] }): Promise<{ id: string }>;
 }
 
 export interface ReleaseDeps {
@@ -573,7 +575,7 @@ export class ReleaseManager {
   // ---- AI jobs: read the tickets and deploy needs, pick release-branch commits, fix the document.
 
   private aiKey(releaseId: string, kind: AiKind, serviceId?: string) {
-    return `${releaseId}.ai-${kind}${(kind === 'picks' || kind === 'mr') && serviceId ? `-${serviceId}` : ''}`;
+    return `${releaseId}.ai-${kind}${(kind === 'picks' || kind === 'mr' || kind === 'patch') && serviceId ? `-${serviceId}` : ''}`;
   }
 
   private async saveAiJob(job: ReleaseAiJob) {
@@ -618,9 +620,9 @@ export class ReleaseManager {
   async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string }): Promise<ReleaseAiJob> {
     const release = await this.get(id);
     if (!this.deps.runAi) throw new ReleaseInputError('AI belum tersedia di connector ini.');
-    if (!['tickets', 'picks', 'document', 'mr'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
+    if (!['tickets', 'picks', 'document', 'mr', 'patch'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
     if (!isAiSelection(opts.ai)) throw new ReleaseInputError('Pilihan AI tidak valid.');
-    if (kind === 'picks' || kind === 'mr') this.service(release, opts.serviceId ?? '');
+    if (kind === 'picks' || kind === 'mr' || kind === 'patch') this.service(release, opts.serviceId ?? '');
     const instruction = (opts.instruction ?? '').trim().slice(0, 4000);
     if (kind === 'document' && !instruction) throw new ReleaseInputError('Tulis instruksi perbaikan dokumen dulu.');
     const source = (opts.sourceBranch ?? '').trim();
@@ -631,8 +633,8 @@ export class ReleaseManager {
       id: newId(),
       releaseId: release.id,
       kind,
-      ...(kind === 'picks' || kind === 'mr' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
-      ...(instruction && (kind === 'picks' || kind === 'document') ? { instruction } : {}),
+      ...(kind === 'picks' || kind === 'mr' || kind === 'patch' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
+      ...(instruction && (kind === 'picks' || kind === 'document' || kind === 'patch') ? { instruction } : {}),
       model: opts.ai.model ? `${opts.ai.provider}/${opts.ai.model}` : opts.ai.provider,
       status: 'running',
       progress: 'Menyiapkan…',
@@ -651,6 +653,7 @@ export class ReleaseManager {
       if (job.kind === 'tickets') await this.aiTickets(live, ai);
       else if (job.kind === 'picks') await this.aiPicks(live, ai, instruction);
       else if (job.kind === 'mr') await this.aiMr(live, ai);
+      else if (job.kind === 'patch') await this.aiPatch(live, ai, instruction);
       else await this.aiDocument(live, ai, instruction);
       if (live.cancelled) throw new Error('Dibatalkan.');
       await this.finishAiJob(job, { status: 'done' });
@@ -919,6 +922,64 @@ export class ReleaseManager {
     live.job.risks = parsed.risks;
   }
 
+  /**
+   * Every changed file of target → source split in hunks (file contents read from GitLab, compared
+   * without spaces). Binary/lock files and files too big to read are skipped.
+   */
+  private async patchFiles(path: string, target: string, source: string): Promise<{ files: { path: string; oldPath: string; status: 'new' | 'deleted' | 'modified'; fh: FileHunks }[]; skipped: string[] }> {
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare || !gitlab.rawFile) throw new Error('GitLab belum terhubung.');
+    const cmp = await gitlab.compare(path, target, source);
+    const files: { path: string; oldPath: string; status: 'new' | 'deleted' | 'modified'; fh: FileHunks }[] = [];
+    const skipped: string[] = [];
+    for (const c of cmp.changes.slice(0, 80)) {
+      if (BINARY_PATH.test(c.newPath)) {
+        skipped.push(c.newPath);
+        continue;
+      }
+      const [before, after] = await Promise.all([c.newFile ? Promise.resolve(undefined) : gitlab.rawFile(path, c.oldPath, target).catch(() => null), c.deletedFile ? Promise.resolve(undefined) : gitlab.rawFile(path, c.newPath, source).catch(() => null)]);
+      if (before === null || after === null || (!c.newFile && before === undefined) || (!c.deletedFile && after === undefined)) {
+        skipped.push(c.newPath);
+        continue;
+      }
+      const fh = fileHunks(before, after);
+      if (fh.hunks.length) files.push({ path: c.newPath, oldPath: c.oldPath, status: c.newFile ? 'new' : c.deletedFile ? 'deleted' : 'modified', fh });
+    }
+    skipped.push(...cmp.changes.slice(80).map((c) => c.newPath));
+    return { files, skipped };
+  }
+
+  /** The AI picks the hunks of target → source that belong to the scope or the instruction. */
+  private async aiPatch(live: AiLive, ai: AiSelection, instruction: string) {
+    const release = await this.get(live.job.releaseId);
+    const service = this.service(release, live.job.serviceId ?? '');
+    const path = service.gitlabPath!;
+    const source = live.job.sourceBranch || service.sourceBranch || release.sourceBranch || 'staging';
+    live.job.progress = `Membaca file yang berubah ${release.targetBranch} → ${source}…`;
+    const { files, skipped } = await this.patchFiles(path, release.targetBranch, source);
+    if (!files.length) throw new Error(`${source} tidak punya perubahan yang bisa dipilih dibanding ${release.targetBranch}.`);
+    const { tickets: all } = await this.tickets(release);
+    const tickets = withSharedEndpoints(all).filter((t) => belongsTo(t, service.name));
+    const focus = focusTerms([...tickets.flatMap((t) => [...(t.endpoints ?? []), t.detail ?? '']), instruction]);
+    const patch = files.map((f) => patchFile(f.path, f.status, f.fh));
+    live.job.progress = `AI memilih perubahan (${patch.reduce((n, f) => n + f.hunks.length, 0)} hunk)…`;
+    const out = await this.ask(live, ai, patchPrompt({ repo: path, source, target: release.targetBranch, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), hunks: hunksText(patch, undefined, focus), instruction }));
+    if (out.error) throw new Error(`AI gagal: ${out.error}`);
+    const parsed = parsePatchReply(out.reply, patch.flatMap((f) => f.hunks.map((h) => h.id)));
+    if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
+    for (const f of patch) for (const h of f.hunks) if (parsed.chosen.has(h.id)) Object.assign(h, { include: true, ...parsed.chosen.get(h.id) });
+    live.job.patch = { files: patch, skipped };
+    // Routes the Tech Lead named: say plainly whether they are already in the target.
+    const located = locateRoutes(instruction, files).map((r) =>
+      r.where === 'target'
+        ? `${r.path} sudah ada di ${release.targetBranch} (${r.file} baris ${r.line}): tidak perlu dibawa.`
+        : r.where === 'none'
+          ? `${r.path} tidak ditemukan di perubahan ${source} maupun di versi ${release.targetBranch} file yang berubah.`
+          : `${r.path} ada di perubahan ${r.file}.`,
+    );
+    live.job.notes = [...located, ...(skipped.length ? [`${skipped.length} file tidak bisa dipilih per hunk (biner/lock/terlalu besar): ${skipped.slice(0, 8).join(', ')}.`] : []), ...parsed.notes];
+  }
+
   private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {
     const release = await this.get(live.job.releaseId);
     live.job.progress = 'Membaca kode semua service dari GitLab…';
@@ -947,6 +1008,67 @@ export class ReleaseManager {
     if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
     live.job.fixes = parsed.fixes;
     live.job.notes = parsed.summary;
+  }
+
+  /** The chosen hunks applied, without writing: per file the result's changes vs the target and JSON problems. */
+  async previewPatch(id: string, serviceId: string, req: { sourceBranch: string; hunks: string[] }): Promise<{ files: { path: string; status: string; diff: string; problem?: string; changes?: string[] }[] }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const source = req.sourceBranch.trim();
+    if (!/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
+    const { files } = await this.patchFiles(service.gitlabPath!, release.targetBranch, source);
+    return { files: this.applyPatch(files, req.hunks, source).map((a) => ({ path: a.path, status: a.action, diff: a.preview, ...(a.problem ? { problem: a.problem } : {}), ...(a.changes ? { changes: a.changes } : {}) })) };
+  }
+
+  /** Chosen hunks → file actions, each with a short +/− preview vs the target and a JSON check. */
+  private applyPatch(files: { path: string; oldPath: string; status: 'new' | 'deleted' | 'modified'; fh: FileHunks }[], hunks: string[], source: string) {
+    const byPath = new Map<string, Set<number>>();
+    for (const h of hunks) byPath.set(hunkPath(h), (byPath.get(hunkPath(h)) ?? new Set()).add(hunkNumber(h)));
+    const out: { action: 'create' | 'update' | 'delete'; path: string; content?: string; preview: string; problem?: string; changes?: string[] }[] = [];
+    for (const [p, chosen] of byPath) {
+      const f = files.find((x) => x.path === p);
+      if (!f) throw new ReleaseInputError(`${p} sudah tidak berubah di ${source}; susun ulang perubahan.`);
+      if (f.status === 'deleted') {
+        out.push({ action: 'delete', path: f.oldPath, preview: '(file dihapus)' });
+        continue;
+      }
+      const content = applyFileHunks(f.fh, chosen, p);
+      const target = f.fh.diff.filter((l) => l.type !== 'add').map((l) => l.text).join('\n');
+      const problem = jsonProblem(p, content);
+      const changes = /\.json$/i.test(p) && !problem ? jsonChanges(f.status === 'new' ? '' : target, content) : undefined;
+      out.push({ action: f.status === 'new' ? 'create' : 'update', path: p, content, preview: resultDelta(f.status === 'new' ? '' : target, content).slice(0, 60_000), ...(problem ? { problem } : {}), ...(changes ? { changes } : {}) });
+    }
+    return out;
+  }
+
+  /**
+   * A release branch from the target with only the chosen hunks of target → source applied, in
+   * one commit (the user confirmed). Reads the files again, so the result matches the branches
+   * now; a .json file that would no longer parse stops it unless `force`.
+   */
+  async createPatchBranch(id: string, serviceId: string, req: { branch: string; sourceBranch: string; hunks: string[]; force?: boolean }): Promise<{ release: Release; branch: string; files: string[]; commit: string }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const path = service.gitlabPath!;
+    const branch = req.branch.trim();
+    const source = req.sourceBranch.trim();
+    if (!/^[\w./-]{1,100}$/.test(branch) || branch === release.targetBranch) throw new ReleaseInputError('Nama branch rilis tidak valid.');
+    if (!/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
+    if (!req.hunks.length) throw new ReleaseInputError('Pilih minimal satu perubahan.');
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.commitFiles || !gitlab.branchExists) throw new ReleaseInputError('GitLab belum terhubung.');
+    if (await gitlab.branchExists(path, branch)) throw new ReleaseInputError(`Branch ${branch} sudah ada di ${path}. Pakai nama lain.`);
+    const { files } = await this.patchFiles(path, release.targetBranch, source);
+    const applied = this.applyPatch(files, req.hunks, source);
+    const actions = applied.map(({ action, path: p, content }) => ({ action, path: p, ...(content !== undefined ? { content } : {}) }));
+    const problems = applied.flatMap((a) => (a.problem ? [a.problem] : []));
+    if (problems.length && !req.force) throw new ReleaseInputError(`${problems.join(' ')} Pilih juga hunk pasangannya (koma/kurung), atau buat tetap bila memang disengaja.`);
+    const { tickets } = await this.tickets(release);
+    const keys = tickets.filter((t) => belongsTo(t, service.name)).map((t) => t.key);
+    const message = `Rilis ${release.name}: perubahan pilihan dari ${source}${keys.length ? `\n\nJira: ${keys.join(', ')}` : ''}`;
+    const commit = await gitlab.commitFiles(path, { branch, start: release.targetBranch, message, actions });
+    const saved = await this.deps.store.save({ ...release, services: release.services.map((s) => (s.id === serviceId ? { ...s, sourceBranch: branch } : s)) });
+    return { release: saved, branch, files: actions.map((a) => a.path), commit: commit.id };
   }
 
   private validRefs(release: Release, refs: string[]): string[] {

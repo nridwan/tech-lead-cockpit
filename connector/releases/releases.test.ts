@@ -383,6 +383,44 @@ describe('ReleaseManager', () => {
     })).resolves.toMatch(/Belum ada MR rilis/);
   });
 
+  it('builds a release branch from the hunks the AI chose (instruction honoured), after confirmation', async () => {
+    const before = '{\n  "endpoints": [\n    {\n      "endpoint": "/v1/a"\n    }\n  ]\n}';
+    const after = '{\n  "endpoints": [\n    {\n      "endpoint": "/v1/a"\n    },\n    {\n      "endpoint": "/v1/topup/{id}"\n    },\n    {\n      "endpoint": "/v1/kyc"\n    }\n  ]\n}';
+    const commits: { branch: string; start: string; message: string; actions: { action: string; path: string; content?: string }[] }[] = [];
+    let hunkPrompt = '';
+    const m = manager({
+      runAi: (_ai, prompt) => {
+        hunkPrompt = prompt;
+        const id = prompt.match(/\[(config\/gw\.json#\d+)\][^\n]*\n[^#]*topup/)?.[1] ?? '';
+        return { done: Promise.resolve({ reply: JSON.stringify({ hunks: [{ id, keys: [], reason: 'diminta Tech Lead' }], notes: [] }) }), cancel: () => {} };
+      },
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async () => false,
+        compare: async () => ({ commits: [], changes: [{ oldPath: 'config/gw.json', newPath: 'config/gw.json', newFile: false, renamedFile: false, deletedFile: false, diff: '', additions: 0, deletions: 0, truncated: true }], truncated: false }),
+        rawFile: async (_p, _f, ref) => (ref === 'master' ? before : after),
+        commitFiles: async (_p, req) => (commits.push(req), { id: 'abc12345' }),
+      }),
+    });
+    const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    await m.aiStart(r.id, 'patch', { ai: { provider: 'claude', model: 'x' }, serviceId: 's1', sourceBranch: 'staging', instruction: 'endpoint /v1/topup/{id} harus ikut' });
+    let job = await m.aiJob(r.id, 'patch', 's1');
+    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'patch', 's1'));
+    expect(job?.status).toBe('done');
+    expect(hunkPrompt).toContain('WAJIB dijalankan');
+    const chosen = job!.patch!.files[0].hunks.filter((h) => h.include).map((h) => h.id);
+    expect(chosen).toHaveLength(1);
+
+    const made = await m.createPatchBranch(r.id, 's1', { branch: 'release/switching', sourceBranch: 'staging', hunks: chosen });
+    expect(made).toMatchObject({ branch: 'release/switching', files: ['config/gw.json'], commit: 'abc12345' });
+    expect(commits[0]).toMatchObject({ branch: 'release/switching', start: 'master' });
+    const content = JSON.parse(commits[0].actions[0].content!);
+    expect(content.endpoints.map((e: { endpoint: string }) => e.endpoint)).toEqual(['/v1/a', '/v1/topup/{id}']);
+    expect(made.release.services[0].sourceBranch).toBe('release/switching');
+    await expect(m.createPatchBranch(r.id, 's1', { branch: 'master', sourceBranch: 'staging', hunks: chosen })).rejects.toThrow(/tidak valid/);
+  });
+
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
     const calls: string[] = [];
     const m = manager({

@@ -106,6 +106,7 @@
     return () => {
       aiPick.stop();
       aiMr.stop();
+      aiPatch.stop();
     };
   });
   $effect(() => {
@@ -129,6 +130,12 @@
       await aiPick.load();
       if (aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch) {
         applyPicks(aiPick.job);
+        showBranch = true;
+      }
+      patchSel = {};
+      await aiPatch.load();
+      if (aiPatch.job?.status === 'done' && aiPatch.job.sourceBranch === plan.sourceBranch) {
+        applyPatch(aiPatch.job);
         showBranch = true;
       }
       // The AI read of this branch: reuse the last one, else start it.
@@ -199,6 +206,77 @@
       error = (e as Error).message;
     } finally {
       branching = false;
+    }
+  }
+
+  // Release branch from chosen hunks (for mixed commits): the AI picks, the user reviews.
+  let patchSel = $state<Record<string, boolean>>({});
+  let patching = $state(false);
+  let patchPreview = $state<{ files: { path: string; status: string; diff: string; problem?: string; changes?: string[] }[] } | null>(null);
+  let previewing = $state(false);
+
+  async function previewPatch() {
+    if (!plan || !patchChosen.length) return;
+    previewing = true;
+    try {
+      patchPreview = await releases.previewPatch(release.id, service.id, { sourceBranch: plan.sourceBranch, hunks: patchChosen });
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      previewing = false;
+    }
+  }
+  const aiPatch = new AiJobWatch(
+    () => release.id,
+    'patch',
+    () => service.id,
+    (job) => {
+      if (job.status === 'done') {
+        applyPatch(job);
+        toasts.show('AI selesai memilih perubahan. Periksa sebelum membuat branch.', 'ok', 5000);
+      } else if (job.status === 'error') toasts.show(`AI gagal memilih perubahan: ${job.error}`, 'err', 6000);
+    },
+  );
+  const patchDone = $derived(aiPatch.job?.status === 'done' && aiPatch.job.sourceBranch === plan?.sourceBranch ? aiPatch.job : null);
+  const patchChosen = $derived(Object.entries(patchSel).filter(([, v]) => v).map(([k]) => k));
+
+  function applyPatch(job: ReleaseAiJob) {
+    patchPreview = null;
+    patchSel = Object.fromEntries((job.patch?.files ?? []).flatMap((f) => f.hunks.map((h) => [h.id, h.include])));
+  }
+
+  async function startAiPatch() {
+    saveReleaseAi(ai);
+    await aiPatch.start(ai, { sourceBranch: plan?.sourceBranch ?? source.trim(), instruction: pickInstruction.trim() || undefined });
+    if (aiPatch.error) toasts.show(aiPatch.error, 'err');
+  }
+
+  async function makePatchBranch(force = false) {
+    if (!plan || !patchChosen.length || !branchName.trim()) return;
+    if (!force) {
+      const ok = await confirmDialog({
+        title: 'Buat branch rilis dari perubahan pilihan?',
+        message: `Branch ${branchName.trim()} dibuat dari ${plan.targetBranch} di ${plan.projectPath} dengan ${patchChosen.length} perubahan pilihan dari ${plan.sourceBranch}, dalam satu commit.`,
+        confirmText: 'Buat branch',
+      });
+      if (!ok) return;
+    }
+    patching = true;
+    try {
+      const r = await releases.createPatchBranch(release.id, service.id, { branch: branchName.trim(), sourceBranch: plan.sourceBranch, hunks: patchChosen, force });
+      oncreatedBranch(r.release);
+      toasts.show(`Branch ${r.branch} siap: ${r.files.length} file, commit ${r.commit.slice(0, 8)}.`, 'ok', 5000);
+      source = r.branch;
+      showBranch = false;
+      await load();
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (!force && /bukan JSON valid/.test(msg)) {
+        const again = await confirmDialog({ title: 'Hasilnya bukan JSON valid', message: `${msg}`, confirmText: 'Tetap buat', danger: true });
+        if (again) return void (await makePatchBranch(true));
+      } else error = msg;
+    } finally {
+      patching = false;
     }
   }
 
@@ -273,6 +351,48 @@
           {#if branchResult?.failed}
             <p class="err small">Berhenti di <span class="mono">{branchResult.failed.sha.slice(0, 8)}</span> {branchResult.failed.title ?? ''}: {branchResult.failed.error}. {branchResult.picked} commit sebelumnya sudah masuk ke branch {branchName}. Selesaikan konfliknya secara lokal (git cherry-pick), push, lalu Bandingkan dengan branch itu.</p>
           {/if}
+          <div class="patch">
+            <h4>Ambil perubahan tertentu saja (per hunk)</h4>
+            <p class="muted small">Untuk commit campuran, atau perubahan tanpa tiket yang diminta instruksi: AI memilih hunk perubahan {plan.targetBranch} → {plan.sourceBranch} yang masuk scope + instruksi di atas. Branch rilis dibuat dari {plan.targetBranch} dengan hanya perubahan itu, dalam satu commit.</p>
+            <div class="row">
+              {#if aiPatch.running}
+                <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiPatch.job?.progress ?? 'AI berjalan…'}</span>
+                <button class="btn btn-sm" onclick={() => aiPatch.cancel()}><Icon name="x" size={12} /> Batalkan</button>
+              {:else}
+                <button class="btn btn-sm btn-primary" onclick={startAiPatch}><Icon name="sparkles" size={12} /> Susun perubahan dengan AI</button>
+              {/if}
+            </div>
+            {#if patchDone}
+              {#if patchDone.notes?.length}<ul class="small ai-notes">{#each patchDone.notes as n, i (i)}<li>{n}</li>{/each}</ul>{/if}
+              {#each patchDone.patch?.files ?? [] as f (f.path)}
+                <div class="pfile">
+                  <div class="small"><span class="mono">{f.path}</span> <span class="tag">{f.status === 'new' ? 'file baru' : f.status === 'deleted' ? 'dihapus' : `${f.hunks.length} hunk`}</span></div>
+                  {#each f.hunks as h (h.id)}
+                    <div class="phunk" class:off={!patchSel[h.id]}>
+                      <label class="small"><input type="checkbox" bind:checked={patchSel[h.id]} onchange={() => (patchPreview = null)} /> baris {h.at}: +{h.added.length} / −{h.removed.length}{h.reason ? ` · ${h.reason}` : ''}</label>
+                      <details><summary class="small muted">lihat</summary><pre class="sqlbox">{[...h.removed.map((l) => `-${l}`), ...h.added.map((l) => `+${l}`)].join('\n')}{h.more ? `\n… (${h.more} baris lagi)` : ''}</pre></details>
+                    </div>
+                  {/each}
+                </div>
+              {/each}
+              {#if patchPreview}
+                <div class="pfile">
+                  <strong class="small">Hasil di {plan.targetBranch} (belum ditulis)</strong>
+                  {#each patchPreview.files as pf (pf.path)}
+                    <div class="small"><span class="mono">{pf.path}</span> · {pf.status === 'create' ? 'file baru' : pf.status === 'delete' ? 'dihapus' : 'diubah'}</div>
+                    {#if pf.problem}<div class="small err-text">{pf.problem}</div>{/if}
+                    {#if pf.changes?.length}<ul class="small">{#each pf.changes as c, i (i)}<li class="mono">{c}</li>{/each}</ul>{/if}
+                    <details><summary class="small muted">diff terhadap {plan.targetBranch}</summary><pre class="sqlbox">{pf.diff || '(tidak ada perubahan)'}</pre></details>
+                  {/each}
+                </div>
+              {/if}
+              <div class="row">
+                <span class="small">{patchChosen.length} perubahan dipilih</span>
+                <button class="btn btn-sm" onclick={previewPatch} disabled={previewing || !patchChosen.length}>{previewing ? 'Menyusun…' : 'Lihat hasil'}</button>
+                <button class="btn btn-sm btn-primary" onclick={() => makePatchBranch()} disabled={patching || !patchChosen.length || !branchName.trim() || plan.canCreate === false}><Icon name="merge" size={12} /> {patching ? 'Membuat…' : 'Buat branch dari perubahan pilihan'}</button>
+              </div>
+            {/if}
+          </div>
           <div class="row">
             <button class="btn btn-sm" onclick={copyCommands} disabled={!chosen.length}><Icon name="copy" size={12} /> Salin perintah git</button>
             <button class="btn btn-sm btn-primary" onclick={makeBranch} disabled={branching || !chosen.length || !branchName.trim() || plan.canCreate === false}><Icon name="merge" size={12} /> {branching ? 'Membuat…' : 'Buat branch & cherry-pick di GitLab'}</button>
@@ -516,6 +636,28 @@
     border-radius: var(--radius-sm);
     white-space: pre-wrap;
     font-size: 12px;
+  }
+  .patch {
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .patch h4 {
+    margin: 0;
+  }
+  .pfile {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    background: var(--surface);
+  }
+  .phunk {
+    padding: 2px 0 2px 8px;
+  }
+  .phunk.off {
+    opacity: 0.6;
   }
   .pick-ins {
     width: 100%;

@@ -1,5 +1,5 @@
 import type { MrFileChange } from '../gitlab/types';
-import type { AiPick, AiTicketVerdict, AiVerdict, ReleaseAiNeed, ReleaseDocFix } from './types';
+import type { AiPick, AiTicketVerdict, AiVerdict, PatchFile, ReleaseAiNeed, ReleaseDocFix } from './types';
 
 /**
  * Prompts and answer parsing for the release AI jobs: read the tickets in the code, pick the
@@ -213,6 +213,7 @@ export function picksPrompt(input: { repo: string; source: string; target: strin
     '- Commit pendukung (config, CI, dependency) include true hanya bila dibutuhkan fitur scope.',
     '- Perhatikan urutan: commit scope yang bergantung pada commit lain yang tidak dipilih bisa konflik; sebutkan di notes.',
     '- Sebutkan di notes tiket scope yang tidak ditemukan di commit mana pun.',
+    '- Bila scope atau instruksi Tech Lead hanya bisa dipenuhi dengan mengambil SEBAGIAN isi commit campuran, tulis di notes: "Pakai Ambil perubahan tertentu saja (per hunk)" dan sebut perubahan mana yang perlu diambil.',
     '',
     ...(input.instruction ? [`Instruksi Tech Lead (utamakan, selama tidak memasukkan perubahan yang jelas di luar rilis tanpa disebut): ${input.instruction}`, ''] : []),
     'Skema jawaban (satu entri per commit, sha lengkap):',
@@ -454,4 +455,60 @@ export function parseDiscoverReply(reply: string, repoPaths: string[], mrRefs: s
     .map((m) => ({ ref: str((m as Record<string, unknown>).ref, 400), service: str((m as Record<string, unknown>).service, 100), reason: str((m as Record<string, unknown>).reason) }))
     .filter((m) => refs.has(m.ref));
   return { services: services.slice(0, 30), mrs: mrs.slice(0, 60) };
+}
+
+/** Hunks as text for the AI within a budget, focus hunks first; the rest listed by id only. */
+export function hunksText(files: PatchFile[], budget = AI_DIFF_BUDGET, focus: string[] = []): string {
+  const all = files.flatMap((f) => f.hunks.map((h) => ({ f, h, text: [...h.removed.map((l) => `-${l}`), ...h.added.map((l) => `+${l}`)].join('\n') })));
+  const hit = (t: string) => focus.some((x) => t.toLowerCase().includes(x));
+  const ordered = [...all.filter((x) => hit(x.text)), ...all.filter((x) => !hit(x.text))];
+  const parts: string[] = [];
+  const rest: string[] = [];
+  let left = budget;
+  for (const x of ordered) {
+    const block = `### [${x.h.id}] ${x.f.path}${x.f.status === 'new' ? ' (file baru)' : x.f.status === 'deleted' ? ' (file dihapus)' : ` baris ${x.h.at}`}\n${x.text}${x.h.more ? `\n… (${x.h.more} baris lagi)` : ''}`;
+    if (block.length > left) {
+      rest.push(x.h.id);
+      continue;
+    }
+    left -= block.length;
+    parts.push(block);
+  }
+  return parts.join('\n\n') + (rest.length ? `\n\nHunk lain (isi tidak dimuat; anggap tidak terkait kecuali diminta): ${rest.join(', ')}` : '');
+}
+
+export function patchPrompt(input: { repo: string; source: string; target: string; tickets: AiTicketInput[]; hunks: string; instruction?: string }): string {
+  return [
+    `Repo: ${input.repo}. Branch rilis dibuat dari ${input.target} lalu diisi HANYA hunk perubahan yang dipilih dari ${input.source} (bukan cherry-pick commit utuh).`,
+    '',
+    'Tiket scope rilis untuk repo ini:',
+    ...input.tickets.map((t) => `- ${t.key}: ${t.summary}${t.detail ? `\n  Detail: ${t.detail.slice(0, 800).replace(/\n/g, ' ')}` : ''}`),
+    '',
+    ...(input.instruction ? [`Instruksi Tech Lead (WAJIB dijalankan: hunk yang diminta harus dipilih walau tidak ada tiketnya): ${input.instruction}`, ''] : []),
+    `Hunk perubahan ${input.target} → ${input.source} per file (- dihapus, + ditambah; perbandingan mengabaikan spasi):`,
+    input.hunks,
+    '',
+    'Tugas: pilih hunk yang harus masuk branch rilis supaya isinya persis scope + instruksi Tech Lead.',
+    '- Pilih hunk milik tiket scope atau yang diminta instruksi; nilai dari isinya, bukan dari judul commit.',
+    '- Jangan pilih hunk fitur lain, reformat/whitespace, atau file infra yang tidak dibutuhkan, kecuali diminta instruksi.',
+    '- Bila satu blok baru terpecah ke beberapa hunk yang saling bergantung (mis. koma JSON, kurung penutup, import), pilih semua bagiannya supaya file tetap valid.',
+    '- Jelaskan singkat setiap hunk yang dipilih; sebut di notes bila ada yang diminta tapi tidak ditemukan.',
+    '',
+    'Skema jawaban:',
+    '{"hunks":[{"id":"<path#n>","keys":["MU-1"],"reason":"..."}],"notes":["..."]}',
+  ].join('\n');
+}
+
+/** The chosen hunks (known ids only) with their reasons. */
+export function parsePatchReply(reply: string, ids: string[]): { chosen: Map<string, { keys: string[]; reason: string }>; notes: string[] } | null {
+  const json = parseJsonReply(reply);
+  if (!json) return null;
+  const known = new Set(ids);
+  const chosen = new Map<string, { keys: string[]; reason: string }>();
+  for (const h of Array.isArray(json.hunks) ? json.hunks : []) {
+    const r = h as Record<string, unknown>;
+    const id = str(r.id, 600);
+    if (known.has(id)) chosen.set(id, { keys: strs(r.keys, 10).map((k) => k.toUpperCase()), reason: str(r.reason) });
+  }
+  return { chosen, notes: strs(json.notes, 15) };
 }

@@ -46,6 +46,12 @@ export const releases = {
   /** Release branch from the target with the chosen commits cherry-picked (token with scope api). */
   createReleaseBranch: (id: string, serviceId: string, branch: string, picks: { sha: string; title?: string }[]) =>
     call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks }),
+  /** The chosen hunks applied without writing: result vs target per file, JSON problems. */
+  previewPatch: (id: string, serviceId: string, req: { sourceBranch: string; hunks: string[] }) =>
+    call<{ files: { path: string; status: string; diff: string; problem?: string; changes?: string[] }[] }>('/patch/preview', { id, serviceId, ...req }),
+  /** Release branch from the target with only the chosen hunks of the source (token with scope api). */
+  createPatchBranch: (id: string, serviceId: string, req: { branch: string; sourceBranch: string; hunks: string[]; force?: boolean }) =>
+    call<{ release: Release; branch: string; files: string[]; commit: string }>('/patch/branch', { id, serviceId, ...req }),
   sharePreview: (id: string, req: ShareRequest) => call<{ text: string; html: string }>('/share/preview', { id, ...req }),
   share: (id: string, chat: { id: string; name: string }, req: ShareRequest) => call<Release>('/share', { id, chatId: chat.id, chatName: chat.name, ...req }),
   /** Background AI jobs: tickets + deploy needs, release-branch picks, document fixes. */

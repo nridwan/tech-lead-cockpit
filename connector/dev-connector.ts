@@ -1576,6 +1576,26 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
       return send(res, 200, { job: await rm.aiCancel(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined) });
     }
+    if (route === 'POST /releases/patch/preview') {
+      const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; hunks?: unknown[] }>(req, 256 * 1024);
+      const hunks = (Array.isArray(body.hunks) ? body.hunks : []).slice(0, 2000).map((h) => String(h ?? '')).filter((h) => h.includes('#') && h.length <= 600);
+      return send(res, 200, await rm.previewPatch(idOf(body.id), String(body.serviceId ?? ''), { sourceBranch: String(body.sourceBranch ?? ''), hunks }));
+    }
+    if (route === 'POST /releases/patch/branch') {
+      const body = await readJson<{ id?: string; serviceId?: string; branch?: string; sourceBranch?: string; hunks?: unknown[]; force?: boolean }>(req, 256 * 1024);
+      const hunks = (Array.isArray(body.hunks) ? body.hunks : []).slice(0, 2000).map((h) => String(h ?? '')).filter((h) => h.includes('#') && h.length <= 600);
+      const base = { ts: new Date().toISOString(), action: 'gitlab.branch.create' as const, spaceKey: 'GitLab', title: String(body.branch ?? '').slice(0, 100), attachments: 0 };
+      try {
+        const r = await rm.createPatchBranch(idOf(body.id), String(body.serviceId ?? ''), { branch: String(body.branch ?? ''), sourceBranch: String(body.sourceBranch ?? ''), hunks, force: body.force === true });
+        await audit({ ...base, title: `Branch ${r.branch}: ${hunks.length} perubahan pilihan di ${r.files.length} file`, result: 'success' }).catch(() => {});
+        return send(res, 200, r);
+      } catch (e) {
+        if (e instanceof ReleaseInputError) throw e;
+        await audit({ ...base, result: 'failure', error: (e as Error).message }).catch(() => {});
+        if (e instanceof GitLabError) return fail(res, e.status, { error: e.message, code: e.code === 'forbidden' ? 'unauthorized' : e.code });
+        throw e;
+      }
+    }
     if (route === 'POST /releases/mr/branch') {
       const body = await readJson<{ id?: string; serviceId?: string; branch?: string; picks?: { sha?: string; title?: string }[] }>(req, 128 * 1024);
       const picks = (Array.isArray(body.picks) ? body.picks : []).slice(0, 300).map((p) => ({ sha: String(p?.sha ?? ''), title: p?.title ? String(p.title).slice(0, 200) : undefined })).filter((p) => /^[0-9a-f]{7,40}$/i.test(p.sha));

@@ -308,6 +308,19 @@ export class GitLabClient {
     await this.post(`/projects/${encodeURIComponent(projectPath)}/repository/branches?branch=${encodeURIComponent(branch)}&ref=${encodeURIComponent(ref)}`, {});
   }
 
+  /**
+   * One commit with whole-file changes on a new branch started from `start` (the release branch
+   * made of chosen hunks). Needs scope `api`.
+   */
+  async commitFiles(projectPath: string, req: { branch: string; start: string; message: string; actions: { action: 'create' | 'update' | 'delete'; path: string; content?: string }[] }): Promise<{ id: string }> {
+    return this.post<{ id: string }>(`/projects/${encodeURIComponent(projectPath)}/repository/commits`, {
+      branch: req.branch,
+      start_branch: req.start,
+      commit_message: req.message,
+      actions: req.actions.map((a) => ({ action: a.action, file_path: a.path, ...(a.action === 'delete' ? {} : { content: a.content ?? '' }) })),
+    });
+  }
+
   /** Cherry-picks one commit onto a branch (merge commits against their first parent). Needs scope `api`. */
   async cherryPick(projectPath: string, sha: string, branch: string): Promise<{ id: string }> {
     return this.post<{ id: string }>(`/projects/${encodeURIComponent(projectPath)}/repository/commits/${encodeURIComponent(sha)}/cherry_pick`, { branch });
