@@ -48,7 +48,8 @@ Per service: **Buat MR** (`POST /releases/mr/plan` lalu `/releases/mr/create`). 
 ### Branch rilis (staging kotor)
 
 [`src/lib/release/branch.ts`](../../../src/lib/release/branch.ts) `planReleaseBranch`: jalur first-parent branch sumber (dari `parent_ids` GitLab compare), lama ke baru. Merge commit dinilai bersama commit yang dibawanya (dari parent kedua, tanpa menyeberang jalur utama), jadi satu pilihan = satu fitur utuh. Default terpilih hanya yang semua key-nya di scope (termasuk `accepted`); `out-of-scope`, `mixed`, dan `no-key` tidak terpilih tapi bisa dicentang.
-- **Salin perintah git**: `git checkout -b release/<versi> origin/<target>` + `git cherry-pick [-m 1] <sha>` berurutan + push.
+- Nama branch default `releaseBranchName`: `release/<codename>[-<versi>]`, else `release/<versi>`, else `release/<nama rilis>`; tidak pernah tanggal rilis (tanggal bisa berubah).
+- **Salin perintah git**: `git checkout -b release/<nama> origin/<target>` + `git cherry-pick [-m 1] <sha>` berurutan + push.
 - **Buat branch & cherry-pick di GitLab** (`POST /releases/mr/branch`): `createBranch` dari target lalu `cherryPick` satu per satu; berhenti di kegagalan pertama (biasanya konflik) dan melaporkan commit-nya; audit `gitlab.branch.create`. Service lalu memakai branch itu sebagai sumber.
 
 ## 🧾 Cakupan tiket ([`src/lib/release/coverage.ts`](../../../src/lib/release/coverage.ts))

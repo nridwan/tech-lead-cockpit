@@ -356,9 +356,10 @@ describe('release branch plan', () => {
       "git cherry-pick -m 1 m3   # Merge branch 'feature/MU-14-report' into 'staging'",
       'git push -u origin release/v2.4.0',
     ]);
-    expect(releaseBranchName('v2.4.0')).toBe('release/v2.4.0');
-    expect(releaseBranchName('', '2026-10-20')).toBe('release/2026-10-20');
-    expect(releaseBranchName('Rilis Oktober')).toBe('release/Rilis-Oktober');
+    expect(releaseBranchName({ version: '', codenames: ['CASHIN-TOKO'], name: 'Rilis' })).toBe('release/cashin-toko');
+    expect(releaseBranchName({ version: 'v2.4.0', codenames: ['CASHIN-TOKO'], name: 'Rilis' })).toBe('release/cashin-toko-v2.4.0');
+    expect(releaseBranchName({ version: 'v2.4.0', codenames: [], name: 'Rilis' })).toBe('release/v2.4.0');
+    expect(releaseBranchName({ version: '', codenames: [], name: 'Rilis Oktober' })).toBe('release/rilis-oktober');
   });
 });
 

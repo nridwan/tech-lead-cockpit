@@ -79,10 +79,23 @@ export function planReleaseBranch(commits: MrCommit[], scopeKeys: Set<string>, o
   return { base: opts.base, branch: opts.branch, commits: picks };
 }
 
-/** Suggested branch name: release/<version>, else release/<date>. */
-export function releaseBranchName(version: string, date?: string): string {
-  const v = version.trim().replace(/^v(?=\d)/i, 'v').replace(/[^\w.-]+/g, '-');
-  return `release/${v || date || new Date().toISOString().slice(0, 10)}`;
+const slugBranch = (s: string) =>
+  s
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+
+/**
+ * Suggested release branch: release/<codename>[-<version>], else release/<version>, else
+ * release/<release name>. Never the release date: dates move.
+ */
+export function releaseBranchName(release: { version: string; codenames: string[]; name: string }): string {
+  const code = slugBranch(release.codenames[0] ?? '');
+  const version = slugBranch(release.version);
+  const name = code ? (version ? `${code}-${version}` : code) : version || slugBranch(release.name) || 'rilis';
+  return `release/${name}`;
 }
 
 /** The same steps for a terminal, for teams that prefer to cherry-pick locally. */

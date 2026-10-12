@@ -366,7 +366,7 @@ export class ReleaseManager {
       description,
       formUrl: base ? newMrFormUrl(base, path, source, target, title, description) : '',
       ...(scopes ? { canCreate: scopes.includes('api') } : {}),
-      releaseBranch: planReleaseBranch(cmp.commits, new Set([...scopeKeys, ...accepted]), { base: target, branch: releaseBranchName(release.version, release.date) }),
+      releaseBranch: planReleaseBranch(cmp.commits, new Set([...scopeKeys, ...accepted]), { base: target, branch: releaseBranchName(release) }),
       warnings,
     };
   }
