@@ -1881,7 +1881,8 @@ async function publish(client: ConfluenceClient, body: PublishRequest, res: Serv
         });
       }
       // Upload first so the updated page never references a missing image.
-      for (const a of uploads) await client.upsertAttachment(current.id, a.filename, a.data, a.contentType);
+      const isDraftPage = isDraft || current.status === 'draft';
+      for (const a of uploads) await client.upsertAttachment(current.id, a.filename, a.data, a.contentType, isDraftPage);
 
       let targetVersion: number;
       if (isDraft) {
@@ -1915,7 +1916,8 @@ async function publish(client: ConfluenceClient, body: PublishRequest, res: Serv
         storage: body.storage,
         status,
       });
-      for (const a of uploads) await client.upsertAttachment(page.id, a.filename, a.data, a.contentType);
+      const isDraftPage = isDraft || page.status === 'draft';
+      for (const a of uploads) await client.upsertAttachment(page.id, a.filename, a.data, a.contentType, isDraftPage);
     }
 
     await appendAudit({ ...audit, ts: new Date().toISOString(), result: 'success', actor, pageId: page.id, versionBefore, versionAfter: page.version });

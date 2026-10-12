@@ -110,7 +110,13 @@ function mockConfluence() {
 
     if ((m = path.match(/^\/rest\/api\/content\/(\d+)\/child\/attachment(?:\/(\d+)\/data)?$/))) {
       const pageId = m[1];
+      const page = state.pages.get(pageId);
       if (req.method === 'GET') {
+        if (page?.status === 'draft') {
+          return json(res, 404, {
+            message: `com.atlassian.confluence.api.service.exceptions.api.NotFoundException: No content found with id : ContentId{id=${pageId}} and status [current], there is a content object with status : draft`,
+          });
+        }
         const a = state.attachments.get(`${pageId}/${url.searchParams.get('filename')}`);
         return json(res, 200, { results: a ? [{ id: a.id }] : [] });
       }
@@ -241,6 +247,7 @@ describe.each([
         storage: '<p>draft v1 edited</p>',
         pageId: draftPage.id,
         expectedVersion: 1,
+        attachments: [{ filename: 'diagram.png', contentType: 'image/png', base64: PNG }],
         asDraft: true,
       }),
     });
