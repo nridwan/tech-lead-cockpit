@@ -8,11 +8,28 @@ Modul **Rilis** mengelola satu rilis lintas service: MR ke branch produksi (defa
 
 1. **Buat rilis** di menu Rilis (`#/releases`). Isi versi, tanggal, branch target, approval minimal.
 2. **Tentukan cakupan**: pilih proyek Cockpit (task TAD + Jira key-nya), codename (tiket `[TYPE][SERVICE][CODENAME] - Nama` ikut walau tidak ada di TAD; codename dari judul task TAD ikut otomatis), atau tiket tambahan. Bisa juga dengan **Import dokumen**.
-3. **Cari service & MR** (`POST /releases/discover`): service diturunkan dari tiket, dipetakan ke project GitLab lewat remote git repo di folder Services, lalu MR ke branch target (terbuka, atau merge sejak ±7 hari sebelum rilis dibuat) ditambahkan. Tidak ada yang dihapus.
-4. **Jalankan cek** (`POST /releases/check`): tiap MR diambil dari GitLab dan diperiksa secara deterministik (tanpa AI). Env/migrasi/query baru masuk checklist; laporan disimpan.
-5. **Share MR ke Teams** (`POST /releases/share`): pilih MR, grup/channel, tenggat, reviewer (dari Daftar Tim), catatan; pratinjau lalu kirim setelah konfirmasi. Tercatat di audit log (`teams.send`).
-6. **Checklist hari rilis**: centang env, migrasi, query, langkah deploy, rollback.
-7. **Publish ke Confluence**: dokumen dari tab Dokumen dipublish lewat route publish yang sudah ada (cek versi 409 untuk update).
+3. **Jalankan cek** (satu tombol, AI, di background; `POST /releases/ai/start` kind `tickets`): AI mencari service & MR rilis, lalu membaca seluruh diff tiap service dan menilai tiket, kebutuhan deploy, dan perubahan di luar scope. Hasilnya langsung mengisi dokumen deploy dan laporan. Lihat **🤖 Cek dengan AI**.
+4. **Share MR ke Teams** (`POST /releases/share`): pilih MR, grup/channel, tenggat, reviewer (dari Daftar Tim), catatan; pratinjau lalu kirim setelah konfirmasi. Tercatat di audit log (`teams.send`).
+5. **Dokumen deploy**: env, query/migrasi, dan langkah pre/post-deploy per service ada di dokumen (tidak ada tab checklist terpisah); diedit di "Detail deployment" per service atau diperbaiki dengan AI dari tab Dokumen.
+6. **Publish ke Confluence**: dokumen dari tab Dokumen dipublish lewat route publish yang sudah ada (cek versi 409 untuk update).
+
+---
+
+## 🤖 Cek dengan AI ([`src/lib/release/ai.ts`](../../../src/lib/release/ai.ts), `ReleaseManager.ai*`)
+
+Semua pengecekan rilis lewat AI (provider dari pemilih AI, default dari setup wizard; mode teks tanpa tool, diff ada di prompt). Job berjalan di connector di background (`POST /releases/ai/start`, `GET /releases/ai/job`, `POST /releases/ai/cancel`), hasil terakhir per jenis disimpan di `releases/reports/<id>.ai-<kind>[-<serviceId>].json`. UI memantau lewat `AiJobWatch` ([`src/lib/release/ai-job.svelte.ts`](../../../src/lib/release/ai-job.svelte.ts)). Jawaban AI wajib JSON; yang di luar skema (tiket bukan scope, file yang tidak berubah, sha tak dikenal, service bukan milik rilis) dibuang.
+
+| Jenis | Pemicu | Isi |
+|---|---|---|
+| `tickets` | tombol **Jalankan cek** (header rilis) | 1) `aiDiscover`: AI memilih service (repo dari folder Services) dan MR ke target dari tiket, repo, dan kandidat MR; hanya menambah; service yang pernah dihapus (`Release.ignoredServices`) tidak pernah ditambah lagi; gagal → pencarian biasa. 2) `readCode` + cek pola per MR. 3) Per service AI membaca diff (maks ±180 KB, sisanya nama file) + tiket + Detail Task TAD: verdict `ada`/`sebagian`/`tidak` per tiket dengan file bukti, perubahan tanpa tiket (termasuk endpoint/route tanpa task), dan kebutuhan deploy (`env`, `sql` termasuk CREATE/ALTER/INSERT yang disusun dari model, `migration`, `other`; masing-masing `pre`/`post`). |
+| `mr` | otomatis saat jendela **Buat MR** memuat rencana | Sama seperti di atas untuk compare branch sumber → target satu service; hasil tampil di jendela dan ditambahkan ke deskripsi MR (`aiMrSection`) selama deskripsi belum diedit. |
+| `picks` | **Pilih dengan AI** di branch rilis (Buat MR) | AI membaca diff tiap commit jalur first-parent (compare parent pertama → commit; merge = seluruh fitur, maks 40 commit) dan memilih commit scope dengan alasan; commit campuran tidak dipilih; catatan urutan/konflik. |
+| `document` | **Perbaiki dengan AI** di tab Dokumen | Instruksi Tech Lead + isi dokumen per service + temuan kode (diff .env/config, env dibaca kode, migrasi, query) → usulan `envBlock`/pre/post-deploy/failover per service; diterapkan hanya setelah klik **Terapkan**. |
+
+Aturan hasil:
+- Verdict AI menentukan status tiket (`TicketCoverage.ai`): `ada` = di kode; `sebagian` = perlu dicek; `tidak` = hilang, kecuali pola menemukannya (berbeda pendapat → perlu dicek).
+- Kebutuhan deploy langsung masuk dokumen: env → blok `.env` service (`KEY=`, nilai yang ada dipertahankan, `foldEnvItems`); query/migrasi → item `source: 'ai'` (SQL di `detail`, tampil di Pre-deploy dan bisa diedit di Detail deployment); langkah lain → `preDeploy`/`postDeploy`.
+- `POST /releases/check` dan `/releases/discover` (tanpa AI) tetap ada untuk API/test; UI hanya memakai cek AI.
 
 ---
 
@@ -105,6 +122,8 @@ HTML dibangun dari data dengan semua nilai di-escape; hanya `p`, `b`, `a` (http/
 | [`src/lib/release/`](../../../src/lib/release/) | Tipe, cek MR, cakupan, import, pesan share, dokumen Markdown, client |
 | [`connector/releases/store.ts`](../../../connector/releases/store.ts) | `~/.tech-lead-cockpit/releases/<id>.json` (0600), validasi |
 | [`connector/releases/manager.ts`](../../../connector/releases/manager.ts) | Tiket, discover, check (baca kode per service, laporan di `releases/reports/`), import, share |
+| [`src/lib/release/ai.ts`](../../../src/lib/release/ai.ts) | Prompt dan parser jawaban AI: discover, tiket + kebutuhan deploy, pilih commit, perbaikan dokumen |
+| [`src/lib/release/ai-job.svelte.ts`](../../../src/lib/release/ai-job.svelte.ts) | Pantau job AI rilis dari UI, pilihan AI tersimpan |
 | [`src/lib/release/evidence.ts`](../../../src/lib/release/evidence.ts) | Cari tiket di diff: endpoint TAD, kata nama tiket di identifier/path, file tanpa tiket |
 | [`connector/releases/repos.ts`](../../../connector/releases/repos.ts) | `git remote get-url origin` per repo di folder Services → path project GitLab |
 | [`connector/gitlab.ts`](../../../connector/gitlab.ts) | `mrsToBranch`, `compare` (dengan `parentIds`), `branchExists`, `openMrFor`, `tokenScopes`; tulis (scope `api`, setelah konfirmasi): `createMr`, `createBranch`, `cherryPick` |

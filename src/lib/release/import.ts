@@ -303,6 +303,8 @@ export function removeServices(release: Release, ids: string[]): Release {
   const orphan = (service?: string) => Boolean(service) && names.some((n) => sameService(n, service!)) && !kept.some((s) => sameService(s.name, service!));
   return {
     ...release,
+    // Remembered, so the check does not add them back.
+    ignoredServices: [...new Set([...(release.ignoredServices ?? []), ...names])],
     services: kept.map((s, i) => ({ ...s, order: i + 1 })),
     items: release.items.filter((i) => !orphan(i.service)),
     steps: release.steps.filter((x) => !orphan(x.service)),

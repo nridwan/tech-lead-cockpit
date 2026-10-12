@@ -277,6 +277,26 @@ export function detailTaskSection(markdown: string, title: string): { heading: s
   return { heading: lines[start].replace(/^##\s+/, '').trim(), body: lines.slice(start + 1, end).join('\n') };
 }
 
+/** A Detail Task as plain text (tags and entities stripped), for prompts; DOM-free. */
+export function taskDetailText(markdown: string, title: string, max = 3000): string {
+  const section = detailTaskSection(markdown, title);
+  if (!section) return '';
+  return section.body
+    .replace(/<br\s*\/?>|<\/(p|li|tr|h\d)>/gi, '\n')
+    .replace(/<\/t[dh]>/gi, ' | ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#10;/g, '\n')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim()
+    .slice(0, max);
+}
+
 /** API paths written in a Detail Task (Endpoint field, payload notes): /v1/cashin/channel/detail. */
 export function taskEndpoints(markdown: string, title: string): string[] {
   const section = detailTaskSection(markdown, title);

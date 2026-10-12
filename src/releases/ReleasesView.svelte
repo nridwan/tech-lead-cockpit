@@ -1,6 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Icon from '../components/Icon.svelte';
+  import AiPicker from '../components/AiPicker.svelte';
+  import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { estimate } from '../lib/estimate/client';
@@ -16,7 +18,7 @@
   import { mrRefFromUrl, removeServices, resetDocumentData, serviceForPath, servicesOutsideScope } from '../lib/release/import';
   import { DEFAULT_MR_TITLE, mrTitle } from '../lib/release/mr';
   import { bringsSummary } from '../lib/release/share';
-  import { RELEASE_STATUSES, RELEASE_STATUS_LABELS, type MrCheck, type Release, type ReleaseItem, type ReleaseReport, type ReleaseService } from '../lib/release/types';
+  import { RELEASE_STATUSES, RELEASE_STATUS_LABELS, type MrCheck, type Release, type ReleaseReport, type ReleaseService } from '../lib/release/types';
   import PublishReleaseModal from './PublishReleaseModal.svelte';
   import ReleaseImportDialog from './ReleaseImportDialog.svelte';
   import ShareMrModal from './ShareMrModal.svelte';
@@ -31,7 +33,7 @@
    */
 
   const SAVE_MS = 600;
-  type Tab = 'board' | 'checklist' | 'tickets' | 'doc';
+  type Tab = 'board' | 'tickets' | 'doc';
 
   let list = $state<Release[]>([]);
   let loaded = $state(false);
@@ -43,21 +45,67 @@
   let projects = $state<EstimateProject[]>([]);
   let derivedCodenames = $state<string[]>([]);
   let tab = $state<Tab>('board');
-  let busy = $state<'' | 'discover' | 'check'>('');
-  let importOpen = $state(false);
+    let importOpen = $state(false);
   let shareOpen = $state(false);
   let publishOpen = $state(false);
   let mrFor = $state<ReleaseService | null>(null);
   let openDetail = $state<Record<string, boolean>>({});
   let mrInput = $state<Record<string, string>>({});
-  let newItem = $state<{ kind: ReleaseItem['kind']; label: string; service: string }>({ kind: 'env', label: '', service: '' });
-  let newStep = $state<{ kind: 'deploy' | 'rollback'; text: string }>({ kind: 'deploy', text: '' });
   let codenameText = $state('');
   let keysText = $state('');
+  let ai = $state(loadReleaseAi());
+  let docInstruction = $state('');
+
+  // AI check: re-reads all code and lets the AI judge tickets and deploy needs; the report and
+  // the document data come back from the connector when it is done.
+  const aiCheck = new AiJobWatch(() => current?.id, 'tickets', undefined, async (job) => {
+    if (!current || job.releaseId !== current.id) return;
+    if (job.status === 'done') {
+      const fresh = await releases.get(current.id).catch(() => null);
+      if (fresh) setCurrent(fresh);
+      report = await releases.report(current.id).catch(() => report);
+      toasts.show(job.notes?.length ? `Cek AI selesai dengan catatan: ${job.notes.join(' ')}` : 'Cek AI selesai: tiket, kebutuhan deploy, dan perubahan di luar scope diperbarui.', job.notes?.length ? 'info' : 'ok', 6000);
+    } else if (job.status === 'error') toasts.show(`Cek AI gagal: ${job.error}`, 'err', 6000);
+  });
+  const aiDoc = new AiJobWatch(() => current?.id, 'document');
+
+  function pickAi(v: typeof ai) {
+    ai = v;
+    saveReleaseAi(v);
+  }
+
+  async function startAiCheck() {
+    await flush();
+    await aiCheck.start(ai);
+    if (aiCheck.error) toasts.show(aiCheck.error, 'err');
+  }
+
+  async function startAiDoc() {
+    await flush();
+    await aiDoc.start(ai, { instruction: docInstruction });
+    if (aiDoc.error) toasts.show(aiDoc.error, 'err');
+  }
+
+  /** Applies the AI's proposed fix to one service (the user clicked); autosave keeps it. */
+  function applyFix(fix: NonNullable<NonNullable<typeof aiDoc.job>['fixes']>[number]) {
+    if (!current) return;
+    current.services = current.services.map((s) =>
+      s.id !== fix.serviceId
+        ? s
+        : {
+            ...s,
+            ...(fix.envBlock !== undefined ? { envBlock: fix.envBlock } : {}),
+            ...(fix.preDeploy ? { preDeploy: fix.preDeploy } : {}),
+            ...(fix.postDeploy ? { postDeploy: fix.postDeploy } : {}),
+            ...(fix.failover ? { failover: fix.failover } : {}),
+          },
+    );
+    appliedFixes = { ...appliedFixes, [`${aiDoc.job?.id}:${fix.serviceId}`]: true };
+  }
+  let appliedFixes = $state<Record<string, boolean>>({});
 
   const checkOf = (ref: string): MrCheck | undefined => report?.mrs.find((c) => c.ref === ref);
   const allMrs = $derived(current ? current.services.flatMap((s) => s.mrs) : []);
-  const pendingItems = $derived(current ? current.items.filter((i) => !i.done).length : 0);
   const docMd = $derived(current ? releaseMarkdown(current, report) : '');
   const outside = $derived(current ? servicesOutsideScope(current, report) : []);
   /** The page that will be published, rendered like the TAD preview. */
@@ -100,6 +148,12 @@
     if (!r) return void (current = null);
     setCurrent(r);
     report = await releases.report(id).catch(() => null);
+    aiCheck.stop();
+    aiDoc.stop();
+    aiCheck.job = null;
+    aiDoc.job = null;
+    void aiCheck.load();
+    void aiDoc.load();
     derivedCodenames = await releases.codenames(id).catch(() => []);
   }
 
@@ -152,36 +206,12 @@
 
   async function remove() {
     if (!current) return;
-    const ok = await confirmDialog({ title: 'Hapus rilis?', message: `Rilis "${current.name}" dan checklist-nya dihapus dari Cockpit. MR, tiket, dan halaman Confluence tidak ikut terhapus.`, confirmText: 'Hapus', danger: true });
+    const ok = await confirmDialog({ title: 'Hapus rilis?', message: `Rilis "${current.name}" dan datanya dihapus dari Cockpit. MR, tiket, dan halaman Confluence tidak ikut terhapus.`, confirmText: 'Hapus', danger: true });
     if (!ok) return;
     clearTimeout(saveTimer);
     list = await releases.remove(current.id);
     current = null;
     location.hash = list[0] ? `#/releases/${list[0].id}` : '#/releases';
-  }
-
-  /** Runs a server action on the saved release and takes its result as the new state. */
-  async function act(kind: 'discover' | 'check') {
-    if (!current) return;
-    await flush();
-    busy = kind;
-    try {
-      if (kind === 'discover') {
-        const r = await releases.discover(current.id);
-        setCurrent(r.release);
-        derivedCodenames = await releases.codenames(r.release.id).catch(() => derivedCodenames);
-        toasts.show(`${r.addedMrs} MR dan ${r.addedServices} service baru ditemukan.${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`, r.warnings.length ? 'info' : 'ok', 6000);
-      } else {
-        const r = await releases.check(current.id);
-        setCurrent(r.release);
-        report = r.report;
-        toasts.show(r.report.warnings.length ? `Cek selesai: ${r.report.warnings.length} hal perlu perhatian.` : 'Cek selesai: tidak ada masalah.', r.report.warnings.length ? 'info' : 'ok', 5000);
-      }
-    } catch (e) {
-      toasts.show((e as Error).message, 'err', 6000);
-    } finally {
-      busy = '';
-    }
   }
 
   /** Ready/released while the code does not match the scope needs a second look. */
@@ -235,7 +265,12 @@
   }
   function removeService(s: ReleaseService) {
     if (!current) return;
-    current.services = current.services.filter((x) => x.id !== s.id).map((x, i) => ({ ...x, order: i + 1 }));
+    // Remembered as removed, so the check does not add it back.
+    const next = removeServices($state.snapshot(current) as Release, [s.id]);
+    current.services = next.services;
+    current.items = next.items;
+    current.steps = next.steps;
+    current.ignoredServices = next.ignoredServices;
   }
   function move(s: ReleaseService, dir: -1 | 1) {
     if (!current) return;
@@ -261,7 +296,7 @@
   }
   async function removeOutside() {
     if (!current || !outside.length) return;
-    const ok = await confirmDialog({ title: 'Hapus service di luar scope?', message: `${outside.map((s) => s.name).join(', ')} tidak punya tiket scope dan tidak punya MR. Service ini dan item checklist-nya dihapus dari rilis.`, confirmText: 'Hapus', danger: true });
+    const ok = await confirmDialog({ title: 'Hapus service di luar scope?', message: `${outside.map((s) => s.name).join(', ')} tidak punya tiket scope dan tidak punya MR. Service ini dan isi dokumennya dihapus dari rilis.`, confirmText: 'Hapus', danger: true });
     if (!ok) return;
     const next = removeServices($state.snapshot(current) as Release, outside.map((s) => s.id));
     current.services = next.services;
@@ -297,21 +332,6 @@
     owner.mrs = owner.mrs.filter((m) => m.ref !== ref);
   }
 
-  function toggleItem(i: ReleaseItem) {
-    i.done = !i.done;
-    i.doneAt = i.done ? new Date().toISOString() : undefined;
-  }
-  function addItem() {
-    if (!current || !newItem.label.trim()) return;
-    current.items = [...current.items, { id: crypto.randomUUID(), kind: newItem.kind, label: newItem.label.trim(), ...(newItem.service ? { service: newItem.service } : {}), source: 'manual', done: false }];
-    newItem = { ...newItem, label: '' };
-  }
-  function addStep() {
-    if (!current || !newStep.text.trim()) return;
-    current.steps = [...current.steps, { id: crypto.randomUUID(), kind: newStep.kind, text: newStep.text.trim(), done: false }];
-    newStep = { ...newStep, text: '' };
-  }
-
   async function copyDoc() {
     try {
       await navigator.clipboard.writeText(docMd);
@@ -329,7 +349,6 @@
   const pipeClass = (p?: string) => (p === 'success' ? 'ok' : p === 'failed' || p === 'canceled' ? 'err' : p ? 'warn' : '');
   const stateLabel = (c?: MrCheck) => (!c ? 'belum dicek' : c.error ? 'gagal dicek' : c.state === 'merged' ? 'merged' : c.state === 'closed' ? 'ditutup' : c.draft ? 'draft' : 'terbuka');
   const fmt = (d?: string) => (d ? new Date(d.length > 10 ? d : `${d}T00:00:00Z`).toLocaleString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', ...(d.length > 10 ? { hour: '2-digit', minute: '2-digit' } : { timeZone: 'UTC' }) }) : '');
-  const kindLabel: Record<ReleaseItem['kind'], string> = { env: 'Env baru', migration: 'Migrasi', sql: 'Query manual' };
 </script>
 
 <div class="releases">
@@ -400,13 +419,22 @@
           </div>
         </div>
         <div class="actions">
-          <button class="btn btn-sm btn-primary" onclick={() => act('discover')} disabled={!!busy} title="Cari service yang disentuh tiket rilis dan MR ke branch target di GitLab"><Icon name="search" size={13} /> {busy === 'discover' ? 'Mencari…' : 'Cari service & MR'}</button>
-          <button class="btn btn-sm btn-primary" onclick={() => act('check')} disabled={!!busy || !allMrs.length} title="Cek tiap MR: env baru, migrasi, query manual, commit tanpa Jira key, approval, pipeline, dan tiket yang belum ikut"><Icon name="check" size={13} /> {busy === 'check' ? 'Mengecek…' : 'Jalankan cek'}</button>
+          {#if aiCheck.running}
+            <button class="btn btn-sm" onclick={() => aiCheck.cancel()}><Icon name="x" size={13} /> Batalkan cek</button>
+          {:else}
+            <button class="btn btn-sm btn-primary" onclick={startAiCheck} title="AI mencari service & MR rilis, lalu membaca seluruh diff tiap service: status MR, tiket ada/sebagian/tidak, env, query (CREATE/ALTER/INSERT), migrasi, langkah deploy lain, dan perubahan di luar scope. Berjalan di background."><Icon name="sparkles" size={13} /> Jalankan cek</button>
+          {/if}
+          <span class="ai-pick" title="Model AI untuk cek rilis"><AiPicker value={ai} onchange={pickAi} disabled={aiCheck.running} /></span>
           <button class="btn btn-sm" onclick={() => (importOpen = true)}><Icon name="upload" size={13} /> Import dokumen</button>
           <button class="btn btn-sm" onclick={async () => { await flush(); shareOpen = true; }} disabled={!allMrs.length}><Icon name="teams" size={13} /> Share MR ke Teams</button>
           <button class="btn btn-sm" onclick={async () => { await flush(); publishOpen = true; }}><Icon name="confluence" size={13} /> Publish ke Confluence</button>
-          {#if report}<span class="muted small">Cek terakhir {fmt(report.checkedAt)}</span>{/if}
+          {#if report}<span class="muted small">Cek terakhir {fmt(report.checkedAt)}{report.ai ? ` · dengan AI (${report.ai.model})` : ''}</span>{/if}
         </div>
+        {#if aiCheck.running}
+          <p class="small ai-status"><Icon name="sparkles" size={12} /> {aiCheck.job?.progress ?? 'AI berjalan…'} <span class="muted">· boleh pindah halaman, cek tetap jalan</span></p>
+        {:else if aiCheck.job?.status === 'error'}
+          <p class="small err-text">Cek AI terakhir gagal: {aiCheck.job.error}</p>
+        {/if}
       </header>
 
       {#if report?.warnings.length}
@@ -431,7 +459,6 @@
 
       <div class="tabs">
         <button class:active={tab === 'board'} onclick={() => (tab = 'board')}><Icon name="dashboard" size={14} /> Papan ({current.services.length})</button>
-        <button class:active={tab === 'checklist'} onclick={() => (tab = 'checklist')}><Icon name="list" size={14} /> Checklist {pendingItems ? `(${pendingItems} belum)` : ''}</button>
         <button class:active={tab === 'tickets'} onclick={() => (tab = 'tickets')}><Icon name="jira" size={14} /> Tiket {report ? `(${report.tickets.length})` : ''}</button>
         <button class:active={tab === 'doc'} onclick={() => (tab = 'doc')}><Icon name="doc" size={14} /> Dokumen</button>
       </div>
@@ -446,7 +473,7 @@
             </div>
           {/if}
           {#if !current.services.length}
-            <p class="muted">Belum ada service. Pilih proyek atau codename di atas lalu klik <strong>Cari service & MR</strong>, import dokumen rilis, atau tambah manual.</p>
+            <p class="muted">Belum ada service. Pilih proyek atau codename di atas lalu klik <strong>Jalankan cek</strong> (AI mencari service dan MR), import dokumen rilis, atau tambah manual.</p>
           {/if}
           {#each [...current.services].sort((a, b) => a.order - b.order) as s (s.id)}
             {@const noMr = report?.servicesWithoutMr.some((x) => x.toLowerCase() === s.name.toLowerCase())}
@@ -503,7 +530,7 @@
                 </div>
               {/each}
               <button class="link-btn small" onclick={() => (openDetail[s.id] = !openDetail[s.id])}>{openDetail[s.id] ? '▾' : '▸'} Detail deployment (commit id, .env, pre/post-deploy, failover)</button>
-              {#if openDetail[s.id]}<ServiceDeployFields service={s} checks={report?.mrs ?? []} />{/if}
+              {#if openDetail[s.id]}<ServiceDeployFields service={s} checks={report?.mrs ?? []} release={current} />{/if}
               <div class="add-mr">
                 <input class="input mono" value={mrInput[s.id] ?? ''} oninput={(e) => (mrInput[s.id] = e.currentTarget.value)} placeholder="Tempel link MR ke {current.targetBranch}" aria-label="Link MR" onkeydown={(e) => e.key === 'Enter' && addMr(s)} />
                 <button class="btn btn-sm" onclick={() => addMr(s)}><Icon name="plus" size={12} /> MR</button>
@@ -512,58 +539,9 @@
             </div>
           {/each}
           <button class="btn btn-sm" onclick={addService}><Icon name="plus" size={12} /> Service</button>
-        {:else if tab === 'checklist'}
-          {#each ['env', 'migration', 'sql'] as const as kind (kind)}
-            {@const items = current.items.filter((i) => i.kind === kind)}
-            <section class="group">
-              <h4>{kindLabel[kind]} ({items.filter((i) => !i.done).length} belum)</h4>
-              {#each items as i (i.id)}
-                <label class="check-item" class:done={i.done}>
-                  <input type="checkbox" checked={i.done} onchange={() => toggleItem(i)} />
-                  <span>{#if i.service}<strong>{i.service}:</strong>&nbsp;{/if}<span class="mono">{i.label}</span> <span class="muted small">· {i.source === 'check' ? 'dari cek MR' : i.source === 'import' ? 'dari dokumen' : 'manual'}{i.done && i.doneAt ? ` · selesai ${fmt(i.doneAt)}` : ''}</span></span>
-                  <button class="icon-btn" onclick={(e) => { e.preventDefault(); current && (current.items = current.items.filter((x) => x.id !== i.id)); }} aria-label="Hapus item"><Icon name="x" size={11} /></button>
-                </label>
-                {#if i.detail && i.detail !== i.label}<pre class="sql">{i.detail}</pre>{/if}
-              {:else}
-                <p class="muted small">Tidak ada.</p>
-              {/each}
-            </section>
-          {/each}
-          <div class="add-row">
-            <select class="input tiny-select" bind:value={newItem.kind} aria-label="Jenis">
-              <option value="env">Env baru</option><option value="migration">Migrasi</option><option value="sql">Query manual</option>
-            </select>
-            <input class="input" bind:value={newItem.label} placeholder="Nama env / file migrasi / query" />
-            <select class="input tiny-select" bind:value={newItem.service} aria-label="Service">
-              <option value="">service…</option>
-              {#each current.services as s (s.id)}<option value={s.name}>{s.name}</option>{/each}
-            </select>
-            <button class="btn btn-sm" onclick={addItem} disabled={!newItem.label.trim()}><Icon name="plus" size={12} /> Tambah</button>
-          </div>
-
-          {#each ['deploy', 'rollback'] as const as kind (kind)}
-            {@const steps = current.steps.filter((s) => s.kind === kind)}
-            <section class="group">
-              <h4>{kind === 'deploy' ? 'Langkah deploy' : 'Rollback'}</h4>
-              {#each steps as st, n (st.id)}
-                <label class="check-item" class:done={st.done}>
-                  <input type="checkbox" checked={st.done} onchange={() => { st.done = !st.done; st.doneAt = st.done ? new Date().toISOString() : undefined; }} />
-                  <span>{n + 1}. {st.text}</span>
-                  <button class="icon-btn" onclick={(e) => { e.preventDefault(); current && (current.steps = current.steps.filter((x) => x.id !== st.id)); }} aria-label="Hapus langkah"><Icon name="x" size={11} /></button>
-                </label>
-              {:else}
-                <p class="muted small">Belum ada.</p>
-              {/each}
-            </section>
-          {/each}
-          <div class="add-row">
-            <select class="input tiny-select" bind:value={newStep.kind} aria-label="Jenis langkah"><option value="deploy">Deploy</option><option value="rollback">Rollback</option></select>
-            <input class="input" bind:value={newStep.text} placeholder="mis. Deploy core-payment, jalankan migrasi, smoke test" onkeydown={(e) => e.key === 'Enter' && addStep()} />
-            <button class="btn btn-sm" onclick={addStep} disabled={!newStep.text.trim()}><Icon name="plus" size={12} /> Langkah</button>
-          </div>
         {:else if tab === 'tickets'}
           {#if !report}
-            <p class="muted">Klik <strong>Jalankan cek</strong> untuk melihat tiket rilis (dari TAD, codename, dan tiket tambahan) dan apakah sudah masuk MR.</p>
+            <p class="muted">Klik <strong>Jalankan cek</strong>: AI mencari service & MR, lalu memeriksa tiap tiket rilis (dari TAD, codename, dan tiket tambahan) di kode yang akan dirilis.</p>
           {:else}
             <p class="muted small">Tiket dicari di <strong>isi kode</strong> yang akan dirilis (diff MR, atau compare branch sumber dengan {current.targetBranch} kalau belum ada MR): endpoint dari Detail Task TAD, atau nama tiket di nama fungsi, struct, route, dan path file. Jira key di commit hanya pendukung.</p>
             {#if report.sources?.length}
@@ -571,7 +549,9 @@
                 {#each report.sources as src (src.ref)}
                   <li>
                     <strong>{src.service}</strong> · <span class="mono">{src.ref}</span> · {src.error ? `gagal: ${src.error}` : `${src.files} file berubah`}
-                    {#if src.unattributed.length}
+                    {#if src.aiUnrelated?.length}
+                      <details open><summary class="warn-text">AI: {src.aiUnrelated.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each src.aiUnrelated as u (u.path)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>
+                    {:else if src.unattributed.length}
                       <details><summary>{src.unattributed.length}{src.unattributed.length >= 30 ? '+' : ''} file tidak terkait tiket scope mana pun</summary><ul class="mono">{#each src.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
                     {/if}
                   </li>
@@ -588,6 +568,9 @@
                     <td><span class="badge" class:b-ok={t.devDone} class:b-warn={!t.devDone}>{t.status}</span></td>
                     <td class="small">{t.from === 'tad' ? 'TAD' : t.from === 'codename' ? 'codename' : 'tambahan'}</td>
                     <td class="small">
+                      {#if t.ai}
+                        <div class="ai-verdict"><span class="badge" class:b-ok={t.ai.verdict === 'ada'} class:b-warn={t.ai.verdict !== 'ada'}>AI: {t.ai.verdict}</span> {t.ai.reason}{#if t.ai.files.length}<div class="mono muted">{t.ai.files.slice(0, 3).join(', ')}</div>{/if}</div>
+                      {/if}
                       {#if t.noRepo}
                         <span class="muted">{t.service} tidak ada di rilis</span>
                       {:else if t.code?.length || t.byKey?.length}
@@ -653,6 +636,48 @@
             <button class="btn btn-sm" onclick={copyDoc}><Icon name="copy" size={12} /> Salin Markdown</button>
             <button class="btn btn-sm btn-ghost" onclick={resetDoc} title="Kosongkan isi dokumen lama (Change Log, Release List, bukti test, status, commit id manual) supaya dokumen mengikuti data rilis"><Icon name="refresh" size={12} /> Susun ulang dari data rilis</button>
           </div>
+          <section class="ai-doc">
+            <h4><Icon name="sparkles" size={13} /> Perbaiki dokumen dengan AI</h4>
+            <p class="muted small">AI membaca isi dokumen per service dan kode terbaru (diff .env/config, env yang dibaca kode, migrasi, query), lalu mengusulkan perbaikan. Tidak ada yang berubah sebelum Anda klik Terapkan.</p>
+            <div class="row">
+              <textarea class="input" rows="2" bind:value={docInstruction} placeholder="mis. Lengkapi .env tiap service sesuai kode, tambahkan query CREATE TABLE yang dibutuhkan, lengkapi langkah post-deploy"></textarea>
+              <div class="ai-doc-acts">
+                <AiPicker value={ai} onchange={pickAi} disabled={aiDoc.running} />
+                {#if aiDoc.running}
+                  <button class="btn btn-sm" onclick={() => aiDoc.cancel()}><Icon name="x" size={12} /> Batalkan</button>
+                {:else}
+                  <button class="btn btn-sm btn-primary" onclick={startAiDoc} disabled={!docInstruction.trim()}><Icon name="sparkles" size={12} /> Perbaiki dengan AI</button>
+                {/if}
+              </div>
+            </div>
+            {#if aiDoc.running}
+              <p class="small ai-status">{aiDoc.job?.progress ?? 'AI berjalan…'}</p>
+            {:else if aiDoc.job?.status === 'error'}
+              <p class="small err-text">{aiDoc.job.error}</p>
+            {:else if aiDoc.job?.status === 'done'}
+              {#if aiDoc.job.notes?.length}<ul class="small">{#each aiDoc.job.notes as n, i (i)}<li>{n}</li>{/each}</ul>{/if}
+              {#each aiDoc.job.fixes ?? [] as fix (fix.serviceId)}
+                {@const svc = current.services.find((s) => s.id === fix.serviceId)}
+                {@const done = appliedFixes[`${aiDoc.job.id}:${fix.serviceId}`]}
+                <div class="fix">
+                  <div class="fix-head"><strong>{fix.name}</strong>
+                    <button class="btn btn-sm" class:btn-primary={!done} onclick={() => applyFix(fix)} disabled={done || !svc}>{done ? 'Sudah diterapkan' : 'Terapkan'}</button>
+                  </div>
+                  {#if fix.envBlock !== undefined}
+                    <div class="fix-cols">
+                      <div><span class="label">.env sekarang</span><pre>{svc?.envBlock || '(kosong)'}</pre></div>
+                      <div><span class="label">.env usulan AI</span><pre>{fix.envBlock || '(kosong)'}</pre></div>
+                    </div>
+                  {/if}
+                  {#if fix.preDeploy}<div class="small"><span class="label">Pre-deploy usulan</span><ul>{#each fix.preDeploy as p, i (i)}<li class:new={!svc?.preDeploy?.includes(p)}>{p}</li>{/each}</ul></div>{/if}
+                  {#if fix.postDeploy}<div class="small"><span class="label">Post-deploy usulan</span><ul>{#each fix.postDeploy as p, i (i)}<li class:new={!svc?.postDeploy?.includes(p)}>{p}</li>{/each}</ul></div>{/if}
+                  {#if fix.failover}<div class="small"><span class="label">Failover usulan</span> {fix.failover}</div>{/if}
+                </div>
+              {:else}
+                <p class="muted small">AI tidak mengusulkan perubahan.</p>
+              {/each}
+            {/if}
+          </section>
           <DeployInfoForm release={current} />
           <div class="docs">
             <article class="doc rich">
@@ -1059,24 +1084,6 @@
   .warn-text {
     color: var(--warn, #b45309);
   }
-  .group h4 {
-    margin: 6px 0;
-    font-size: 13px;
-  }
-  .check-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 4px 0;
-    font-size: 13px;
-  }
-  .check-item span {
-    flex: 1;
-  }
-  .check-item.done span {
-    text-decoration: line-through;
-    color: var(--text-3);
-  }
   .sql {
     margin: 0 0 6px 24px;
     padding: 8px;
@@ -1102,6 +1109,74 @@
   }
   .tbl tr.missing td {
     background: var(--err-soft);
+  }
+  .ai-pick {
+    display: inline-flex;
+  }
+  .ai-status {
+    margin: 6px 0 0;
+    color: var(--accent);
+  }
+  .ai-verdict {
+    margin-bottom: 3px;
+  }
+  .ai-doc {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    margin: 10px 0;
+    background: var(--surface-2);
+  }
+  .ai-doc h4 {
+    margin: 0 0 4px;
+  }
+  .ai-doc .row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .ai-doc textarea {
+    flex: 1;
+    min-width: 260px;
+  }
+  .ai-doc-acts {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .fix {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .fix-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .fix-cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px;
+    margin: 6px 0;
+  }
+  .fix pre {
+    margin: 2px 0 0;
+    padding: 6px 8px;
+    max-height: 240px;
+    overflow: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .fix li.new {
+    color: var(--ok, var(--accent));
   }
   .tbl tr.unsure td {
     background: var(--warn-soft, var(--err-soft));

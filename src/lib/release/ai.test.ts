@@ -1,0 +1,74 @@
+import { describe, expect, it } from 'vitest';
+import type { MrFileChange } from '../gitlab/types';
+import { diffText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, ticketsPrompt } from './ai';
+
+const change = (path: string, diff: string): MrFileChange => ({ oldPath: path, newPath: path, newFile: false, renamedFile: false, deletedFile: false, diff, additions: 1, deletions: 0 });
+
+describe('release AI prompts and answers', () => {
+  it('fits diffs in a budget and lists the rest by name', () => {
+    const { text, omitted } = diffText([change('a.go', '+a'.repeat(10)), change('b.go', '+b'.repeat(50)), change('c.bin', '')], 40);
+    expect(text).toContain('### a.go');
+    expect(text).toContain('- b.go');
+    expect(text).toContain('- c.bin (diff tidak tersedia)');
+    expect(omitted).toBe(2);
+  });
+
+  it('asks for every ticket and every deploy need', () => {
+    const p = ticketsPrompt({ service: 'core-topup', target: 'master', refs: ['g/core-topup@staging'], tickets: [{ key: 'MU-1', summary: 'Develop API X', detail: 'Endpoint: /v1/x' }], commits: ['feat x'], diff: '### a.go\n+x' });
+    expect(p).toContain('- MU-1: Develop API X');
+    expect(p).toContain('Endpoint: /v1/x');
+    expect(p).toMatch(/CREATE\/ALTER\/DROP TABLE/);
+    expect(p).toContain('"needs"');
+  });
+
+  it('reads the JSON object out of a chatty or fenced reply', () => {
+    expect(parseJsonReply('Berikut hasilnya:\n```json\n{"a": "x } y", "b": [1]}\n```')).toEqual({ a: 'x } y', b: [1] });
+    expect(parseJsonReply('ok {"a":1} lalu {"b":2}')).toEqual({ a: 1 });
+    expect(parseJsonReply('tidak ada')).toBeNull();
+  });
+
+  it('keeps only asked tickets, changed files and valid needs', () => {
+    const reply = JSON.stringify({
+      tickets: [
+        { key: 'mu-1', verdict: 'ada', files: ['a.go', 'tidak/ada.go'], reason: 'handler X' },
+        { key: 'MU-9', verdict: 'ada', files: [], reason: 'bukan tiket rilis' },
+        { key: 'MU-2', verdict: 'mungkin', files: [], reason: '' },
+      ],
+      unrelated: [{ path: 'b.go', reason: 'fitur lain' }, { path: 'x.go', reason: 'tidak berubah' }],
+      needs: [
+        { kind: 'env', when: 'pre', label: 'Tambah env `TOPUP_LIMIT`', detail: 'batas topup', files: ['a.go'] },
+        { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },
+        { kind: 'other', when: 'post', label: 'Smoke test /v1/topup', files: [] },
+        { kind: 'cuaca', label: 'x' },
+      ],
+    });
+    const r = parseTicketsReply(reply, ['MU-1', 'MU-2'], ['a.go', 'b.go'])!;
+    expect([...r.tickets]).toEqual([['MU-1', { verdict: 'ada', files: ['a.go'], reason: 'handler X' }]]);
+    expect(r.unrelated).toEqual([{ path: 'b.go', reason: 'fitur lain' }]);
+    expect(r.needs).toEqual([
+      { kind: 'env', when: 'pre', label: 'TOPUP_LIMIT', detail: 'batas topup', files: ['a.go'] },
+      { kind: 'sql', when: 'pre', label: 'Buat tabel topup_codes', detail: 'CREATE TABLE topup_codes (id bigint);', files: [] },
+      { kind: 'other', when: 'post', label: 'Smoke test /v1/topup', files: [] },
+    ]);
+    expect(parseTicketsReply('maaf', ['MU-1'], [])).toBeNull();
+  });
+
+  it('maps picks to known commits (short shas too) in commit order', () => {
+    const shas = ['aaaaaaaa11', 'bbbbbbbb22', 'cccccccc33'];
+    const r = parsePicksReply(JSON.stringify({ picks: [{ sha: 'cccccccc', include: true, keys: ['mu-2'], reason: 'fitur' }, { sha: 'aaaaaaaa11', include: false, reason: 'promo' }, { sha: 'deadbeef', include: true }], notes: ['MU-3 tidak ada'] }), shas)!;
+    expect(r.picks).toEqual([
+      { sha: 'aaaaaaaa11', include: false, keys: [], reason: 'promo' },
+      { sha: 'cccccccc33', include: true, keys: ['MU-2'], reason: 'fitur' },
+    ]);
+    expect(r.notes).toEqual(['MU-3 tidak ada']);
+  });
+
+  it("proposes document fixes only for the release's services", () => {
+    const r = parseDocumentReply(JSON.stringify({ services: [{ name: 'CORE-TOPUP', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'] }, { name: 'lain', envBlock: 'X=1' }, { name: 'core-ledger' }], summary: ['B ditambah'] }), [
+      { id: 's1', name: 'core-topup' },
+      { id: 's2', name: 'core-ledger' },
+    ])!;
+    expect(r.fixes).toEqual([{ serviceId: 's1', name: 'core-topup', envBlock: 'A=1\nB=', preDeploy: ['Jalankan query'] }]);
+    expect(r.summary).toEqual(['B ditambah']);
+  });
+});

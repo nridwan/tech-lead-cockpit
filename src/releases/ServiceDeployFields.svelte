@@ -1,10 +1,20 @@
 <script lang="ts">
   import { DEFAULT_FAILOVER, serviceCommit } from '../lib/release/deployment';
-  import type { DeployPerson, MrCheck, ReleaseService } from '../lib/release/types';
+  import type { DeployPerson, MrCheck, Release, ReleaseItem, ReleaseService } from '../lib/release/types';
   import PeoplePicker from './PeoplePicker.svelte';
 
   /** One service's rows of the deployment page that are not derived from the checks. */
-  let { service, checks }: { service: ReleaseService; checks: MrCheck[] } = $props();
+  let { service, checks, release }: { service: ReleaseService; checks: MrCheck[]; release: Release } = $props();
+
+  // Queries and migrations of this service: shown in the document's Pre-deploy, edited here.
+  const mine = (i: ReleaseItem) => (i.kind === 'sql' || i.kind === 'migration') && i.service?.toLowerCase() === service.name.toLowerCase();
+  const queries = $derived(release.items.filter(mine));
+  function addQuery() {
+    release.items = [...release.items, { id: crypto.randomUUID(), kind: 'sql', label: 'Query baru', service: service.name, detail: '', source: 'manual', done: false }];
+  }
+  function dropQuery(id: string) {
+    release.items = release.items.filter((i) => i.id !== id);
+  }
 
   const fromMr = $derived(serviceCommit({ ...service, commitId: undefined }, checks));
   const lines = (v?: string[]) => (v ?? []).join('\n');
@@ -37,6 +47,23 @@
     <textarea class="input" rows="2" value={lines(service.postDeploy)} oninput={(e) => (service.postDeploy = toLines(e.currentTarget.value))}></textarea>
   </label>
   <div class="field wide">
+    <span>Query &amp; migrasi (Pre-deploy)</span>
+    {#each queries as q (q.id)}
+      <div class="query">
+        <div class="qhead">
+          <span class="tag">{q.kind === 'sql' ? 'query' : 'migrasi'}{q.source === 'ai' ? ' · AI' : ''}</span>
+          <input class="input" bind:value={q.label} aria-label="Judul" />
+          <button class="btn btn-sm btn-ghost" onclick={() => dropQuery(q.id)} aria-label="Hapus">✕</button>
+        </div>
+        {#if q.kind === 'sql'}<textarea class="input mono" rows="3" bind:value={q.detail} placeholder="SQL yang dijalankan"></textarea>{/if}
+        {#if q.note}<span class="muted">{q.note}</span>{/if}
+      </div>
+    {:else}
+      <span class="muted">Tidak ada.</span>
+    {/each}
+    <button class="btn btn-sm add" onclick={addQuery}>+ Query</button>
+  </div>
+  <div class="field wide">
     <span>Updated by</span>
     <PeoplePicker bind:people={() => updatedBy, (v) => { updatedBy = v; service.updatedBy = v[0]; }} single label="orang" />
   </div>
@@ -62,6 +89,35 @@
   }
   .wide {
     grid-column: 1 / -1;
+  }
+  .query {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .qhead {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .qhead .input {
+    flex: 1;
+  }
+  .tag {
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--surface-hover);
+    white-space: nowrap;
+  }
+  .muted {
+    color: var(--text-3);
+    font-weight: 400;
+  }
+  .add {
+    align-self: flex-start;
   }
   .mono {
     font-family: var(--font-mono, ui-monospace, monospace);

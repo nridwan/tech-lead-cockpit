@@ -134,7 +134,7 @@ describe('report from the code', () => {
       ['MU-5', [], false],
     ]);
     expect(rep.scope).toMatchObject({ inCode: 1, unsure: 1, missing: 1, matched: false });
-    expect(rep.warnings).toContain('1 tiket hanya cocok samar di kode, perlu dicek manual: MU-4.');
+    expect(rep.warnings).toContain('1 tiket perlu dicek manual (cocok samar, atau AI ragu): MU-4.');
     expect(rep.sources).toHaveLength(1);
   });
 

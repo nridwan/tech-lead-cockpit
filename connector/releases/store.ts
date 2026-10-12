@@ -93,7 +93,7 @@ export function validateRelease(raw: Partial<Release>): Release {
   const items: ReleaseItem[] = arr<Partial<ReleaseItem>>(raw.items, 300).flatMap((it) => {
     const label = text(it.label, 300);
     if (!label || !['env', 'migration', 'sql'].includes(String(it.kind))) return [];
-    return [{ id: id(it.id), kind: it.kind as ReleaseItem['kind'], label, ...(it.service ? { service: text(it.service, 100) } : {}), ...(it.detail ? { detail: text(it.detail, 20_000) } : {}), source: it.source === 'import' || it.source === 'manual' ? it.source : 'check', done: it.done === true, ...(it.done && stamp(it.doneAt) ? { doneAt: stamp(it.doneAt) } : {}) }];
+    return [{ id: id(it.id), kind: it.kind as ReleaseItem['kind'], label, ...(it.service ? { service: text(it.service, 100) } : {}), ...(it.detail ? { detail: text(it.detail, 20_000) } : {}), ...(it.note ? { note: text(it.note, 1_000) } : {}), source: it.source === 'import' || it.source === 'manual' || it.source === 'ai' ? it.source : 'check', done: it.done === true, ...(it.done && stamp(it.doneAt) ? { doneAt: stamp(it.doneAt) } : {}) }];
   });
   const steps: ReleaseStep[] = arr<Partial<ReleaseStep>>(raw.steps, 200).flatMap((st) => {
     const t = text(st.text, 1_000);
@@ -129,6 +129,7 @@ export function validateRelease(raw: Partial<Release>): Release {
     ...(raw.teamsChat?.id ? { teamsChat: { id: text(raw.teamsChat.id, 300), name: text(raw.teamsChat.name, 200) } } : {}),
     shares: arr<Release['shares'][number]>(raw.shares, 50).map((s) => ({ at: stamp(s.at) ?? now, chatId: text(s.chatId, 300), chatName: text(s.chatName, 200), mrRefs: arr<string>(s.mrRefs, 40).map((r) => text(r, 320)) })),
     ...(validDeploy(raw.deploy) ? { deploy: validDeploy(raw.deploy) } : {}),
+    ...(arr<string>(raw.ignoredServices, 60).length ? { ignoredServices: [...new Set(arr<string>(raw.ignoredServices, 60).map((n) => text(n, 100)).filter(Boolean))] } : {}),
     accepted: arr<Release['accepted'][number]>(raw.accepted, 200).flatMap((a) => (KEY.test(String(a?.key)) ? [{ key: String(a.key), ...(a.note ? { note: text(a.note, 300) } : {}), at: stamp(a.at) ?? now }] : [])),
     ...(pub?.pageId && /^\d{1,20}$/.test(String(pub.pageId)) ? { published: { pageId: String(pub.pageId), version: Math.max(1, Math.floor(Number(pub.version) || 1)), ...(pub.url ? { url: text(pub.url, 500) } : {}), at: stamp(pub.at) ?? now } } : {}),
     ...(raw.notes ? { notes: text(raw.notes, 5_000) } : {}),

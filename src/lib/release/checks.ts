@@ -35,6 +35,9 @@ const MIGRATION_FILE = /(^|\/)(V\d+(\.\d+)*__[^/]+\.sql|\d{6,}[_-][^/]+\.(sql|go
 const TEST_DIR = /(^|\/)(test|tests|__tests__|testdata|fixtures?|mocks?)\//i;
 const MODEL_PATH = /(^|\/)(models?|entit(y|ies)|schemas?)\/|\.(model|entity)\.(ts|js)$|_model\.go$/i;
 
+/** .env-like files and config files that read env (${VAR}): what the document's env block is about. */
+export const isEnvOrConfigFile = (path: string) => ENV_FILE.test(path) || CONFIG_FILE.test(path);
+
 export const isMigration = (path: string) => MIGRATION_DIR.test(path) || MIGRATION_FILE.test(path);
 
 const uniq = (xs: string[]) => [...new Set(xs)];

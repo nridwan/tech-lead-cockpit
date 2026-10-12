@@ -1,7 +1,7 @@
 import { parseTaskTitle } from '../tad/template';
 import { jiraDevStage } from '../tad/progress-report';
 import { jiraKeysIn } from './checks';
-import type { CodeEvidence, CodeSource, MrCheck, OutOfScope, Release, ReleaseReport, TicketCoverage } from './types';
+import type { AiTicketVerdict, CodeEvidence, CodeSource, MrCheck, OutOfScope, Release, ReleaseReport, TicketCoverage } from './types';
 
 /**
  * Puts the MR checks and the release's tickets together: which tickets reached a release MR,
@@ -19,6 +19,8 @@ export interface ReleaseTicket {
   from: TicketCoverage['from'];
   /** Endpoints from the ticket's TAD Detail Task, to find it in the code. */
   endpoints?: string[];
+  /** The TAD Detail Task as plain text, for the AI. */
+  detail?: string;
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -84,6 +86,8 @@ export function codeKeys(c: MrCheck, prefixes: Iterable<string> = []): string[] 
 export interface CodeFindings {
   sources: CodeSource[];
   evidence: Map<string, CodeEvidence[]>;
+  /** AI verdicts per ticket key: they decide over the pattern match. */
+  ai?: Map<string, AiTicketVerdict>;
 }
 
 const live = (c: MrCheck) => !c.error && (c.state === 'opened' || c.state === 'merged');
@@ -114,8 +118,15 @@ export function buildReport(
     const evidence = code.evidence.get(t.key) ?? [];
     const byKey = [...keysByMr].filter(([, keys]) => keys.has(t.key)).map(([ref]) => ref);
     // The code decides; a key in a commit only adds where it is.
-    const inMrs = [...new Set([...evidence.filter((e) => e.strength === 'strong').map((e) => e.ref), ...byKey])];
+    const found = [...new Set([...evidence.filter((e) => e.strength === 'strong').map((e) => e.ref), ...byKey])];
     const noRepo = Boolean(service) && !release.services.some((s) => sameService(s.name, service!));
+    // The AI's reading decides when there is one: "ada" is in the code, "sebagian" needs a look,
+    // "tidak" is missing unless the pattern match found it (then the two disagree: needs a look).
+    const ai = code.ai?.get(t.key);
+    const own = release.services.filter((s) => service && sameService(s.name, service)).map((s) => s.name);
+    const aiRefs = (code.sources ?? []).filter((x) => own.includes(x.service) && !x.error).map((x) => x.ref);
+    const inMrs = !ai ? found : ai.verdict === 'ada' ? [...new Set([...found, ...(found.length ? [] : aiRefs.slice(0, 1))])] : [];
+    const unsure = !ai ? !found.length && evidence.length > 0 : ai.verdict === 'sebagian' || (ai.verdict === 'tidak' && found.length > 0);
     coverage.push({
       key: t.key,
       summary: t.summary,
@@ -125,8 +136,9 @@ export function buildReport(
       inMrs,
       ...(evidence.length ? { code: evidence } : {}),
       ...(byKey.length ? { byKey } : {}),
-      ...(!inMrs.length && evidence.length ? { unsure: true } : {}),
+      ...(unsure ? { unsure: true } : {}),
       ...(noRepo ? { noRepo: true } : {}),
+      ...(ai ? { ai } : {}),
       devDone: jiraDevStage({ status: t.status, statusCategory: t.statusCategory } as Parameters<typeof jiraDevStage>[0]) === 'merged',
     });
   }
@@ -170,7 +182,7 @@ export function buildReport(
   const unsure = coverage.filter((c) => c.unsure && !c.noRepo);
   const noRepo = coverage.filter((c) => c.noRepo);
   if (missing.length) warnings.push(`${missing.length} tiket scope tidak terlihat di kode yang akan dirilis: ${missing.map((c) => c.key).join(', ')}.`);
-  if (unsure.length) warnings.push(`${unsure.length} tiket hanya cocok samar di kode, perlu dicek manual: ${unsure.map((c) => c.key).join(', ')}.`);
+  if (unsure.length) warnings.push(`${unsure.length} tiket perlu dicek manual (cocok samar, atau AI ragu): ${unsure.map((c) => c.key).join(', ')}.`);
   if (noRepo.length) {
     const names = [...new Set(noRepo.map((c) => c.service!))];
     warnings.push(`${noRepo.length} tiket untuk ${names.join(', ')} tidak punya service di rilis ini: tidak dicek ke kode.`);

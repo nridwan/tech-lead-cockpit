@@ -5,15 +5,18 @@ import type { MrCommit, MrDetail, MrFileChange, MrSummary } from '../../src/lib/
 import { mrDescription, mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
-import { checkMr, jiraKeysIn } from '../../src/lib/release/checks.ts';
+import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
+import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
+import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
+import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { buildReport, codeKeys, forCurrentServices, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
-import type { CodeEvidence, CodeSource, MrCheck, MrPlan, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
+import type { AiTicketVerdict, CodeEvidence, CodeSource, MrCheck, MrPlan, ReleaseAiJob, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
-import { parseScopeTasks, taskEndpoints } from '../../src/lib/tad/task-links.ts';
+import { parseScopeTasks, taskDetailText, taskEndpoints } from '../../src/lib/tad/task-links.ts';
 import { matchRepo } from '../roster/git-activity.ts';
 import { ReleaseInputError, ReleaseStore } from './store.ts';
 
@@ -50,13 +53,27 @@ export interface ReleaseDeps {
   /** Repo folder → GitLab project path (from the Services repos' remotes). */
   repoPaths: () => Promise<Record<string, string>>;
   teamsSend: (chatId: string, html: string) => Promise<void>;
+  /** Runs a text prompt on the chosen AI (no tools); for the AI check, pick and document fix. */
+  runAi?: (ai: AiSelection, prompt: string, opts: { systemPrompt: string; timeoutMs: number }) => { done: Promise<{ reply: string; error?: string }>; cancel: () => void };
   now?: () => Date;
+}
+
+const AI_TIMEOUT_MS = 10 * 60_000;
+const AI_MAX_COMMITS = 40;
+const VERDICT_RANK = { tidak: 0, sebagian: 1, ada: 2 } as const;
+type AiKind = ReleaseAiJob['kind'];
+interface AiLive {
+  job: ReleaseAiJob;
+  cancel?: () => void;
+  cancelled?: boolean;
 }
 
 const KEY_BATCH = 80;
 const newId = () => crypto.randomUUID();
 
 export class ReleaseManager {
+  private readonly aiLive = new Map<string, AiLive>();
+
   constructor(private readonly deps: ReleaseDeps) {}
 
   get store(): ReleaseStore {
@@ -74,7 +91,7 @@ export class ReleaseManager {
   }
 
   /** TAD tasks of the release's projects: Jira keys, service, the CODENAMEs they use, and their endpoints. */
-  private async tadTasks(release: Release): Promise<{ key: string; service: string; title: string; endpoints: string[] }[]> {
+  private async tadTasks(release: Release): Promise<{ key: string; service: string; title: string; endpoints: string[]; detail: string }[]> {
     if (!release.projectIds.length) return [];
     const [projects, drafts] = await Promise.all([this.deps.projects(), this.deps.drafts()]);
     const draftIds = new Set(projects.filter((p) => release.projectIds.includes(p.id)).flatMap((p) => p.draftIds));
@@ -83,7 +100,8 @@ export class ReleaseManager {
       .flatMap((d) =>
         parseScopeTasks(d.markdown, d.scopePlan).flatMap((t) => {
           const endpoints = taskEndpoints(d.markdown, t.title);
-          return t.jiraKeys.map((key) => ({ key, service: t.service || parseTaskTitle(t.title)?.service || '', title: t.title, endpoints }));
+          const detail = taskDetailText(d.markdown, t.title);
+          return t.jiraKeys.map((key) => ({ key, service: t.service || parseTaskTitle(t.title)?.service || '', title: t.title, endpoints, detail }));
         }),
       );
   }
@@ -153,7 +171,7 @@ export class ReleaseManager {
     for (const t of tad) {
       const i = byKey.get(t.key);
       const base = i ? toTicket(i, 'tad', t.service) : { key: t.key, summary: t.title, status: 'Tidak ditemukan di Jira', service: t.service, from: 'tad' as const };
-      push(t.endpoints.length ? { ...base, endpoints: t.endpoints } : base);
+      push({ ...base, ...(t.endpoints.length ? { endpoints: t.endpoints } : {}), ...(t.detail ? { detail: t.detail } : {}) });
     }
     for (const i of byCodename) push(toTicket(i, 'codename'));
     for (const k of release.jiraKeys) {
@@ -175,8 +193,9 @@ export class ReleaseManager {
     const repoPaths = await this.deps.repoPaths().catch(() => ({}) as Record<string, string>);
     const folders = Object.keys(repoPaths);
     let addedServices = 0;
+    const ignored = release.ignoredServices ?? [];
     for (const name of [...new Set(tickets.map((t) => t.service).filter((s): s is string => Boolean(s)))]) {
-      if (services.some((s) => sameService(s.name, name))) continue;
+      if (services.some((s) => sameService(s.name, name)) || ignored.some((n) => sameService(n, name))) continue;
       services.push({ id: newId(), name, mrs: [], order: services.length + 1 });
       addedServices++;
     }
@@ -201,6 +220,7 @@ export class ReleaseManager {
           const svc = services.find((s) => s.gitlabPath === mr.projectPath) ?? (mentions ? serviceForPath(services, mr.projectPath) : undefined);
           if (!svc && !mentions) continue;
           let target = svc;
+          if (!target && ignored.some((n) => sameService(n, mr.projectPath.split('/').pop() ?? ''))) continue;
           if (!target) {
             // An MR that mentions a release ticket in a repo no service maps to: a new service.
             target = { id: newId(), name: mr.projectPath.split('/').pop() ?? mr.projectPath, gitlabPath: mr.projectPath, mrs: [], order: services.length + 1 };
@@ -221,18 +241,17 @@ export class ReleaseManager {
   }
 
   /**
-   * Checks every MR, reads the code of every service (its live MRs' diffs, or the compare of its
-   * source branch with the target when it has no MR yet), finds each ticket in that code,
-   * refreshes the env/migration/SQL items and keeps the report.
+   * Reads the code of every service: checks every MR, takes its live MRs' diffs, or the compare
+   * of its source branch with the target when it has no MR yet; then the tickets, and where the
+   * pattern match finds them. Shared by the check and the AI check.
    */
-  async check(id: string): Promise<{ release: Release; report: ReleaseReport }> {
-    const release = await this.get(id);
+  private async readCode(release: Release): Promise<CodeRead> {
     const gitlab = await this.deps.gitlab();
     const checks: MrCheck[] = [];
     const diffs = new Map<string, FileText[]>();
     const changed = new Map<string, MrFileChange[]>();
-    const refs = release.services.flatMap((s) => s.mrs);
-    for (const m of refs) {
+    const commits = new Map<string, string[]>();
+    for (const m of release.services.flatMap((s) => s.mrs)) {
       if (!gitlab) {
         checks.push(blankCheck(m.ref, m.webUrl, m.title, release.targetBranch, 'GitLab belum terhubung.'));
         continue;
@@ -243,22 +262,10 @@ export class ReleaseManager {
         if (detail.state === 'opened' || detail.state === 'merged') {
           diffs.set(m.ref, indexChanges(detail.changes));
           changed.set(m.ref, detail.changes);
+          commits.set(m.ref, detail.commits.map((c) => c.title));
         }
       } catch (e) {
         checks.push(blankCheck(m.ref, m.webUrl, m.title, release.targetBranch, (e as Error).message));
-      }
-    }
-    const items: ReleaseItem[] = [...release.items];
-    const add = (kind: ReleaseItem['kind'], label: string, service: string) => {
-      if (!items.some((i) => i.kind === kind && i.label === label && (i.service ?? service) === service)) items.push({ id: newId(), kind, label, service, source: 'check', done: false });
-    };
-    for (const s of release.services) {
-      for (const m of s.mrs) {
-        const c = checks.find((x) => x.ref === m.ref);
-        if (!c || c.error || c.state === 'closed') continue;
-        for (const e of c.envAdded) add('env', e, s.name);
-        for (const p of c.migrations) add('migration', p, s.name);
-        for (const p of c.sqlOutside) add('sql', p, s.name);
       }
     }
 
@@ -280,6 +287,7 @@ export class ReleaseManager {
         const cmp = await gitlab.compare(s.gitlabPath, release.targetBranch, branch);
         diffs.set(ref, indexChanges(cmp.changes));
         changed.set(ref, cmp.changes);
+        commits.set(ref, cmp.commits.map((c) => c.title));
         serviceRefs.set(s.id, [ref]);
         sources.push({ service: s.name, ref, kind: 'branch', files: cmp.changes.length, unattributed: [] });
       } catch (e) {
@@ -296,8 +304,7 @@ export class ReleaseManager {
     const evidence = new Map<string, CodeEvidence[]>();
     const byRef = new Map<string, { summary: string; evidence: CodeEvidence }[]>();
     for (const t of withSharedEndpoints(tickets)) {
-      const services = release.services.filter((s) => !t.service || sameService(s.name, t.service));
-      for (const s of services) {
+      for (const s of release.services.filter((x) => !t.service || sameService(x.name, t.service))) {
         for (const ref of serviceRefs.get(s.id) ?? []) {
           const found = findEvidence({ key: t.key, summary: t.summary, endpoints: t.endpoints }, diffs.get(ref)!);
           if (!found) continue;
@@ -308,12 +315,61 @@ export class ReleaseManager {
       }
     }
     for (const src of sources) if (!src.error) src.unattributed = unattributedFiles(changed.get(src.ref) ?? [], byRef.get(src.ref) ?? []).slice(0, 30);
+    return { checks, changed, commits, sources, serviceRefs, tickets, warnings, extra, evidence };
+  }
 
-    const report = buildReport(release, tickets, checks, this.now(), extra, { sources, evidence });
-    report.warnings.unshift(...warnings);
-    const saved = await this.deps.store.save({ ...release, items, services: release.services.map((s) => ({ ...s, mrs: s.mrs.map((m) => ({ ...m, title: checks.find((c) => c.ref === m.ref && !c.error)?.title ?? m.title })) })) });
+  /** env/migration/SQL items the pattern check found in the live MRs (kept done marks). */
+  private checkItems(release: Release, checks: MrCheck[]): ReleaseItem[] {
+    const items: ReleaseItem[] = [...release.items];
+    const add = (kind: ReleaseItem['kind'], label: string, service: string) => {
+      if (!items.some((i) => i.kind === kind && i.label === label && (i.service ?? service) === service)) items.push({ id: newId(), kind, label, service, source: 'check', done: false });
+    };
+    for (const s of release.services) {
+      for (const m of s.mrs) {
+        const c = checks.find((x) => x.ref === m.ref);
+        if (!c || c.error || c.state === 'closed') continue;
+        for (const e of c.envAdded) add('env', e, s.name);
+        for (const p of c.migrations) add('migration', p, s.name);
+        for (const p of c.sqlOutside) add('sql', p, s.name);
+      }
+    }
+    return items;
+  }
+
+  private async finishCheck(release: Release, code: CodeRead, items: ReleaseItem[], ai?: AiRead): Promise<{ release: Release; report: ReleaseReport }> {
+    const report = buildReport(release, code.tickets, code.checks, this.now(), code.extra, { sources: code.sources, evidence: code.evidence, ...(ai ? { ai: ai.tickets } : {}) });
+    if (ai) {
+      report.ai = { model: ai.model, errors: ai.errors };
+      for (const src of report.sources ?? []) {
+        const u = ai.unrelated.get(src.service);
+        if (u) src.aiUnrelated = u;
+      }
+      report.warnings.unshift(...ai.errors);
+    }
+    report.warnings.unshift(...code.warnings);
+    const fresh = await this.get(release.id);
+    const saved = await this.deps.store.save(foldEnvItems({
+      ...fresh,
+      items,
+      services: fresh.services.map((s) => {
+        const steps = ai?.steps.get(s.name);
+        return {
+          ...s,
+          mrs: s.mrs.map((m) => ({ ...m, title: code.checks.find((c) => c.ref === m.ref && !c.error)?.title ?? m.title })),
+          ...(steps?.pre.length ? { preDeploy: addLines(s.preDeploy, steps.pre) } : {}),
+          ...(steps?.post.length ? { postDeploy: addLines(s.postDeploy, steps.post) } : {}),
+        };
+      }),
+    }));
     await this.saveReport(report);
     return { release: saved, report };
+  }
+
+  /** Checks every MR, reads every service's code, finds the tickets in it and keeps the report. */
+  async check(id: string): Promise<{ release: Release; report: ReleaseReport }> {
+    const release = await this.get(id);
+    const code = await this.readCode(release);
+    return this.finishCheck(release, code, this.checkItems(release, code.checks));
   }
 
   async report(id: string): Promise<ReleaseReport | null> {
@@ -506,12 +562,364 @@ export class ReleaseManager {
     return { release: saved, branch, picked, ...(failed ? { failed } : {}) };
   }
 
+  // ---- AI jobs: read the tickets and deploy needs, pick release-branch commits, fix the document.
+
+  private aiKey(releaseId: string, kind: AiKind, serviceId?: string) {
+    return `${releaseId}.ai-${kind}${(kind === 'picks' || kind === 'mr') && serviceId ? `-${serviceId}` : ''}`;
+  }
+
+  private async saveAiJob(job: ReleaseAiJob) {
+    await mkdir(this.deps.reportDir, { recursive: true, mode: 0o700 });
+    const file = join(this.deps.reportDir, `${this.aiKey(job.releaseId, job.kind, job.serviceId)}.json`);
+    await writeFile(`${file}.tmp`, JSON.stringify(job), { mode: 0o600 });
+    await rename(`${file}.tmp`, file);
+  }
+
+  /** The latest AI job of this kind (live progress while it runs); null when none ran. */
+  async aiJob(id: string, kind: AiKind, serviceId?: string): Promise<ReleaseAiJob | null> {
+    const release = await this.get(id);
+    const key = this.aiKey(release.id, kind, serviceId);
+    const live = this.aiLive.get(key);
+    if (live) return { ...live.job };
+    try {
+      const job = JSON.parse(await readFile(join(this.deps.reportDir, `${key}.json`), 'utf8')) as ReleaseAiJob;
+      // Left running by a connector restart.
+      if (job.status === 'running') return { ...job, status: 'error', error: 'Terhenti karena connector dimulai ulang. Jalankan lagi.', progress: undefined };
+      return job;
+    } catch {
+      return null;
+    }
+  }
+
+  async aiCancel(id: string, kind: AiKind, serviceId?: string): Promise<ReleaseAiJob | null> {
+    const live = this.aiLive.get(this.aiKey((await this.get(id)).id, kind, serviceId));
+    if (live) {
+      live.cancelled = true;
+      live.cancel?.();
+    }
+    return this.aiJob(id, kind, serviceId);
+  }
+
+  /**
+   * Starts an AI job in the background and returns it as running. `tickets` re-reads all code
+   * and lets the AI judge every ticket and list every deploy need (env, SQL, migrations, other
+   * steps); `picks` chooses release-branch commits for one service; `document` proposes fixes
+   * to the deployment document from an instruction. Only GitLab and the AI are read; the
+   * document fixes are applied by the user.
+   */
+  async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string }): Promise<ReleaseAiJob> {
+    const release = await this.get(id);
+    if (!this.deps.runAi) throw new ReleaseInputError('AI belum tersedia di connector ini.');
+    if (!['tickets', 'picks', 'document', 'mr'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
+    if (!isAiSelection(opts.ai)) throw new ReleaseInputError('Pilihan AI tidak valid.');
+    if (kind === 'picks' || kind === 'mr') this.service(release, opts.serviceId ?? '');
+    const instruction = (opts.instruction ?? '').trim().slice(0, 4000);
+    if (kind === 'document' && !instruction) throw new ReleaseInputError('Tulis instruksi perbaikan dokumen dulu.');
+    const source = (opts.sourceBranch ?? '').trim();
+    if (source && !/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
+    const key = this.aiKey(release.id, kind, opts.serviceId);
+    if (this.aiLive.has(key)) throw new ReleaseInputError('Cek AI yang sama masih berjalan; tunggu atau batalkan dulu.');
+    const job: ReleaseAiJob = {
+      id: newId(),
+      releaseId: release.id,
+      kind,
+      ...(kind === 'picks' || kind === 'mr' ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
+      model: `${opts.ai.provider}/${opts.ai.model}`,
+      status: 'running',
+      progress: 'Menyiapkan…',
+      createdAt: this.now(),
+    };
+    const live: AiLive = { job };
+    this.aiLive.set(key, live);
+    await this.saveAiJob(job);
+    void this.runAiJob(live, opts.ai, instruction).finally(() => this.aiLive.delete(key));
+    return { ...job };
+  }
+
+  private async runAiJob(live: AiLive, ai: AiSelection, instruction: string) {
+    const job = live.job;
+    try {
+      if (job.kind === 'tickets') await this.aiTickets(live, ai);
+      else if (job.kind === 'picks') await this.aiPicks(live, ai);
+      else if (job.kind === 'mr') await this.aiMr(live, ai);
+      else await this.aiDocument(live, ai, instruction);
+      if (live.cancelled) throw new Error('Dibatalkan.');
+      Object.assign(job, { status: 'done', progress: undefined, finishedAt: this.now() });
+    } catch (e) {
+      Object.assign(job, { status: live.cancelled ? 'cancelled' : 'error', error: live.cancelled ? 'Dibatalkan.' : (e as Error).message, progress: undefined, finishedAt: this.now() });
+    }
+    await this.saveAiJob(job).catch(() => {});
+  }
+
+  /** One AI call; the reply text, or an error message. Cancelling stops the call. */
+  private async ask(live: AiLive, ai: AiSelection, prompt: string): Promise<{ reply: string; error?: string }> {
+    if (live.cancelled) throw new Error('Dibatalkan.');
+    const run = this.deps.runAi!(ai, prompt, { systemPrompt: RELEASE_AI_SYSTEM, timeoutMs: AI_TIMEOUT_MS });
+    live.cancel = run.cancel;
+    const out = await run.done;
+    live.cancel = undefined;
+    if (live.cancelled) throw new Error('Dibatalkan.');
+    return out;
+  }
+
+  /**
+   * Step one of the check: the AI picks the services (repos) and MRs of the release from the
+   * tickets, the repos and the MRs into the target. Only additions; services the user removed
+   * are never added back. Falls back to the plain search when the AI fails.
+   */
+  private async aiDiscover(live: AiLive, ai: AiSelection): Promise<string[]> {
+    const release = await this.get(live.job.releaseId);
+    live.job.progress = 'Mencari tiket, repo, dan MR rilis…';
+    const { tickets } = await this.tickets(release);
+    const repoPaths = await this.deps.repoPaths().catch(() => ({}) as Record<string, string>);
+    const gitlab = await this.deps.gitlab();
+    const notes: string[] = [];
+    let mrs: (MrSummary & { description: string })[] = [];
+    if (!gitlab) notes.push('GitLab belum terhubung: MR tidak bisa dicari.');
+    else {
+      try {
+        const since = new Date(new Date(release.createdAt).getTime() - 7 * 86_400_000).toISOString();
+        mrs = (await gitlab.mrsToBranch(release.targetBranch, 30)).filter((m) => m.state === 'opened' || (m.state === 'merged' && m.updatedAt >= since));
+      } catch (e) {
+        notes.push(`Mencari MR di GitLab gagal: ${(e as Error).message}`);
+      }
+    }
+    const ignored = release.ignoredServices ?? [];
+    const keys = new Set(tickets.map((t) => t.key));
+    const names = [...release.services.map((s) => s.name), ...tickets.map((t) => t.service ?? '')].filter(Boolean);
+    const paths = new Set(release.services.map((s) => s.gitlabPath).filter(Boolean));
+    // Candidates: MRs of the release's repos, of repos named like a ticket's service, or naming a ticket.
+    const candidates = mrs
+      .filter((m) => !ignored.some((n) => sameService(n, m.projectPath.split('/').pop() ?? '')))
+      .filter((m) => paths.has(m.projectPath) || names.some((n) => sameService(n, m.projectPath.split('/').pop() ?? '')) || jiraKeysIn(`${m.title} ${m.sourceBranch}`).some((k) => keys.has(k)))
+      .slice(0, 80);
+    if (!tickets.length && !candidates.length) return notes;
+    const out = await this.ask(
+      live,
+      ai,
+      discoverPrompt({
+        release: release.name,
+        target: release.targetBranch,
+        tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, service: t.service })),
+        repos: repoPaths,
+        services: release.services.map((s) => ({ name: s.name, gitlabPath: s.gitlabPath, mrs: s.mrs.map((m) => m.ref) })),
+        ignored,
+        mrs: candidates.map((m) => ({ ref: m.ref, projectPath: m.projectPath, title: m.title, sourceBranch: m.sourceBranch, state: m.state, updatedAt: m.updatedAt })),
+      }),
+    );
+    const found = out.error ? null : parseDiscoverReply(out.reply, Object.values(repoPaths), candidates.map((m) => m.ref));
+    if (!found) {
+      notes.push(`AI gagal mencari service & MR (${out.error ?? 'jawaban tidak terbaca'}); dipakai pencarian biasa.`);
+      const plain = await this.discover(release.id);
+      return [...notes, ...plain.warnings];
+    }
+    const fresh = await this.get(release.id);
+    const services: ReleaseService[] = fresh.services.map((s) => ({ ...s, mrs: [...s.mrs] }));
+    let added = 0;
+    for (const p of found.services) {
+      if (ignored.some((n) => sameService(n, p.name))) continue;
+      const existing = services.find((s) => sameService(s.name, p.name) || (p.gitlabPath && s.gitlabPath === p.gitlabPath));
+      if (existing) {
+        existing.gitlabPath ??= p.gitlabPath;
+        continue;
+      }
+      services.push({ id: newId(), name: p.name, ...(p.gitlabPath ? { gitlabPath: p.gitlabPath } : {}), mrs: [], order: services.length + 1 });
+      added++;
+    }
+    let addedMrs = 0;
+    for (const p of found.mrs) {
+      const mr = candidates.find((m) => m.ref === p.ref)!;
+      const svc = services.find((s) => s.gitlabPath === mr.projectPath) ?? services.find((s) => sameService(s.name, p.service));
+      if (!svc || svc.mrs.some((m) => m.ref === mr.ref)) continue;
+      svc.gitlabPath ??= mr.projectPath;
+      svc.mrs.push({ ref: mr.ref, projectPath: mr.projectPath, iid: mr.iid, webUrl: mr.webUrl, title: mr.title, via: 'auto' });
+      addedMrs++;
+    }
+    if (added || addedMrs) {
+      await this.deps.store.save({ ...fresh, services });
+      notes.push(`AI menambah ${added} service dan ${addedMrs} MR.`);
+    }
+    return notes;
+  }
+
+  private async aiTickets(live: AiLive, ai: AiSelection) {
+    const discovered = await this.aiDiscover(live, ai);
+    const release = await this.get(live.job.releaseId);
+    live.job.progress = 'Membaca kode semua service dari GitLab…';
+    const code = await this.readCode(release);
+    const items = this.checkItems(release, code.checks);
+    const read: AiRead = { model: live.job.model, tickets: new Map(), unrelated: new Map(), errors: [], steps: new Map() };
+    const services = release.services.filter((s) => (code.serviceRefs.get(s.id) ?? []).length);
+    for (const [i, s] of services.entries()) {
+      const refs = code.serviceRefs.get(s.id)!;
+      const tickets = code.tickets.filter((t) => !t.service || sameService(s.name, t.service));
+      const changes = refs.flatMap((r) => code.changed.get(r) ?? []);
+      if (!changes.length) continue;
+      live.job.progress = `AI membaca ${s.name} (${i + 1}/${services.length})…`;
+      const diff = refs.map((r) => diffText(code.changed.get(r) ?? [], Math.floor(180_000 / refs.length), refs.length > 1 ? `${r}: ` : '').text).join('\n\n');
+      const prompt = ticketsPrompt({ service: s.name, target: release.targetBranch, refs, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: refs.flatMap((r) => code.commits.get(r) ?? []), diff });
+      const out = await this.ask(live, ai, prompt);
+      if (out.error) {
+        read.errors.push(`${s.name}: AI gagal (${out.error}).`);
+        continue;
+      }
+      const parsed = parseTicketsReply(out.reply, tickets.map((t) => t.key), changes.map((c) => c.newPath));
+      if (!parsed) {
+        read.errors.push(`${s.name}: jawaban AI tidak terbaca sebagai JSON.`);
+        continue;
+      }
+      for (const [key, v] of parsed.tickets) {
+        const prev = read.tickets.get(key);
+        if (!prev || VERDICT_RANK[v.verdict] > VERDICT_RANK[prev.verdict]) read.tickets.set(key, v);
+      }
+      read.unrelated.set(s.name, parsed.unrelated);
+      const steps = { pre: [] as string[], post: [] as string[] };
+      for (const n of parsed.needs) {
+        const note = [n.kind === 'env' ? n.detail : '', n.files.length ? `File: ${n.files.join(', ')}` : ''].filter(Boolean).join(' · ').slice(0, 1000);
+        if (n.kind === 'other') {
+          steps[n.when].push(n.label);
+          continue;
+        }
+        const same = items.find((x) => x.kind === n.kind && sameService(x.service ?? s.name, s.name) && (x.label.toLowerCase() === n.label.toLowerCase() || n.files.includes(x.label)));
+        if (same) {
+          // A query file the pattern check listed: the AI adds the SQL it found in it.
+          if (n.kind === 'sql' && n.detail && !same.detail) same.detail = n.detail;
+          if (note && !same.note) same.note = note;
+          continue;
+        }
+        items.push({ id: newId(), kind: n.kind, label: n.label, service: s.name, ...(n.detail && n.kind !== 'env' ? { detail: n.detail } : {}), ...(note ? { note } : {}), source: 'ai', done: false });
+      }
+      read.steps.set(s.name, steps);
+    }
+    if (live.cancelled) return;
+    live.job.progress = 'Menyusun laporan…';
+    read.errors.unshift(...discovered.filter((n) => !n.startsWith('AI menambah')));
+    await this.finishCheck(release, code, items, read);
+    live.job.notes = [...discovered.filter((n) => n.startsWith('AI menambah')), ...read.errors];
+  }
+
+  private async aiPicks(live: AiLive, ai: AiSelection) {
+    const release = await this.get(live.job.releaseId);
+    const service = this.service(release, live.job.serviceId ?? '');
+    const path = service.gitlabPath!;
+    const source = live.job.sourceBranch || service.sourceBranch || release.sourceBranch || 'staging';
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare) throw new Error('GitLab belum terhubung.');
+    live.job.progress = `Membaca commit ${source}…`;
+    const cmp = await gitlab.compare(path, release.targetBranch, source);
+    const { tickets: all } = await this.tickets(release);
+    const tickets = all.filter((t) => t.service && sameService(t.service, service.name));
+    const plan = planReleaseBranch(cmp.commits, new Set(all.map((t) => t.key)), { base: release.targetBranch, branch: releaseBranchName(release) });
+    const line = plan.commits.slice(-AI_MAX_COMMITS);
+    if (!line.length) throw new Error(`${source} tidak punya commit baru dibanding ${release.targetBranch}.`);
+    const per = Math.max(3_000, Math.floor(180_000 / line.length));
+    const commits: AiCommitInput[] = [];
+    for (const [i, c] of line.entries()) {
+      live.job.progress = `Membaca perubahan commit ${i + 1}/${line.length}…`;
+      if (live.cancelled) return;
+      const parent = cmp.commits.find((x) => x.id === c.sha)?.parentIds?.[0];
+      // A commit against its first parent: for a merge, the whole feature it brought in.
+      const d = parent ? await gitlab.compare(path, parent, c.sha).catch(() => null) : null;
+      commits.push({ sha: c.sha, shortId: c.shortId, title: c.title, merge: c.merge, brought: c.merge ? d?.commits.map((x) => x.title).filter((t) => t !== c.title) : undefined, diff: d ? diffText(d.changes, per).text : '(perubahan tidak terbaca)' });
+    }
+    live.job.progress = 'AI memilih commit…';
+    const out = await this.ask(live, ai, picksPrompt({ repo: path, source, target: release.targetBranch, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits }));
+    if (out.error) throw new Error(`AI gagal: ${out.error}`);
+    const parsed = parsePicksReply(out.reply, line.map((c) => c.sha));
+    if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
+    live.job.picks = parsed.picks;
+    live.job.notes = [...(plan.commits.length > line.length ? [`Hanya ${line.length} commit terbaru yang dibaca AI dari ${plan.commits.length}.`] : []), ...parsed.notes];
+  }
+
+  /**
+   * Before a release MR exists: the AI reads what the source branch would bring into the target
+   * for one service, judges the service's tickets, and lists changes without a ticket (also
+   * endpoints registered without one) and what the server needs.
+   */
+  private async aiMr(live: AiLive, ai: AiSelection) {
+    const release = await this.get(live.job.releaseId);
+    const service = this.service(release, live.job.serviceId ?? '');
+    const path = service.gitlabPath!;
+    const source = live.job.sourceBranch || service.sourceBranch || release.sourceBranch || 'staging';
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare) throw new Error('GitLab belum terhubung.');
+    live.job.progress = `Membaca perubahan ${source} → ${release.targetBranch}…`;
+    const cmp = await gitlab.compare(path, release.targetBranch, source);
+    if (!cmp.changes.length) throw new Error(`${source} tidak punya perubahan dibanding ${release.targetBranch}.`);
+    const { tickets: all } = await this.tickets(release);
+    const tickets = all.filter((t) => t.service && sameService(t.service, service.name));
+    live.job.progress = 'AI membaca diff…';
+    const ref = `${path}@${source}`;
+    const out = await this.ask(live, ai, ticketsPrompt({ service: service.name, target: release.targetBranch, refs: [ref], tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: cmp.commits.map((c) => c.title), diff: diffText(cmp.changes).text }));
+    if (out.error) throw new Error(`AI gagal: ${out.error}`);
+    const parsed = parseTicketsReply(out.reply, tickets.map((t) => t.key), cmp.changes.map((c) => c.newPath));
+    if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
+    live.job.verdicts = tickets.flatMap((t) => (parsed.tickets.has(t.key) ? [{ key: t.key, ...parsed.tickets.get(t.key)! }] : []));
+    live.job.unrelated = parsed.unrelated;
+    live.job.needs = parsed.needs;
+  }
+
+  private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {
+    const release = await this.get(live.job.releaseId);
+    live.job.progress = 'Membaca kode semua service dari GitLab…';
+    const code = await this.readCode(release);
+    const services: AiDocService[] = release.services.map((s) => {
+      const changes = (code.serviceRefs.get(s.id) ?? []).flatMap((r) => code.changed.get(r) ?? []);
+      const pseudo = { ref: '', title: '', webUrl: '', state: 'opened', draft: false, author: { id: 0, username: '', name: '' }, sourceBranch: '', targetBranch: release.targetBranch, description: '', commits: [], changes, diffTruncated: false } as unknown as MrDetail;
+      const c = checkMr(pseudo);
+      return {
+        name: s.name,
+        envBlock: serviceEnvBlock(release, s)?.text,
+        preDeploy: s.preDeploy,
+        postDeploy: s.postDeploy,
+        failover: s.failover,
+        code: { envAdded: c.envAdded, envReadInCode: c.envReadInCode, migrations: c.migrations, sql: c.sqlOutside, envDiff: diffText(changes.filter((x) => isEnvOrConfigFile(x.newPath)), 20_000).text },
+      };
+    });
+    live.job.progress = 'AI memperbaiki dokumen…';
+    const out = await this.ask(live, ai, documentPrompt({ instruction, release: release.name, services }));
+    if (out.error) throw new Error(`AI gagal: ${out.error}`);
+    const parsed = parseDocumentReply(out.reply, release.services);
+    if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
+    live.job.fixes = parsed.fixes;
+    live.job.notes = parsed.summary;
+  }
+
   private validRefs(release: Release, refs: string[]): string[] {
     const all = new Set(release.services.flatMap((s) => s.mrs.map((m) => m.ref)));
     const picked = [...new Set(refs ?? [])].filter((r) => all.has(r));
     if (!picked.length) throw new ReleaseInputError('Pilih minimal satu MR.');
     return picked;
   }
+}
+
+/** What readCode gathered for one release. */
+interface CodeRead {
+  checks: MrCheck[];
+  changed: Map<string, MrFileChange[]>;
+  commits: Map<string, string[]>;
+  sources: CodeSource[];
+  serviceRefs: Map<string, string[]>;
+  tickets: ReleaseTicket[];
+  warnings: string[];
+  extra: Map<string, { summary: string; status: string }>;
+  evidence: Map<string, CodeEvidence[]>;
+}
+
+/** What the AI check found, per ticket and per service. */
+interface AiRead {
+  model: string;
+  tickets: Map<string, AiTicketVerdict>;
+  unrelated: Map<string, { path: string; reason: string }[]>;
+  errors: string[];
+  steps: Map<string, { pre: string[]; post: string[] }>;
+}
+
+/** Adds lines that are not there yet (case-insensitive), keeping the order. */
+function addLines(current: string[] | undefined, more: string[]): string[] {
+  const out = [...(current ?? [])];
+  for (const l of more) if (!out.some((x) => x.trim().toLowerCase() === l.trim().toLowerCase())) out.push(l);
+  return out.slice(0, 40);
 }
 
 /** Diffs for the review in the UI, at most ~1.5 MB in total; bigger ones are listed without a diff. */

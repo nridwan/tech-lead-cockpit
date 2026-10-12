@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import Icon from '../components/Icon.svelte';
+  import AiPicker from '../components/AiPicker.svelte';
+  import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
   import Modal from '../components/Modal.svelte';
   import DiffFile from '../mr/DiffFile.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
@@ -8,7 +10,8 @@
   import { openExternal } from '../lib/open-external';
   import { releaseBranchCommands, type BranchPick } from '../lib/release/branch';
   import { releases } from '../lib/release/client';
-  import type { MrPlan, Release, ReleaseService } from '../lib/release/types';
+  import { aiMrSection } from '../lib/release/mr';
+  import type { AiPick, MrPlan, Release, ReleaseAiJob, ReleaseService } from '../lib/release/types';
 
   /**
    * New release MR for one service: compares the source branch with the target first (commits,
@@ -38,7 +41,72 @@
   let changeFilter = $state('');
   const shownChanges = $derived((plan?.changes ?? []).filter((c) => !changeFilter.trim() || c.newPath.toLowerCase().includes(changeFilter.trim().toLowerCase())));
 
-  onMount(() => void load());
+  // AI pick of the release-branch commits: reads each commit's diff against the scope.
+  let ai = $state(loadReleaseAi());
+  let aiPicks = $state<Record<string, AiPick>>({});
+  const aiPick = new AiJobWatch(
+    () => release.id,
+    'picks',
+    () => service.id,
+    (job) => {
+      if (job.status === 'done') {
+        applyPicks(job);
+        toasts.show('AI selesai memilih commit. Periksa alasannya sebelum membuat branch.', 'ok', 5000);
+      } else if (job.status === 'error') toasts.show(`AI gagal memilih commit: ${job.error}`, 'err', 6000);
+    },
+  );
+
+  // AI read of what the source branch brings: tickets, changes without a ticket (endpoints
+  // registered without a task, too), server needs. Starts by itself when the plan loads.
+  let baseDescription = '';
+  const aiMr = new AiJobWatch(
+    () => release.id,
+    'mr',
+    () => service.id,
+    (job) => {
+      if (job.status === 'done') applyAiMr(job);
+      else if (job.status === 'error') toasts.show(`Cek AI MR gagal: ${job.error}`, 'err', 6000);
+    },
+  );
+  const aiMrDone = $derived(aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan?.sourceBranch ? aiMr.job : null);
+  const verdictOf = (key: string) => aiMrDone?.verdicts?.find((v) => v.key === key);
+
+  /** Adds the AI's findings to the description, unless the user already edited it. */
+  function applyAiMr(job: ReleaseAiJob) {
+    if (!plan || job.sourceBranch !== plan.sourceBranch) return;
+    const extra = aiMrSection(job);
+    if (extra && description === baseDescription) {
+      description = `${baseDescription}\n\n${extra}`;
+      baseDescription = description;
+    }
+  }
+
+  async function startAiMr() {
+    if (!plan) return;
+    saveReleaseAi(ai);
+    await aiMr.start(ai, { sourceBranch: plan.sourceBranch });
+    if (aiMr.error) toasts.show(aiMr.error, 'err');
+  }
+
+  function applyPicks(job: ReleaseAiJob) {
+    const by = new Map((job.picks ?? []).map((p) => [p.sha, p]));
+    picks = picks.map((p) => (by.has(p.sha) ? { ...p, include: by.get(p.sha)!.include } : p));
+    aiPicks = Object.fromEntries(by);
+  }
+
+  async function startAiPick() {
+    saveReleaseAi(ai);
+    await aiPick.start(ai, { sourceBranch: plan?.sourceBranch ?? source.trim() });
+    if (aiPick.error) toasts.show(aiPick.error, 'err');
+  }
+
+  onMount(() => {
+    void load();
+    return () => {
+      aiPick.stop();
+      aiMr.stop();
+    };
+  });
   $effect(() => {
     if (!open) onclose();
   });
@@ -50,10 +118,22 @@
       plan = await releases.mrPlan(release.id, service.id, source.trim());
       title = plan.title;
       description = plan.description;
+      baseDescription = description;
       branchName = plan.releaseBranch.branch;
       picks = plan.releaseBranch.commits.map((c) => ({ ...c }));
       // A dirty source: suggest the release branch right away.
       showBranch = plan.outOfScope.length > 0 || plan.releaseBranch.commits.some((c) => c.reason === 'out-of-scope' || c.reason === 'mixed');
+      // The last AI pick for this branch still applies to the same commits.
+      aiPicks = {};
+      await aiPick.load();
+      if (aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch) {
+        applyPicks(aiPick.job);
+        showBranch = true;
+      }
+      // The AI read of this branch: reuse the last one, else start it.
+      await aiMr.load();
+      if (aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan.sourceBranch) applyAiMr(aiMr.job);
+      else if (!aiMr.running && plan.files) void startAiMr();
     } catch (e) {
       error = (e as Error).message;
       plan = null;
@@ -151,7 +231,20 @@
       <section class="branch">
         <button class="link-btn" onclick={() => (showBranch = !showBranch)}>{showBranch ? '▾' : '▸'} {plan.sourceBranch} juga berisi perubahan di luar rilis? Buat branch rilis dari {plan.targetBranch}</button>
         {#if showBranch}
-          <p class="muted small">Commit jalur utama {plan.sourceBranch} (lama ke baru). Merge commit dihitung bersama isi branch fiturnya, jadi satu pilihan membawa satu fitur utuh. Yang di luar scope atau tanpa Jira key tidak dipilih; centang manual bila memang perlu.</p>
+          <p class="muted small">Commit jalur utama {plan.sourceBranch} (lama ke baru). Merge commit dihitung bersama isi branch fiturnya, jadi satu pilihan membawa satu fitur utuh. Klik <strong>Pilih dengan AI</strong>: AI membaca diff tiap commit dan memilih yang benar-benar milik scope, dengan alasannya.</p>
+          <div class="row">
+            <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiPick.running} />
+            {#if aiPick.running}
+              <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiPick.job?.progress ?? 'AI berjalan…'}</span>
+              <button class="btn btn-sm" onclick={() => aiPick.cancel()}><Icon name="x" size={12} /> Batalkan</button>
+            {:else}
+              <button class="btn btn-sm btn-primary" onclick={startAiPick} disabled={!picks.length}><Icon name="sparkles" size={12} /> Pilih dengan AI</button>
+              {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch}<span class="muted small">Pilihan AI ({aiPick.job.model})</span>{/if}
+            {/if}
+          </div>
+          {#if aiPick.job?.status === 'done' && aiPick.job.sourceBranch === plan.sourceBranch && aiPick.job.notes?.length}
+            <ul class="small ai-notes">{#each aiPick.job.notes as n, i (i)}<li>{n}</li>{/each}</ul>
+          {/if}
           <div class="row">
             <label class="inline small">Nama branch <input class="input mono bname" bind:value={branchName} /></label>
             <span class="small">{chosen.length} dari {picks.length} commit dipilih</span>
@@ -169,6 +262,7 @@
                   {:else if p.reason === 'no-key'}<span class="tag warn-tag">tanpa Jira key</span>
                   {:else}<span class="tag ok-tag">{p.keys.join(', ')}</span>{/if}
                 </label>
+                {#if aiPicks[p.sha]}<div class="ai-reason small" class:no={!aiPicks[p.sha].include}><Icon name="sparkles" size={11} /> {aiPicks[p.sha].include ? 'Masuk' : 'Tidak masuk'}{aiPicks[p.sha].keys.length ? ` (${aiPicks[p.sha].keys.join(', ')})` : ''}: {aiPicks[p.sha].reason}</div>{/if}
               </li>
             {:else}
               <li class="muted small">Tidak ada commit untuk dipilih.</li>
@@ -207,16 +301,36 @@
           {/if}
           {#if plan.tickets.length}
             <h4>Tiket {service.name} <span class="muted small">· dicek dari isi diff {plan.sourceBranch}</span></h4>
+            <div class="row small">
+              {#if aiMr.running}
+                <span class="ai-status"><Icon name="sparkles" size={12} /> {aiMr.job?.progress ?? 'AI membaca diff…'}</span>
+              {:else if aiMrDone}
+                <span class="muted">Dicek AI ({aiMrDone.model})</span>
+                <button class="link-btn" onclick={startAiMr}>Cek ulang</button>
+              {:else}
+                <button class="link-btn" onclick={startAiMr}><Icon name="sparkles" size={12} /> Cek dengan AI</button>
+              {/if}
+            </div>
             <ul class="small tickets">
               {#each plan.tickets as t (t.key)}
-                <li class:missing={!t.inSource && !t.unsure} class:unsure={t.unsure}>
+                {@const v = verdictOf(t.key)}
+                <li class:missing={v ? v.verdict === 'tidak' : !t.inSource && !t.unsure} class:unsure={v ? v.verdict === 'sebagian' : t.unsure}>
                   <span class="mono">{t.key}</span> {t.summary}
-                  <span class="muted">· {t.status} · {t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
+                  <span class="muted">· {t.status} · {v ? `AI: ${v.verdict}` : t.inSource ? 'ada di kode' : t.unsure ? 'cocok samar, cek manual' : 'tidak terlihat di kode'}</span>
+                  {#if v?.reason}<div class="muted evidence"><Icon name="sparkles" size={11} /> {v.reason}</div>{/if}
                   {#if t.code}<div class="muted evidence">{t.code.strength === 'strong' ? '✓' : '≈'} {#each t.code.hits.slice(0, 3) as h (h.path)}<span class="mono">{h.path}</span> ({h.match}) {/each}</div>{:else if t.byKey}<div class="muted evidence">key ada di commit</div>{/if}
                 </li>
               {/each}
             </ul>
-            {#if plan.unattributed?.length}
+            {#if aiMrDone?.unrelated?.length}
+              <h4 class="w">Perubahan tanpa tiket (AI) — {aiMrDone.unrelated.length}</h4>
+              <ul class="small tickets">{#each aiMrDone.unrelated as u (u.path)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+            {/if}
+            {#if aiMrDone?.needs?.length}
+              <h4>Perlu di server (AI)</h4>
+              <ul class="small tickets">{#each aiMrDone.needs as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sqlbox">{n.detail}</pre>{/if}</li>{/each}</ul>
+            {/if}
+            {#if !aiMrDone && plan.unattributed?.length}
               <details class="small"><summary>{plan.unattributed.length} file tidak terkait tiket {service.name} mana pun (cek apakah ikut terbawa)</summary><ul class="mono">{#each plan.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
             {/if}
           {/if}
@@ -385,6 +499,28 @@
     padding: 4px 8px;
     font-size: 12.5px;
     cursor: pointer;
+  }
+  .ai-status {
+    color: var(--accent);
+  }
+  .sqlbox {
+    margin: 4px 0;
+    padding: 6px 8px;
+    background: var(--surface-2);
+    border-radius: var(--radius-sm);
+    white-space: pre-wrap;
+    font-size: 12px;
+  }
+  .ai-notes {
+    margin: 0;
+    color: var(--warn);
+  }
+  .ai-reason {
+    padding: 0 8px 6px 30px;
+    color: var(--ok, var(--accent));
+  }
+  .ai-reason.no {
+    color: var(--warn);
   }
   .picks li.off {
     opacity: 0.65;

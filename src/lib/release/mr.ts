@@ -1,4 +1,4 @@
-import type { MrCheck, MrPlan, Release, ReleaseService } from './types';
+import type { MrCheck, MrPlan, Release, ReleaseAiJob, ReleaseService } from './types';
 
 /** Title, description and GitLab form link for a new release MR of one service. */
 
@@ -34,10 +34,10 @@ export function mrDescription(
   }
   const f = data.findings;
   const todo = [
-    ...(f.envAdded ?? []).map((e) => `- [ ] Env baru \`${e}\` sudah diset di server`),
-    ...(f.envReadInCode ?? []).map((e) => `- [ ] Env \`${e}\` (dibaca di kode) ada di server`),
-    ...(f.migrations ?? []).map((m) => `- [ ] Migrasi \`${m}\` dijalankan`),
-    ...(f.sqlOutside ?? []).map((q) => `- [ ] Query manual \`${q}\` dijalankan`),
+    ...(f.envAdded ?? []).map((e) => `- Env baru \`${e}\` sudah diset di server`),
+    ...(f.envReadInCode ?? []).map((e) => `- Env \`${e}\` (dibaca di kode) ada di server`),
+    ...(f.migrations ?? []).map((m) => `- Migrasi \`${m}\` dijalankan`),
+    ...(f.sqlOutside ?? []).map((q) => `- Query manual \`${q}\` dijalankan`),
   ];
   if (todo.length) lines.push('### Perlu di server', '', ...todo, '');
   if (data.commits.length) {
@@ -55,4 +55,29 @@ export function newMrFormUrl(gitlabBaseUrl: string, projectPath: string, source:
   const desc = description.length > 2_000 ? `${description.slice(0, 2_000)}\n\n…` : description;
   const q = new URLSearchParams({ 'merge_request[source_branch]': source, 'merge_request[target_branch]': target, 'merge_request[title]': title, 'merge_request[description]': desc });
   return `${base}/${projectPath}/-/merge_requests/new?${q}`;
+}
+
+/** The AI's findings for a release MR description: tickets, changes without a ticket, server needs. */
+export function aiMrSection(job: Pick<ReleaseAiJob, 'verdicts' | 'unrelated' | 'needs' | 'model'>): string {
+  const lines: string[] = [];
+  if (job.verdicts?.length) {
+    lines.push('### Cek AI: tiket di kode', '');
+    for (const v of job.verdicts) lines.push(`- ${v.key}: **${v.verdict}**${v.reason ? ` — ${v.reason}` : ''}`);
+    lines.push('');
+  }
+  if (job.unrelated?.length) {
+    lines.push('### Cek AI: perubahan tanpa tiket', '');
+    for (const u of job.unrelated) lines.push(`- \`${u.path}\` — ${u.reason}`);
+    lines.push('');
+  }
+  if (job.needs?.length) {
+    lines.push('### Cek AI: perlu di server', '');
+    for (const n of job.needs) {
+      const what = n.kind === 'env' ? `Env \`${n.label}\` diset` : n.kind === 'migration' ? `Migrasi \`${n.label}\` dijalankan` : n.kind === 'sql' ? `Query: ${n.label}` : n.label;
+      lines.push(`- ${n.when === 'post' ? '(setelah deploy) ' : ''}${what}`);
+      if (n.kind === 'sql' && n.detail) lines.push('', '```sql', n.detail, '```', '');
+    }
+    lines.push('');
+  }
+  return lines.length ? `${lines.join('\n').trimEnd()}\n\n_Dicek dengan ${job.model}._` : '';
 }

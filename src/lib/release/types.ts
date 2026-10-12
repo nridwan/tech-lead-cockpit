@@ -86,8 +86,10 @@ export interface ReleaseItem {
   service?: string;
   /** SQL text for a query from the release document. */
   detail?: string;
-  /** Where it was found. */
-  source: 'check' | 'import' | 'manual';
+  /** Where it was found: the pattern check, the document, typed in, or the AI reading the diff. */
+  source: 'check' | 'import' | 'manual' | 'ai';
+  /** Why the AI thinks it is needed (files, reasoning). */
+  note?: string;
   done: boolean;
   doneAt?: string;
 }
@@ -151,6 +153,8 @@ export interface Release {
   deploy?: DeployInfo;
   /** Tickets outside the scope that may ride along on purpose (decided by the user), with why. */
   accepted: { key: string; note?: string; at: string }[];
+  /** Services the user removed: the check never adds them back. */
+  ignoredServices?: string[];
   /** Confluence page this release was published to. */
   published?: { pageId: string; version: number; url?: string; at: string };
   notes?: string;
@@ -212,6 +216,8 @@ export interface TicketCoverage {
   unsure?: boolean;
   /** None of the release's services is this ticket's service (e.g. mobile apps): no code to read. */
   noRepo?: boolean;
+  /** The AI's reading of the diff, when "Cek dengan AI" ran. It decides over the pattern match. */
+  ai?: AiTicketVerdict;
   /** Jira says development is finished (ready to test, QA, done…). */
   devDone: boolean;
 }
@@ -237,6 +243,8 @@ export interface CodeSource {
   files: number;
   /** Changed files no scope ticket accounts for (first 30). */
   unattributed: string[];
+  /** Changed files the AI found unrelated to every scope ticket, with why. */
+  aiUnrelated?: { path: string; reason: string }[];
   error?: string;
 }
 
@@ -282,6 +290,8 @@ export interface ReleaseReport {
   servicesWithoutMr: string[];
   /** The code read per service (MR diff or branch compare). */
   sources?: CodeSource[];
+  /** Set when the tickets were also read by AI. */
+  ai?: { model: string; errors: string[] };
   /** Tickets whose title does not follow [TYPE][SERVICE][CODENAME] - Name. */
   badTitles: { key: string; summary: string }[];
   /** Jira keys in release MRs that are not part of the release: changes carried along. */
@@ -322,4 +332,58 @@ export interface MrPlan {
   /** A clean branch from the target with only the scope's commits (for a dirty source). */
   releaseBranch: ReleaseBranchPlan;
   warnings: string[];
+}
+
+/** AI verdict on one ticket: ada (implemented), sebagian (partly), tidak (not in the diff). */
+export type AiVerdict = 'ada' | 'sebagian' | 'tidak';
+
+export interface AiTicketVerdict {
+  verdict: AiVerdict;
+  files: string[];
+  reason: string;
+}
+
+/** The AI's choice for one commit of the release branch. */
+export interface AiPick {
+  sha: string;
+  include: boolean;
+  keys: string[];
+  reason: string;
+}
+
+/** A background AI job of a release: read the tickets in the code, or pick commits for a release branch. */
+export interface ReleaseAiJob {
+  id: string;
+  releaseId: string;
+  kind: 'tickets' | 'picks' | 'document' | 'mr';
+  serviceId?: string;
+  sourceBranch?: string;
+  model: string;
+  status: 'running' | 'done' | 'error' | 'cancelled';
+  progress?: string;
+  error?: string;
+  createdAt: string;
+  finishedAt?: string;
+  /** picks: the AI's choice per commit, and overall notes (mixed commits, missing tickets…). */
+  picks?: AiPick[];
+  /** document: proposed fixes per service, applied only when the user confirms. */
+  fixes?: ReleaseDocFix[];
+  /** mr: the AI's reading of the source branch diff for one service. */
+  verdicts?: ({ key: string } & AiTicketVerdict)[];
+  unrelated?: { path: string; reason: string }[];
+  needs?: ReleaseAiNeed[];
+  notes?: string[];
+}
+
+/** A fix the AI proposes for one service's part of the deployment document. */
+export type ReleaseDocFix = Pick<ReleaseService, 'envBlock' | 'preDeploy' | 'postDeploy' | 'failover'> & { serviceId: string; name: string };
+
+/** Something the server needs for a release, found by the AI in the diff. */
+export interface ReleaseAiNeed {
+  kind: 'env' | 'sql' | 'migration' | 'other';
+  /** Before or after the deploy. */
+  when: 'pre' | 'post';
+  label: string;
+  detail?: string;
+  files: string[];
 }

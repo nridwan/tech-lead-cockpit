@@ -1,5 +1,6 @@
 import { api, connectorDownMessage } from '../api-base';
-import type { MrPlan, Release, ReleaseReport, ReleaseSource } from './types';
+import type { AiSelection } from '../ai/types';
+import type { MrPlan, Release, ReleaseAiJob, ReleaseReport, ReleaseSource } from './types';
 
 async function call<T>(path: string, body?: unknown): Promise<T> {
   let res: Response;
@@ -47,4 +48,10 @@ export const releases = {
     call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks }),
   sharePreview: (id: string, req: ShareRequest) => call<{ text: string; html: string }>('/share/preview', { id, ...req }),
   share: (id: string, chat: { id: string; name: string }, req: ShareRequest) => call<Release>('/share', { id, chatId: chat.id, chatName: chat.name, ...req }),
+  /** Background AI jobs: tickets + deploy needs, release-branch picks, document fixes. */
+  aiStart: (id: string, kind: ReleaseAiJob['kind'], ai: AiSelection, opts: { serviceId?: string; sourceBranch?: string; instruction?: string } = {}) =>
+    call<{ job: ReleaseAiJob }>('/ai/start', { id, kind, ai, ...opts }).then((r) => r.job),
+  aiJob: (id: string, kind: ReleaseAiJob['kind'], serviceId?: string) =>
+    call<{ job: ReleaseAiJob | null }>(`/ai/job?id=${encodeURIComponent(id)}&kind=${kind}${serviceId ? `&serviceId=${encodeURIComponent(serviceId)}` : ''}`).then((r) => r.job),
+  aiCancel: (id: string, kind: ReleaseAiJob['kind'], serviceId?: string) => call<{ job: ReleaseAiJob | null }>('/ai/cancel', { id, kind, serviceId }).then((r) => r.job),
 };

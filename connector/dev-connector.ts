@@ -34,6 +34,7 @@ import { DEFAULT_DAYS, GitActivity } from './roster/git-activity.ts';
 import { ReleaseManager } from './releases/manager.ts';
 import { RELEASES_DIR, ReleaseInputError, ReleaseStore } from './releases/store.ts';
 import { repoProjectPaths } from './releases/repos.ts';
+import type { ReleaseAiJob } from '../src/lib/release/types.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { normalizeEditedFlow } from './qa/generator.ts';
@@ -1518,6 +1519,11 @@ function releasesFor(env: Env): ReleaseManager {
       const { teamsSession } = await import('./teams/session.ts');
       await teamsSession.sendMessage(chatId, '', undefined, { html });
     },
+    // Text mode like the MR review: the diff is in the prompt, the AI gets no file tools.
+    runAi: (ai, prompt, opts) => {
+      const run = startProviderRun(ai, 'text', prompt, { cwd: process.cwd(), timeoutMs: opts.timeoutMs, systemPrompt: opts.systemPrompt });
+      return { done: run.done, cancel: () => (run.child ? terminateProviderProcess(run.child) : run.abort?.()) };
+    },
   }));
 }
 
@@ -1556,6 +1562,19 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
     if (route === 'POST /releases/mr/plan') {
       const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string }>(req, 16 * 1024);
       return send(res, 200, await rm.mrPlan(idOf(body.id), String(body.serviceId ?? ''), body.sourceBranch ? String(body.sourceBranch) : undefined));
+    }
+    if (route === 'GET /releases/ai/job') {
+      const kind = String(url.searchParams.get('kind') ?? '') as ReleaseAiJob['kind'];
+      return send(res, 200, { job: await rm.aiJob(idOf(url.searchParams.get('id')), kind, url.searchParams.get('serviceId') ?? undefined) });
+    }
+    if (route === 'POST /releases/ai/start') {
+      const body = await readJson<{ id?: string; kind?: string; ai?: unknown; serviceId?: string; sourceBranch?: string; instruction?: string }>(req, 32 * 1024);
+      const job = await rm.aiStart(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], { ai: body.ai as never, serviceId: body.serviceId ? String(body.serviceId) : undefined, sourceBranch: body.sourceBranch ? String(body.sourceBranch) : undefined, instruction: body.instruction ? String(body.instruction) : undefined });
+      return send(res, 200, { job });
+    }
+    if (route === 'POST /releases/ai/cancel') {
+      const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
+      return send(res, 200, { job: await rm.aiCancel(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined) });
     }
     if (route === 'POST /releases/mr/branch') {
       const body = await readJson<{ id?: string; serviceId?: string; branch?: string; picks?: { sha?: string; title?: string }[] }>(req, 128 * 1024);

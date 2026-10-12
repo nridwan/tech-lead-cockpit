@@ -292,13 +292,30 @@ export function changeLogRows(release: Release): { details: string; notes?: stri
 
 /** The env block for a service: the page's own block, plus `KEY=` for env found by the checks. */
 export function serviceEnvBlock(release: Release, service: ReleaseService): { text: string; done: boolean } | null {
-  const items = release.items.filter((i) => i.kind === 'env' && i.service === service.name);
+  const items = release.items.filter((i) => i.kind === 'env' && i.service?.toLowerCase() === service.name.toLowerCase());
   const block = service.envBlock?.replace(/\s+$/, '') ?? '';
   const present = new Set([...block.matchAll(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]{1,80})\s*=/gm)].map((m) => m[1]));
   const extra = items.filter((i) => !present.has(i.label)).map((i) => `${i.label}=`);
   const text = [block, ...extra].filter(Boolean).join('\n');
   if (!text) return null;
   return { text, done: items.length > 0 && items.every((i) => i.done) };
+}
+
+/**
+ * Env names found by the checks go straight into each service's .env block (as KEY=, existing
+ * values kept) instead of staying as separate items: the document is where they are filled in.
+ */
+export function foldEnvItems(release: Release): Release {
+  const own = (i: Release['items'][number]) => i.kind === 'env' && release.services.some((s) => s.name.toLowerCase() === i.service?.toLowerCase());
+  if (!release.items.some(own)) return release;
+  return {
+    ...release,
+    services: release.services.map((s) => {
+      const text = serviceEnvBlock(release, s)?.text;
+      return text ? { ...s, envBlock: text } : s;
+    }),
+    items: release.items.filter((i) => !own(i)),
+  };
 }
 
 export interface DeploymentOptions {

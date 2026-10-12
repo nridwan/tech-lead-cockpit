@@ -171,16 +171,18 @@ describe('ReleaseManager', () => {
     expect(report.outOfScope).toEqual([{ key: 'MU-77', summary: '[WEB-FE][PORTAL][PROMO] - Banner', status: 'In Progress', codename: 'PROMO', mrs: ['payments/core-payment!12'], commits: ['MU-77 banner promo'] }]);
     expect(report.scope).toMatchObject({ tickets: 3, inCode: 3, carried: 1, matched: false });
     expect(report.mrs[0]).toMatchObject({ envAdded: ['REFUND_LIMIT'], approvals: { count: 1 } });
-    expect(release.items.map((i) => [i.kind, i.label, i.service])).toEqual([
-      ['env', 'REFUND_LIMIT', 'core-payment'],
-      ['env', 'REFUND_LIMIT', 'MOBILE-APP'],
+    // Env found in the code goes straight into each service's .env block of the document.
+    expect(release.items).toEqual([]);
+    expect(release.services.map((s) => [s.name, s.envBlock])).toEqual([
+      ['core-payment', 'REFUND_LIMIT='],
+      ['MOBILE-APP', 'REFUND_LIMIT='],
     ]);
     expect(await m.report(r.id)).toMatchObject({ releaseId: r.id });
 
-    // Discovering again adds nothing twice, and checking keeps the done marks.
+    // Discovering again adds nothing twice; checking again keeps a value typed in the .env block.
     expect((await m.discover(r.id)).addedMrs).toBe(0);
-    await m.store.save({ ...release, items: release.items.map((i) => ({ ...i, done: true })) });
-    expect((await m.check(r.id)).release.items.every((i) => i.done)).toBe(true);
+    await m.store.save({ ...release, services: release.services.map((s) => ({ ...s, envBlock: 'REFUND_LIMIT=5' })) });
+    expect((await m.check(r.id)).release.services[0].envBlock).toBe('REFUND_LIMIT=5');
   });
 
   it('plans a release MR: compare, findings, tickets, carried keys and the GitLab form', async () => {
@@ -212,7 +214,7 @@ describe('ReleaseManager', () => {
     expect(plan.warnings.some((w) => w.includes('MU-77'))).toBe(true);
     expect(plan.formUrl).toContain(`${GL}/payments/core-payment/-/merge_requests/new?`);
     expect(decodeURIComponent(plan.formUrl)).toContain('merge_request[target_branch]=master');
-    expect(plan.description).toContain('- [ ] Env baru `REFUND_LIMIT` sudah diset di server');
+    expect(plan.description).toContain('- Env baru `REFUND_LIMIT` sudah diset di server');
 
     expect((await m.mrPlan(r.id, 's1', 'nope')).warnings).toContain('Branch nope tidak ada di payments/core-payment.');
     await expect(m.createMr(r.id, 's1', { sourceBranch: 'master', title: 'x', description: '' })).rejects.toThrow(/sama dengan branch target/);
@@ -260,6 +262,86 @@ describe('ReleaseManager', () => {
       { service: 'core-ledger', ref: 'payments/core-ledger@staging', kind: 'branch', files: 0, unattributed: [] },
     ]);
     expect(report.warnings).toContain('core-ledger: staging tidak punya perubahan dibanding master.');
+  });
+
+  it('runs the AI check, pick and document fix in the background', async () => {
+    const prompts: string[] = [];
+    const replies: string[] = [];
+    const runAi = (_ai: unknown, prompt: string) => {
+      prompts.push(prompt);
+      return { done: Promise.resolve({ reply: replies.shift() ?? '{}' }), cancel: () => {} };
+    };
+    const changes = [
+      { oldPath: 'api/refund.go', newPath: 'api/refund.go', newFile: true, renamedFile: false, deletedFile: false, diff: '+func RefundApi() { db.Table("refund_logs") }', additions: 1, deletions: 0 },
+      { oldPath: 'api/promo.go', newPath: 'api/promo.go', newFile: true, renamedFile: false, deletedFile: false, diff: '+func Promo() {}', additions: 1, deletions: 0 },
+    ];
+    const m = manager({
+      runAi,
+      gitlab: async () => ({
+        mrsToBranch: async () => [],
+        mr: async () => detail(summary('payments/core-payment', 12)),
+        branchExists: async () => true,
+        compare: async (_p, from, to) =>
+          from === 'master'
+            ? { commits: [{ id: 'c1c1c1c1aa', shortId: 'c1c1c1c1', title: 'refund', authorName: 'B', createdAt: '', parentIds: ['p0p0p0p0'] }, { id: 'c2c2c2c2bb', shortId: 'c2c2c2c2', title: 'promo', authorName: 'B', createdAt: '', parentIds: ['c1c1c1c1aa'] }], changes, truncated: false }
+            : { commits: [], changes: [changes[to === 'c1c1c1c1aa' ? 0 : 1]], truncated: false },
+      }),
+    });
+    const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
+    const ai = { provider: 'claude' as const, model: 'x' };
+    const settle = async (kind: 'tickets' | 'picks' | 'document', serviceId?: string) => {
+      for (let i = 0; i < 50; i++) {
+        const j = await m.aiJob(r.id, kind, serviceId);
+        if (j && j.status !== 'running') return j;
+        await new Promise((ok) => setTimeout(ok, 5));
+      }
+      throw new Error('job did not finish');
+    };
+
+    // Step one: the AI looks for services and MRs (nothing to add here).
+    replies.push(JSON.stringify({ services: [], mrs: [] }));
+    replies.push(
+      JSON.stringify({
+        tickets: [{ key: 'MU-12', verdict: 'ada', files: ['api/refund.go'], reason: 'RefundApi' }],
+        unrelated: [{ path: 'api/promo.go', reason: 'promo bukan scope' }],
+        needs: [
+          { kind: 'sql', when: 'pre', label: 'Buat tabel refund_logs', detail: 'CREATE TABLE refund_logs (id bigint);', files: ['api/refund.go'] },
+          { kind: 'env', when: 'pre', label: 'REFUND_MAX', files: [] },
+          { kind: 'other', when: 'post', label: 'Smoke test refund', files: [] },
+        ],
+      }),
+    );
+    expect((await m.aiStart(r.id, 'tickets', { ai })).status).toBe('running');
+    expect((await settle('tickets')).status).toBe('done');
+    expect(prompts[0]).toContain('Tentukan service (repo) dan MR');
+    expect(prompts[1]).toContain('MU-12');
+    expect(prompts[1]).toContain('+func RefundApi()');
+    const report = (await m.report(r.id))!;
+    expect(report.ai?.model).toBe('claude/x');
+    expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: ['payments/core-payment@staging'], ai: { verdict: 'ada' } });
+    expect(report.sources?.[0].aiUnrelated).toEqual([{ path: 'api/promo.go', reason: 'promo bukan scope' }]);
+    const saved = await m.get(r.id);
+    // Straight into the document: the query in Pre-deploy, the env in the .env block.
+    expect(saved.items.map((i) => [i.kind, i.label, i.source, i.detail])).toEqual([['sql', 'Buat tabel refund_logs', 'ai', 'CREATE TABLE refund_logs (id bigint);']]);
+    expect(saved.services[0].envBlock).toBe('REFUND_MAX=');
+    expect(saved.services[0].postDeploy).toEqual(['Smoke test refund']);
+
+    replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));
+    await m.aiStart(r.id, 'picks', { ai, serviceId: 's1', sourceBranch: 'staging' });
+    const picks = await settle('picks', 's1');
+    expect(picks.picks?.map((p) => [p.sha, p.include])).toEqual([['c1c1c1c1aa', true], ['c2c2c2c2bb', false]]);
+    // Each commit is read against its first parent.
+    expect(prompts[2]).toContain('+func Promo() {}');
+
+    replies.push(JSON.stringify({ services: [{ name: 'core-payment', envBlock: 'REFUND_MAX=' }], summary: ['REFUND_MAX ditambah'] }));
+    // A document fix is only a proposal: the release does not change until the user applies it.
+    const before = (await m.get(r.id)).services[0];
+    await expect(m.aiStart(r.id, 'document', { ai })).rejects.toThrow(/instruksi/);
+    await m.aiStart(r.id, 'document', { ai, instruction: 'lengkapi .env' });
+    const doc = await settle('document');
+    expect(doc.fixes).toEqual([{ serviceId: 's1', name: 'core-payment', envBlock: 'REFUND_MAX=' }]);
+    expect(prompts[3]).toContain('Instruksi Tech Lead: lengkapi .env');
+    expect((await m.get(r.id)).services[0]).toEqual(before);
   });
 
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {
