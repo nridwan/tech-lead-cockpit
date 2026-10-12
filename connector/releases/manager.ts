@@ -10,6 +10,7 @@ import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hun
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { fileProblems, notFromSource, type SafetyIssue } from '../../src/lib/release/safety.ts';
+import { applyFlagEdits, flagBranchName, flagPrompt, parseFlagReply, textHash } from '../../src/lib/release/flag.ts';
 import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
 import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, ticketType, typeInScope, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
@@ -41,6 +42,7 @@ export interface ReleaseGitLab {
   createBranch?(path: string, branch: string, ref: string): Promise<void>;
   cherryPick?(path: string, sha: string, branch: string): Promise<{ id: string }>;
   rawFile?(path: string, filePath: string, ref: string): Promise<string | undefined>;
+  mergeMr?(path: string, iid: number): Promise<{ state: string; mergeCommitSha?: string }>;
   latestPipeline?(path: string, ref: string): Promise<{ status: string; webUrl: string } | undefined>;
   commitFiles?(path: string, req: { branch: string; start: string; message: string; actions: { action: 'create' | 'update' | 'delete'; path: string; content?: string }[] }): Promise<{ id: string }>;
 }
@@ -68,9 +70,11 @@ const AI_MAX_COMMITS = 40;
 const VERDICT_RANK = { tidak: 0, sebagian: 1, ada: 2 } as const;
 type AiKind = ReleaseAiJob['kind'];
 /** AI jobs that are about one service (their last result is kept per service). */
-const PER_SERVICE = new Set<AiKind>(['picks', 'mr', 'patch', 'safety']);
+const PER_SERVICE = new Set<AiKind>(['picks', 'mr', 'patch', 'safety', 'flag']);
 interface AiLive {
   job: ReleaseAiJob;
+  /** flag: the files the feature lives in. */
+  paths?: string[];
   cancel?: () => void;
   cancelled?: boolean;
 }
@@ -638,14 +642,15 @@ export class ReleaseManager {
    * to the deployment document from an instruction. Only GitLab and the AI are read; the
    * document fixes are applied by the user.
    */
-  async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string }): Promise<ReleaseAiJob> {
+  async aiStart(id: string, kind: AiKind, opts: { ai: AiSelection; serviceId?: string; sourceBranch?: string; instruction?: string; paths?: string[] }): Promise<ReleaseAiJob> {
     const release = await this.get(id);
     if (!this.deps.runAi) throw new ReleaseInputError('AI belum tersedia di connector ini.');
-    if (!['tickets', 'picks', 'document', 'mr', 'patch', 'discover', 'safety'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
+    if (!['tickets', 'picks', 'document', 'mr', 'patch', 'discover', 'safety', 'flag'].includes(kind)) throw new ReleaseInputError('Jenis cek AI tidak valid.');
     if (!isAiSelection(opts.ai)) throw new ReleaseInputError('Pilihan AI tidak valid.');
     if (PER_SERVICE.has(kind)) this.service(release, opts.serviceId ?? '');
     const instruction = (opts.instruction ?? '').trim().slice(0, 4000);
     if (kind === 'document' && !instruction) throw new ReleaseInputError('Tulis instruksi perbaikan dokumen dulu.');
+    if (kind === 'flag' && !instruction) throw new ReleaseInputError('Tulis fitur apa yang mau di-flag.');
     const source = (opts.sourceBranch ?? '').trim();
     if (source && !/^[\w./-]{1,100}$/.test(source)) throw new ReleaseInputError('Nama branch sumber tidak valid.');
     const key = this.aiKey(release.id, kind, opts.serviceId);
@@ -655,13 +660,14 @@ export class ReleaseManager {
       releaseId: release.id,
       kind,
       ...(PER_SERVICE.has(kind) ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
-      ...(instruction && (kind === 'picks' || kind === 'document' || kind === 'patch') ? { instruction } : {}),
+      ...(instruction && (kind === 'picks' || kind === 'document' || kind === 'patch' || kind === 'flag') ? { instruction } : {}),
       model: opts.ai.model ? `${opts.ai.provider}/${opts.ai.model}` : opts.ai.provider,
       status: 'running',
       progress: 'Menyiapkan…',
       createdAt: this.now(),
     };
-    const live: AiLive = { job };
+    const paths = (opts.paths ?? []).map((p) => String(p).trim()).filter((p) => p && !p.includes('..') && !p.startsWith('/')).slice(0, 8);
+    const live: AiLive = { job, ...(paths.length ? { paths } : {}) };
     this.aiLive.set(key, live);
     await this.saveAiJob(job);
     void this.runAiJob(live, opts.ai, instruction).finally(() => this.aiLive.delete(key));
@@ -677,6 +683,7 @@ export class ReleaseManager {
       else if (job.kind === 'mr') await this.aiMr(live, ai);
       else if (job.kind === 'patch') await this.aiPatch(live, ai, instruction);
       else if (job.kind === 'safety') await this.aiSafety(live, ai);
+      else if (job.kind === 'flag') await this.aiFlag(live, ai, instruction);
       else await this.aiDocument(live, ai, instruction);
       if (live.cancelled) throw new Error('Dibatalkan.');
       await this.finishAiJob(job, { status: 'done' });
@@ -1055,6 +1062,98 @@ export class ReleaseManager {
       pipeline: pipe ? { status: pipe.status, url: pipe.webUrl } : { note: `Belum ada pipeline untuk ${branch}. Pastikan .gitlab-ci.yml menjalankan build/test untuk branch rilis.` },
       skipped,
     };
+  }
+
+  /** The branch a feature lives on for one service: where its flag goes (staging…, not a release branch). */
+  private flagBase(release: Release, service: ReleaseService, asked?: string): string {
+    return asked || service.releaseFrom || release.sourceBranch || 'staging';
+  }
+
+  /**
+   * The AI writes a feature flag (off by default) for a feature that is on the source but outside
+   * the release: small find/replace edits in the repo's own style, applied here exactly. Nothing is
+   * written to GitLab; the user reviews the diff and then makes the branch + MR.
+   */
+  private async aiFlag(live: AiLive, ai: AiSelection, instruction: string) {
+    const release = await this.get(live.job.releaseId);
+    const service = this.service(release, live.job.serviceId ?? '');
+    const path = service.gitlabPath!;
+    const base = this.flagBase(release, service, live.job.sourceBranch);
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.compare || !gitlab.rawFile) throw new Error('GitLab belum terhubung.');
+    live.job.progress = `Membaca fitur di ${base}…`;
+    const cmp = await gitlab.compare(path, release.targetBranch, base);
+    const wanted = live.paths?.length ? cmp.changes.filter((c) => live.paths!.includes(c.newPath)) : cmp.changes.filter((c) => !BINARY_PATH.test(c.newPath)).slice(0, 8);
+    const current = new Map<string, string | undefined>();
+    const read = async (p: string) => {
+      if (current.has(p)) return;
+      const text = await gitlab.rawFile!(path, p, base).catch(() => undefined);
+      current.set(p, text !== undefined && text.length <= 150_000 ? text : undefined);
+    };
+    for (const p of [...new Set([...(live.paths ?? []), ...wanted.map((c) => c.newPath)])].slice(0, 8)) await read(p);
+    // The repo's own flag style: env example files and lines that read env/flags.
+    const examples = ['.env.example', '.env.sample', 'env.example', '.env.dist'];
+    for (const p of examples) await read(p);
+    const files = [...current].filter(([p, t]) => t !== undefined && !examples.includes(p)).map(([p, t]) => ({ path: p, content: t! }));
+    if (!files.length) throw new Error('File fitur tidak terbaca dari GitLab.');
+    const envExample = examples.map((p) => [p, current.get(p)] as const).find(([, t]) => t !== undefined);
+    const flagLines = files.flatMap((f) => f.content.split('\n').filter((l) => /getenv|process\.env|os\.environ|env\(|enable|feature|flag|toggle/i.test(l)).map((l) => `${f.path}: ${l.trim()}`)).slice(0, 40);
+    const conventions = [...(envExample ? [`${envExample[0]}:\n${envExample[1]!.slice(0, 6_000)}`] : []), ...flagLines].join('\n');
+    const changes = await this.fillMissingDiffs(path, release.targetBranch, base, wanted);
+    live.job.progress = 'AI menyusun feature flag…';
+    const out = await this.ask(live, ai, flagPrompt({ repo: path, base, target: release.targetBranch, what: instruction, files: envExample ? [...files, { path: envExample[0], content: envExample[1]! }] : files, diff: diffText(changes, 60_000, '', focusTerms([instruction])).text, conventions }));
+    if (out.error) throw new Error(`AI gagal: ${out.error}`);
+    const plan = parseFlagReply(out.reply);
+    if (!plan) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
+    for (const e of plan.edits) if (e.find) await read(e.path);
+    const applied = applyFlagEdits(plan.edits, current);
+    live.job.flag = { name: plan.flag || 'FEATURE_ENABLE', base, summary: plan.summary, files: applied.files, problems: applied.problems };
+    live.job.notes = plan.notes;
+  }
+
+  /**
+   * Writes the AI's feature flag (the user confirmed): a branch from the base with the changed
+   * files in one commit, and an MR from it into the base. Refused when a file on the base changed
+   * since the flag was written (it would undo someone's work) or a JSON file would break.
+   */
+  async createFlagMr(id: string, serviceId: string): Promise<{ branch: string; ref: string; webUrl: string; created: boolean }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const path = service.gitlabPath!;
+    const job = await this.aiJob(id, 'flag', serviceId);
+    const flag = job?.status === 'done' ? job.flag : undefined;
+    if (!job || !flag || !flag.files.length) throw new ReleaseInputError('Susun feature flag dengan AI dulu.');
+    if (flag.mr) throw new ReleaseInputError(`Feature flag ini sudah punya MR: ${flag.mr.ref}.`);
+    if (flag.problems.some((p) => /JSON/.test(p))) throw new ReleaseInputError(`Perbaiki dulu: ${flag.problems.join(' ')}`);
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.commitFiles || !gitlab.rawFile || !gitlab.createMr || !gitlab.branchExists) throw new ReleaseInputError('GitLab belum terhubung.');
+    for (const f of flag.files) {
+      const now = await gitlab.rawFile(path, f.path, flag.base).catch(() => undefined);
+      if (f.baseHash && textHash(now) !== f.baseHash) throw new ReleaseInputError(`${f.path} di ${flag.base} sudah berubah sejak feature flag disusun; susun ulang supaya tidak menimpa perubahan lain.`);
+    }
+    const branch = flagBranchName(flag.name);
+    if (await gitlab.branchExists(path, branch)) throw new ReleaseInputError(`Branch ${branch} sudah ada di ${path}.`);
+    await gitlab.commitFiles(path, { branch, start: flag.base, message: `Feature flag ${flag.name}${flag.summary ? `: ${flag.summary.slice(0, 200)}` : ''}`, actions: flag.files.map((f) => ({ action: f.status, path: f.path, content: f.content })) });
+    const existing = await gitlab.openMrFor?.(path, branch, flag.base).catch(() => undefined);
+    const mr = existing ?? (await gitlab.createMr(path, { source: branch, target: flag.base, title: `[${flag.base.toUpperCase()}] - Feature flag ${flag.name}`, description: '' }));
+    await this.saveAiJob({ ...job, flag: { ...flag, mr: { ref: mr.ref, webUrl: mr.webUrl, branch } } });
+    return { branch, ref: mr.ref, webUrl: mr.webUrl, created: !existing };
+  }
+
+  /** Merges the feature flag's MR into its base (the user confirmed). */
+  async mergeFlagMr(id: string, serviceId: string): Promise<{ ref: string; state: string }> {
+    const release = await this.get(id);
+    const service = this.service(release, serviceId);
+    const job = await this.aiJob(id, 'flag', serviceId);
+    const mr = job?.flag?.mr;
+    if (!job || !mr) throw new ReleaseInputError('Belum ada MR feature flag untuk di-merge.');
+    if (mr.merged) throw new ReleaseInputError(`${mr.ref} sudah di-merge.`);
+    const gitlab = await this.deps.gitlab();
+    if (!gitlab?.mergeMr) throw new ReleaseInputError('GitLab belum terhubung.');
+    const iid = Number(mr.ref.split('!').pop());
+    const r = await gitlab.mergeMr(service.gitlabPath!, iid);
+    await this.saveAiJob({ ...job, flag: { ...job.flag!, mr: { ...mr, merged: r.state === 'merged' } } });
+    return { ref: mr.ref, state: r.state };
   }
 
   private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {

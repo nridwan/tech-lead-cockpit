@@ -368,7 +368,7 @@ export interface AiPick {
 export interface ReleaseAiJob {
   id: string;
   releaseId: string;
-  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover' | 'safety';
+  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover' | 'safety' | 'flag';
   serviceId?: string;
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */
@@ -383,6 +383,8 @@ export interface ReleaseAiJob {
   picks?: AiPick[];
   /** document: proposed fixes per service, applied only when the user confirms. */
   fixes?: ReleaseDocFix[];
+  /** flag: a feature flag the AI wrote for a feature outside the release, not yet written to GitLab. */
+  flag?: { name: string; base: string; summary: string; files: FlagFile[]; problems: string[]; mr?: { ref: string; webUrl: string; branch: string; merged?: boolean } };
   /** safety: the release branch's safety layers. */
   safety?: SafetyResult;
   /** patch: the changed files split in hunks, with the AI's choice per hunk. */
@@ -432,4 +434,14 @@ export interface PatchFile {
   path: string;
   status: 'new' | 'deleted' | 'modified';
   hunks: PatchHunk[];
+}
+
+/** A file of a feature flag change: its new content and the +/− preview vs the base branch. */
+export interface FlagFile {
+  path: string;
+  status: 'create' | 'update';
+  content: string;
+  preview: string;
+  /** Fingerprint of the file on the base when the flag was written: it must not have changed since. */
+  baseHash?: string;
 }

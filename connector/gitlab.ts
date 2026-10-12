@@ -223,11 +223,11 @@ export class GitLabClient {
   }
 
   /** POST with the same error handling as get; writes need a token with the `api` scope. */
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, method: 'POST' | 'PUT' = 'POST'): Promise<T> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.cfg.baseUrl}/api/v4${path}`, {
-        method: 'POST',
+        method,
         headers: { 'PRIVATE-TOKEN': this.cfg.token, Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(30_000),
@@ -325,6 +325,18 @@ export class GitLabClient {
       commit_message: req.message,
       actions: req.actions.map((a) => ({ action: a.action, file_path: a.path, ...(a.action === 'delete' ? {} : { content: a.content ?? '' }) })),
     });
+  }
+
+  /** Merges an MR (the user confirmed). Needs scope `api` and the right to merge into its target. */
+  async mergeMr(projectPath: string, iid: number): Promise<{ state: string; mergeCommitSha?: string }> {
+    try {
+      const mr = await this.post<{ state: string; merge_commit_sha?: string | null }>(`/projects/${encodeURIComponent(projectPath)}/merge_requests/${iid}/merge`, {}, 'PUT');
+      return { state: mr.state, ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {}) };
+    } catch (e) {
+      // 405/406/409 on merge: draft, pipeline still required, conflicts, or already merged.
+      if (e instanceof GitLabError && (e.status === 409 || e.status === 400 || e.status === 502)) throw new GitLabError(`GitLab belum mau me-merge MR ini (draft, pipeline wajib lulus, konflik, atau approval kurang). ${e.message}`, 409, 'bad-request');
+      throw e;
+    }
   }
 
   /** Cherry-picks one commit onto a branch (merge commits against their first parent). Needs scope `api`. */

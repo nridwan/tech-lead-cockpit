@@ -97,6 +97,7 @@
       aiMr.stop();
       aiPatch.stop();
       aiSafety.stop();
+      aiFlag.stop();
     };
   });
   $effect(() => {
@@ -120,6 +121,7 @@
         applyPicks(aiPick.job);
       }
       await aiSafety.load();
+      await aiFlag.load();
       patchSel = {};
       await aiPatch.load();
       if (aiPatch.job?.status === 'done' && aiPatch.job.sourceBranch === plan.sourceBranch) {
@@ -308,6 +310,68 @@
 
   const f = $derived(plan?.findings);
 
+  // Feature flag for a feature outside the release (on the source): AI writes it, the user reviews,
+  // then a branch + MR into the source branch, and a merge (each confirmed).
+  let flagWhat = $state('');
+  let flagPaths = $state<string[]>([]);
+  let flagBusy = $state<'' | 'mr' | 'merge'>('');
+  const aiFlag = new AiJobWatch(
+    () => release.id,
+    'flag',
+    () => service.id,
+    (job) => {
+      if (job.status === 'done') toasts.show(job.flag?.files.length ? `Feature flag ${job.flag.name} siap ditinjau.` : 'AI tidak membuat perubahan; lihat catatannya.', 'info', 5000);
+      else if (job.status === 'error') toasts.show(`Menyusun feature flag gagal: ${job.error}`, 'err', 6000);
+    },
+  );
+  const flagDone = $derived(aiFlag.job?.status === 'done' ? aiFlag.job : null);
+
+  function flagThis(u: { path: string; reason: string }) {
+    flagPaths = [...new Set([...flagPaths, u.path])];
+    flagWhat = flagWhat.trim() ? `${flagWhat.trim()}\n${u.path}: ${u.reason}` : `${u.path}: ${u.reason}`;
+    queueMicrotask(() => document.getElementById('flag-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+
+  async function startFlag() {
+    saveReleaseAi(ai);
+    await aiFlag.start(ai, { instruction: flagWhat.trim(), paths: flagPaths });
+    if (aiFlag.error) toasts.show(aiFlag.error, 'err');
+  }
+
+  async function makeFlagMr() {
+    const f = flagDone?.flag;
+    if (!f) return;
+    const ok = await confirmDialog({ title: `Buat branch & MR feature flag ke ${f.base}?`, message: `Branch dari ${f.base} berisi ${f.files.length} file yang diubah AI (flag ${f.name}, default mati), lalu MR ke ${f.base} dibuat atas nama token GitLab kamu.`, confirmText: 'Buat branch & MR' });
+    if (!ok) return;
+    flagBusy = 'mr';
+    try {
+      const r = await releases.createFlagMr(release.id, service.id);
+      toasts.show(`${r.created ? 'MR' : 'MR yang ada'} ${r.ref} ke ${f.base} siap.`, 'ok', 5000);
+      await aiFlag.load();
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 8000);
+    } finally {
+      flagBusy = '';
+    }
+  }
+
+  async function mergeFlag() {
+    const f = flagDone?.flag;
+    if (!f?.mr) return;
+    const ok = await confirmDialog({ title: `Merge ${f.mr.ref} ke ${f.base}?`, message: `Feature flag ${f.name} masuk ke ${f.base}. Pastikan MR-nya sudah direview sesuai aturan tim.`, confirmText: 'Merge', danger: true });
+    if (!ok) return;
+    flagBusy = 'merge';
+    try {
+      const r = await releases.mergeFlagMr(release.id, service.id);
+      toasts.show(r.state === 'merged' ? `${r.ref} sudah di-merge ke ${f.base}. Klik Bandingkan, lalu cek ulang dengan AI.` : `${r.ref}: ${r.state}.`, 'ok', 7000);
+      await aiFlag.load();
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 8000);
+    } finally {
+      flagBusy = '';
+    }
+  }
+
   /** What the summary shows: ticket results (AI first), changes without a ticket, risks. */
   const ticketsIn = $derived(plan ? plan.tickets.filter((t) => (verdictOf(t.key) ? verdictOf(t.key)!.verdict === 'ada' : t.inSource)).length : 0);
   const ticketsMissing = $derived(plan ? plan.tickets.filter((t) => (verdictOf(t.key) ? verdictOf(t.key)!.verdict === 'tidak' : !t.inSource && !t.unsure)) : []);
@@ -327,7 +391,7 @@
       if (!safety) return { text: `Sumbernya branch rilis ${plan.sourceBranch}: jalankan cek keamanan dulu.`, action: { label: 'Cek keamanan', run: () => ((tab = 'branch'), void startSafety()) } };
       if (!safetyOk(safety)) return { text: 'Branch rilis belum lolos cek keamanan: selesaikan yang bertanda ✗ / ≈.', action: { label: 'Lihat cek keamanan', run: () => (tab = 'branch') } };
     }
-    if (dirty) return { text: `${plan.sourceBranch} membawa perubahan di luar scope (${plan.outOfScope.length + loose.length}). Siapkan branch rilis yang hanya berisi scope.`, action: { label: 'Siapkan branch rilis', run: () => (tab = 'branch') } };
+    if (dirty) return { text: `${plan.sourceBranch} membawa perubahan di luar scope (${plan.outOfScope.length + loose.length}). Siapkan branch rilis yang hanya berisi scope, atau bungkus fiturnya dengan feature flag (tombol Flag-kan di tab Pemeriksaan).`, action: { label: 'Siapkan branch rilis', run: () => (tab = 'branch') } };
     if (ticketsMissing.length) return { text: `${ticketsMissing.length} tiket belum terlihat di kode (${ticketsMissing.map((t) => t.key).join(', ')}). Pastikan memang tidak ikut rilis ini, lalu buat MR.` };
     return { text: `Siap: buat MR ${plan.sourceBranch} → ${plan.targetBranch}.`, ok: true };
   });
@@ -399,7 +463,7 @@
             </ul>
             {#if loose.length}
               <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length}</h4>
-              <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason}</li>{/each}</ul>
+              <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason} <button class="link-btn small" onclick={() => flagThis(u)} title="Bungkus perubahan ini dengan feature flag (default mati) di {plan.sourceBranch}">Flag-kan</button></li>{/each}</ul>
             {/if}
             {#if flagged.length}
               <h4>Di balik feature flag (aman ikut selama flag mati) — {flagged.length}</h4>
@@ -423,6 +487,40 @@
               {#each plan.outOfScope as o (o.key)}<li class="missing"><span class="mono">{o.key}</span> {o.summary ?? 'tidak termuat dari Jira'}{o.commits[0] ? ` · ${o.commits[0]}` : ''}</li>{/each}
             </ul>
           {/if}
+          <section class="flag" id="flag-panel">
+            <h4>Feature flag</h4>
+            <p class="muted small">Fitur di branch sumber yang bukan bagian rilis bisa dibungkus feature flag (default mati), lalu di-merge ke branch sumbernya. Setelah itu fiturnya boleh ikut naik tanpa aktif.</p>
+            <textarea class="input pick-ins" rows="2" bind:value={flagWhat} placeholder="Fitur yang mau di-flag, mis. scheduler laporan pajak di core/scheduler/tax_transaction_scheduler.go"></textarea>
+            {#if flagPaths.length}<div class="small">File: {#each flagPaths as p (p)}<span class="tag mono">{p} <button class="link-btn" onclick={() => (flagPaths = flagPaths.filter((x) => x !== p))} aria-label="Hapus {p}">✕</button></span> {/each}</div>{/if}
+            <div class="row">
+              <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiFlag.running} />
+              {#if aiFlag.running}
+                <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiFlag.job?.progress ?? 'AI menyusun…'}</span>
+                <button class="btn btn-sm" onclick={() => aiFlag.cancel()}><Icon name="x" size={12} /> Batalkan</button>
+              {:else}
+                <button class="btn btn-sm btn-primary" onclick={startFlag} disabled={!flagWhat.trim()}><Icon name="sparkles" size={12} /> Susun feature flag dengan AI</button>
+              {/if}
+            </div>
+            {#if flagDone?.flag}
+              {@const fl = flagDone.flag}
+              <div class="pfile">
+                <div class="small"><strong>Flag <span class="mono">{fl.name}</span></strong> (default mati) di <span class="mono">{fl.base}</span>{fl.summary ? ` — ${fl.summary}` : ''}</div>
+                {#if flagDone.notes?.length}<ul class="small ai-notes">{#each flagDone.notes as n, i (i)}<li>{n}</li>{/each}</ul>{/if}
+                {#if fl.problems.length}<ul class="small err-text">{#each fl.problems as pr, i (i)}<li>{pr}</li>{/each}</ul>{/if}
+                {#each fl.files as ff (ff.path)}
+                  <details><summary class="small"><span class="mono">{ff.path}</span> · {ff.status === 'create' ? 'file baru' : 'diubah'}</summary><pre class="sqlbox">{ff.preview || '(tidak ada perubahan)'}</pre></details>
+                {/each}
+                <div class="row">
+                  {#if fl.mr}
+                    <span class="small">MR: <a href={fl.mr.webUrl} target="_blank" rel="noreferrer">{fl.mr.ref}</a> ({fl.mr.branch} → {fl.base}){fl.mr.merged ? ' · sudah di-merge' : ''}</span>
+                    {#if !fl.mr.merged}<button class="btn btn-sm btn-primary" onclick={mergeFlag} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'merge' ? 'Me-merge…' : `Merge ke ${fl.base}`}</button>{/if}
+                  {:else if fl.files.length}
+                    <button class="btn btn-sm btn-primary" onclick={makeFlagMr} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'mr' ? 'Membuat…' : `Buat branch & MR ke ${fl.base}`}</button>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          </section>
           <h4>Temuan pola (env, migrasi, query)</h4>
           {#if f}
             <ul class="small findings">
@@ -745,6 +843,14 @@
   .patch {
     border-top: 1px dashed var(--border);
     padding-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .flag {
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+    margin-top: 6px;
     display: flex;
     flex-direction: column;
     gap: 6px;

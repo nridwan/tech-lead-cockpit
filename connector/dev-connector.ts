@@ -1568,13 +1568,34 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       return send(res, 200, { job: await rm.aiJob(idOf(url.searchParams.get('id')), kind, url.searchParams.get('serviceId') ?? undefined) });
     }
     if (route === 'POST /releases/ai/start') {
-      const body = await readJson<{ id?: string; kind?: string; ai?: unknown; serviceId?: string; sourceBranch?: string; instruction?: string }>(req, 32 * 1024);
-      const job = await rm.aiStart(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], { ai: body.ai as never, serviceId: body.serviceId ? String(body.serviceId) : undefined, sourceBranch: body.sourceBranch ? String(body.sourceBranch) : undefined, instruction: body.instruction ? String(body.instruction) : undefined });
+      const body = await readJson<{ id?: string; kind?: string; ai?: unknown; serviceId?: string; sourceBranch?: string; instruction?: string; paths?: unknown[] }>(req, 32 * 1024);
+      const paths = Array.isArray(body.paths) ? body.paths.slice(0, 8).map((p) => String(p ?? '').slice(0, 400)) : undefined;
+      const job = await rm.aiStart(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], { ai: body.ai as never, serviceId: body.serviceId ? String(body.serviceId) : undefined, sourceBranch: body.sourceBranch ? String(body.sourceBranch) : undefined, instruction: body.instruction ? String(body.instruction) : undefined, ...(paths ? { paths } : {}) });
       return send(res, 200, { job });
     }
     if (route === 'POST /releases/ai/cancel') {
       const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
       return send(res, 200, { job: await rm.aiCancel(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined) });
+    }
+    if (route === 'POST /releases/flag/mr' || route === 'POST /releases/flag/merge') {
+      const body = await readJson<{ id?: string; serviceId?: string }>(req, 8 * 1024);
+      const merge = route === 'POST /releases/flag/merge';
+      const base = { ts: new Date().toISOString(), action: merge ? ('gitlab.mr.merge' as const) : ('gitlab.mr.create' as const), spaceKey: 'GitLab', title: merge ? 'Merge MR feature flag' : 'Branch + MR feature flag', attachments: 0 };
+      try {
+        if (merge) {
+          const r = await rm.mergeFlagMr(idOf(body.id), String(body.serviceId ?? ''));
+          await audit({ ...base, title: `Merge ${r.ref} (${r.state})`, result: 'success' }).catch(() => {});
+          return send(res, 200, r);
+        }
+        const r = await rm.createFlagMr(idOf(body.id), String(body.serviceId ?? ''));
+        await audit({ ...base, title: `Branch ${r.branch} + ${r.created ? 'MR' : 'MR yang ada'} ${r.ref}`, result: 'success' }).catch(() => {});
+        return send(res, 200, r);
+      } catch (e) {
+        if (e instanceof ReleaseInputError) throw e;
+        await audit({ ...base, result: 'failure', error: (e as Error).message }).catch(() => {});
+        if (e instanceof GitLabError) return fail(res, e.status, { error: e.message, code: e.code === 'forbidden' ? 'unauthorized' : e.code });
+        throw e;
+      }
     }
     if (route === 'POST /releases/patch/preview') {
       const body = await readJson<{ id?: string; serviceId?: string; sourceBranch?: string; hunks?: unknown[] }>(req, 256 * 1024);

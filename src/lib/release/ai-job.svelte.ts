@@ -62,7 +62,7 @@ export class AiJobWatch {
     }
   }
 
-  async start(ai: AiSelection, opts: { sourceBranch?: string; instruction?: string } = {}) {
+  async start(ai: AiSelection, opts: { sourceBranch?: string; instruction?: string; paths?: string[] } = {}) {
     const id = this.releaseId();
     if (!id) return;
     this.error = '';
