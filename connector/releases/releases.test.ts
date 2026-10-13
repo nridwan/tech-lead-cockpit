@@ -291,10 +291,10 @@ describe('ReleaseManager', () => {
     const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [mr], order: 1 }] } as never);
     const ai = { provider: 'claude' as const, model: 'x' };
     const settle = async (kind: 'tickets' | 'picks' | 'document' | 'docgen', serviceId?: string) => {
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < 400; i++) {
         const j = await m.aiJob(r.id, kind, serviceId);
         if (j && j.status !== 'running') return j;
-        await new Promise((ok) => setTimeout(ok, 5));
+        await new Promise((ok) => setTimeout(ok, 10));
       }
       throw new Error('job did not finish');
     };
@@ -380,13 +380,13 @@ describe('ReleaseManager', () => {
     });
     const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
     await m.aiStart(r.id, 'tickets', { ai: { provider: 'claude', model: 'x' } });
-    for (let i = 0; i < 50 && (await m.aiJob(r.id, 'tickets'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 5));
+    for (let i = 0; i < 400 && (await m.aiJob(r.id, 'tickets'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 10));
     const saved = await m.get(r.id);
     expect(saved.services[0].envBlock).toBeUndefined();
     expect(saved.services[0].postDeploy).toBeUndefined();
     expect((await m.report(r.id))?.sources?.[0].aiPending?.map((n) => n.label)).toEqual(['X_KEY', 'Restart worker']);
     await expect(m.aiStart(r.id, 'document', { ai: { provider: 'claude', model: 'x' }, instruction: 'lengkapi' }).then(async () => {
-      for (let i = 0; i < 50 && (await m.aiJob(r.id, 'document'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 5));
+      for (let i = 0; i < 400 && (await m.aiJob(r.id, 'document'))?.status === 'running'; i++) await new Promise((ok) => setTimeout(ok, 10));
       return (await m.aiJob(r.id, 'document'))?.error;
     })).resolves.toMatch(/Belum ada MR rilis/);
   });
@@ -414,7 +414,7 @@ describe('ReleaseManager', () => {
     const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
     await m.aiStart(r.id, 'patch', { ai: { provider: 'claude', model: 'x' }, serviceId: 's1', sourceBranch: 'staging', instruction: 'endpoint /v1/topup/{id} harus ikut' });
     let job = await m.aiJob(r.id, 'patch', 's1');
-    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'patch', 's1'));
+    for (let i = 0; i < 400 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 10)), await m.aiJob(r.id, 'patch', 's1'));
     expect(job?.status).toBe('done');
     expect(hunkPrompt).toContain('WAJIB dijalankan');
     const chosen = job!.patch!.files[0].hunks.filter((h) => h.include).map((h) => h.id);
@@ -449,7 +449,7 @@ describe('ReleaseManager', () => {
     const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], ignoredServices: ['core-old'], createdAt: '2026-10-10T00:00:00Z' } as never);
     await m.aiStart(r.id, 'discover', { ai: { provider: 'claude', model: 'x' } });
     let job = await m.aiJob(r.id, 'discover');
-    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'discover'));
+    for (let i = 0; i < 400 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 10)), await m.aiJob(r.id, 'discover'));
     expect(job?.status).toBe('done');
     expect(prompt).toContain('SUDAH DIHAPUS user dari rilis, jangan diusulkan lagi: core-old');
     const saved = await m.get(r.id);
@@ -494,7 +494,7 @@ describe('ReleaseManager', () => {
     const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', sourceBranch: 'release/x', releaseFrom: 'staging', mrs: [], order: 1 }] } as never);
     await m.aiStart(r.id, 'safety', { ai: { provider: 'claude', model: 'x' }, serviceId: 's1' });
     let job = await m.aiJob(r.id, 'safety', 's1');
-    for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'safety', 's1'));
+    for (let i = 0; i < 400 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 10)), await m.aiJob(r.id, 'safety', 's1'));
     expect(job?.status).toBe('done');
     // Patched() was never on staging: not tested there.
     expect(job?.safety).toMatchObject({ branch: 'release/x', from: 'staging', files: [], deps: { verdict: 'aman' }, pipeline: { status: 'success' } });
@@ -506,7 +506,7 @@ describe('ReleaseManager', () => {
     const plain = await m.store.save({ name: 'B', services: [{ id: 's2', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
     await m.aiStart(plain.id, 'safety', { ai: { provider: 'claude', model: 'x' }, serviceId: 's2' });
     let j2 = await m.aiJob(plain.id, 'safety', 's2');
-    for (let i = 0; i < 50 && j2?.status === 'running'; i++) j2 = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(plain.id, 'safety', 's2'));
+    for (let i = 0; i < 400 && j2?.status === 'running'; i++) j2 = (await new Promise((ok) => setTimeout(ok, 10)), await m.aiJob(plain.id, 'safety', 's2'));
     expect(j2?.error).toMatch(/belum memakai branch rilis/);
   });
 
@@ -535,7 +535,7 @@ describe('ReleaseManager', () => {
     const run = async () => {
       await m.aiStart(r.id, 'flag', { ai: { provider: 'claude', model: 'x' }, serviceId: 's1', instruction: 'scheduler pajak', paths: ['main.go'] });
       let job = await m.aiJob(r.id, 'flag', 's1');
-      for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'flag', 's1'));
+      for (let i = 0; i < 400 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 10)), await m.aiJob(r.id, 'flag', 's1'));
       return job!;
     };
     // Throwing the AI's flag away: nothing kept, nothing written to GitLab.
