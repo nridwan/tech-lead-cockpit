@@ -358,6 +358,20 @@
     }
   }
 
+  /** Throws the AI's flag away (before the MR), or clears the panel for a new one (after it). */
+  async function resetFlag() {
+    const f = flagDone?.flag;
+    if (f && !f.mr) {
+      const ok = await confirmDialog({ title: 'Batalkan feature flag ini?', message: `Hasil AI (${f.name}) dibuang. Belum ada yang ditulis ke GitLab.`, confirmText: 'Batalkan', danger: true });
+      if (!ok) return;
+    }
+    await aiFlag.discard();
+    if (aiFlag.error) return void toasts.show(aiFlag.error, 'err');
+    flagPaths = [];
+    flagWhat = '';
+    toasts.show(f?.mr ? `Panel dikosongkan. MR ${f.mr.ref} tetap ada di GitLab; tutup di sana bila tidak jadi.` : 'Feature flag dibatalkan.', 'info', 5000);
+  }
+
   /** Reads the flag MR from GitLab: review, approvals, pipeline, merged (merging happens in GitLab). */
   async function flagStatus() {
     flagBusy = 'status';
@@ -523,8 +537,10 @@
                       {:else}menunggu review dan merge di GitLab{fl.mr.checkedAt ? ` · ${fl.mr.approvals ?? 0}${fl.mr.approvalsRequired ? `/${fl.mr.approvalsRequired}` : ''} approval${fl.mr.pipeline ? ` · pipeline ${fl.mr.pipeline}` : ''}` : ''}{/if}
                     </span>
                     {#if !fl.mr.merged}<button class="btn btn-sm" onclick={flagStatus} disabled={!!flagBusy}><Icon name="refresh" size={12} /> {flagBusy === 'status' ? 'Mengecek…' : 'Cek status'}</button>{/if}
-                  {:else if fl.files.length}
-                    <button class="btn btn-sm btn-primary" onclick={makeFlagMr} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'mr' ? 'Membuat…' : `Buat branch & MR ke ${fl.base}`}</button>
+                    <button class="btn btn-sm btn-ghost" onclick={resetFlag} disabled={!!flagBusy} title="Kosongkan panel untuk flag lain; MR yang ada tidak disentuh">Mulai flag baru</button>
+                  {:else}
+                    {#if fl.files.length}<button class="btn btn-sm btn-primary" onclick={makeFlagMr} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'mr' ? 'Membuat…' : `Buat branch & MR ke ${fl.base}`}</button>{/if}
+                    <button class="btn btn-sm btn-ghost" onclick={resetFlag} disabled={!!flagBusy} title="Buang hasil AI ini; belum ada yang ditulis ke GitLab"><Icon name="x" size={12} /> Batalkan</button>
                   {/if}
                 </div>
               </div>

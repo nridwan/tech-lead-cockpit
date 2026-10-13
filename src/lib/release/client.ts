@@ -63,5 +63,7 @@ export const releases = {
     call<{ job: ReleaseAiJob }>('/ai/start', { id, kind, ai, ...opts }).then((r) => r.job),
   aiJob: (id: string, kind: ReleaseAiJob['kind'], serviceId?: string) =>
     call<{ job: ReleaseAiJob | null }>(`/ai/job?id=${encodeURIComponent(id)}&kind=${kind}${serviceId ? `&serviceId=${encodeURIComponent(serviceId)}` : ''}`).then((r) => r.job),
+  /** Forgets the last result of an AI job (nothing in GitLab is touched). */
+  aiDiscard: (id: string, kind: ReleaseAiJob['kind'], serviceId?: string) => call<{ ok: boolean }>('/ai/discard', { id, kind, serviceId }),
   aiCancel: (id: string, kind: ReleaseAiJob['kind'], serviceId?: string) => call<{ job: ReleaseAiJob | null }>('/ai/cancel', { id, kind, serviceId }).then((r) => r.job),
 };

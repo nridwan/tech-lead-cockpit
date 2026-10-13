@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { EstimateProject } from '../../src/lib/estimate/types.ts';
 import type { MrCommit, MrDetail, MrFileChange, MrSummary } from '../../src/lib/gitlab/types.ts';
@@ -623,6 +623,17 @@ export class ReleaseManager {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Forgets the last result of an AI job (e.g. a feature flag the user does not want). Only what
+   * Cockpit kept locally goes; anything already in GitLab (an MR) stays and is closed there.
+   */
+  async aiDiscard(id: string, kind: AiKind, serviceId?: string): Promise<void> {
+    const release = await this.get(id);
+    const key = this.aiKey(release.id, kind, serviceId);
+    if (this.aiLive.has(key)) throw new ReleaseInputError('Masih berjalan; batalkan dulu prosesnya.');
+    await rm(join(this.deps.reportDir, `${key}.json`), { force: true });
   }
 
   async aiCancel(id: string, kind: AiKind, serviceId?: string): Promise<ReleaseAiJob | null> {

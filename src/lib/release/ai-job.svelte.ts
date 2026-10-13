@@ -74,6 +74,20 @@ export class AiJobWatch {
     }
   }
 
+  /** Throws the last result away (local only). */
+  async discard() {
+    const id = this.releaseId();
+    if (!id) return;
+    this.stop();
+    try {
+      await releases.aiDiscard(id, this.kind, this.serviceId());
+      this.job = null;
+      this.error = '';
+    } catch (e) {
+      this.error = (e as Error).message;
+    }
+  }
+
   async cancel() {
     const id = this.releaseId();
     if (id) this.job = await releases.aiCancel(id, this.kind, this.serviceId()).catch(() => this.job);

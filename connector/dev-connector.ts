@@ -1573,6 +1573,11 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       const job = await rm.aiStart(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], { ai: body.ai as never, serviceId: body.serviceId ? String(body.serviceId) : undefined, sourceBranch: body.sourceBranch ? String(body.sourceBranch) : undefined, instruction: body.instruction ? String(body.instruction) : undefined, ...(paths ? { paths } : {}) });
       return send(res, 200, { job });
     }
+    if (route === 'POST /releases/ai/discard') {
+      const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
+      await rm.aiDiscard(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined);
+      return send(res, 200, { ok: true });
+    }
     if (route === 'POST /releases/ai/cancel') {
       const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
       return send(res, 200, { job: await rm.aiCancel(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined) });

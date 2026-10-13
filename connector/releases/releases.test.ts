@@ -528,6 +528,12 @@ describe('ReleaseManager', () => {
       for (let i = 0; i < 50 && job?.status === 'running'; i++) job = (await new Promise((ok) => setTimeout(ok, 5)), await m.aiJob(r.id, 'flag', 's1'));
       return job!;
     };
+    // Throwing the AI's flag away: nothing kept, nothing written to GitLab.
+    await run();
+    await m.aiDiscard(r.id, 'flag', 's1');
+    expect(await m.aiJob(r.id, 'flag', 's1')).toBeNull();
+    expect(commits).toEqual([]);
+
     const job = await run();
     expect(job.flag).toMatchObject({ name: 'TAX_ENABLE', base: 'staging', problems: [] });
     expect(job.flag!.files[0].content).toContain('if os.Getenv("TAX_ENABLE") == "true"');
