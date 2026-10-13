@@ -6,7 +6,7 @@ import { mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, parseSafetyReply, patchPrompt, safetyPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService } from '../../src/lib/release/ai.ts';
+import { AI_RULES_VERSION, RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, parseSafetyReply, patchPrompt, safetyPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService, type KnownFlag } from '../../src/lib/release/ai.ts';
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { fileProblems, notFromSource, type SafetyIssue } from '../../src/lib/release/safety.ts';
@@ -369,7 +369,7 @@ export class ReleaseManager {
     const types = this.lastTypes.get(release.id);
     if (types?.length) report.types = types;
     if (ai) {
-      report.ai = { model: ai.model, errors: ai.errors };
+      report.ai = { model: ai.model, errors: ai.errors, rules: AI_RULES_VERSION };
       for (const src of report.sources ?? []) {
         const u = ai.unrelated.get(src.service);
         if (u) src.aiUnrelated = u;
@@ -515,6 +515,7 @@ export class ReleaseManager {
     const title = mrTitle(release, service);
     const base = (await this.deps.gitlabBaseUrl?.().catch(() => '')) ?? '';
     return {
+      ...(cmp.commits.length ? { headSha: cmp.commits[cmp.commits.length - 1].id } : {}),
       serviceId,
       projectPath: path,
       sourceBranch: source,
@@ -672,6 +673,7 @@ export class ReleaseManager {
       ...(PER_SERVICE.has(kind) ? { serviceId: opts.serviceId, ...(source ? { sourceBranch: source } : {}) } : {}),
       ...(instruction && (kind === 'picks' || kind === 'document' || kind === 'patch' || kind === 'flag') ? { instruction } : {}),
       model: opts.ai.model ? `${opts.ai.provider}/${opts.ai.model}` : opts.ai.provider,
+      rules: AI_RULES_VERSION,
       status: 'running',
       progress: 'Menyiapkan…',
       createdAt: this.now(),
@@ -730,6 +732,17 @@ export class ReleaseManager {
         return diff ? { ...c, diff } : c;
       }),
     );
+  }
+
+  /** Feature flags made through Cockpit for a service (its last flag job), for the AI checks. */
+  private async knownFlags(releaseId: string, serviceId: string): Promise<KnownFlag[]> {
+    const job = await this.aiJob(releaseId, 'flag', serviceId).catch(() => null);
+    const f = job?.status === 'done' ? job.flag : undefined;
+    if (!f?.files.length) return [];
+    const files = f.files.map((x) => x.path);
+    const mr = f.mr ? { ref: f.mr.ref, merged: Boolean(f.mr.merged) } : undefined;
+    const list = f.flags?.length ? f.flags : [{ name: f.name, summary: f.summary }];
+    return list.map((x) => ({ name: x.name, summary: x.summary, files, ...(mr ? { mr } : {}) }));
   }
 
   /** One AI call; the reply text, or an error message. Cancelling stops the call. */
@@ -844,7 +857,7 @@ export class ReleaseManager {
         texts.push(diffText(full, Math.floor(180_000 / refs.length), refs.length > 1 ? `${r}: ` : '', focus).text);
       }
       const diff = texts.join('\n\n');
-      const prompt = ticketsPrompt({ service: s.name, target: release.targetBranch, refs, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: refs.flatMap((r) => code.commits.get(r) ?? []), diff });
+      const prompt = ticketsPrompt({ service: s.name, target: release.targetBranch, refs, tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: refs.flatMap((r) => code.commits.get(r) ?? []), diff, flags: await this.knownFlags(release.id, s.id) });
       const out = await this.ask(live, ai, prompt);
       if (out.error) {
         read.errors.push(`${s.name}: AI gagal (${out.error}).`);
@@ -948,7 +961,8 @@ export class ReleaseManager {
     cmp.changes = await this.fillMissingDiffs(path, release.targetBranch, source, cmp.changes);
     live.job.progress = 'AI membaca diff…';
     const ref = `${path}@${source}`;
-    const out = await this.ask(live, ai, ticketsPrompt({ service: service.name, target: release.targetBranch, refs: [ref], tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: cmp.commits.map((c) => c.title), diff: diffText(cmp.changes, undefined, '', focus).text }));
+    live.job.head = cmp.commits[cmp.commits.length - 1]?.id;
+    const out = await this.ask(live, ai, ticketsPrompt({ service: service.name, target: release.targetBranch, refs: [ref], tickets: tickets.map((t) => ({ key: t.key, summary: t.summary, detail: t.detail })), commits: cmp.commits.map((c) => c.title), diff: diffText(cmp.changes, undefined, '', focus).text, flags: await this.knownFlags(release.id, service.id) }));
     if (out.error) throw new Error(`AI gagal: ${out.error}`);
     const parsed = parseTicketsReply(out.reply, tickets.map((t) => t.key), cmp.changes.map((c) => c.newPath));
     if (!parsed) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');

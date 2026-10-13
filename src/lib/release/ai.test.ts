@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MrFileChange } from '../gitlab/types';
-import { compactDiff, diffText, fileDelta, focusTerms, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
+import { AI_RULES_VERSION, compactDiff, diffText, fileDelta, focusTerms, knownFlagsText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
 
 const change = (path: string, diff: string): MrFileChange => ({ oldPath: path, newPath: path, newFile: false, renamedFile: false, deletedFile: false, diff, additions: 1, deletions: 0 });
 
@@ -45,6 +45,19 @@ describe('release AI prompts and answers', () => {
     expect(p).toMatch(/CREATE\/ALTER\/DROP TABLE/);
     expect(p).toContain('"needs"');
     expect(p).toMatch(/feature flag/i);
+  });
+
+  it("tells the AI which feature flags Cockpit made, and whether they are in the source yet", () => {
+    const flags = [
+      { name: 'TAX_ENABLE', summary: 'scheduler pajak', files: ['main.go'], mr: { ref: 'g/w!7', merged: true } },
+      { name: 'FDS_ENABLE', summary: 'laporan FDS', files: ['fds.go'], mr: { ref: 'g/w!8', merged: false } },
+    ];
+    const text = knownFlagsText(flags);
+    expect(text).toContain('TAX_ENABLE: scheduler pajak (file: main.go; MR g/w!7 sudah merged ke sumber)');
+    expect(text).toContain('MR g/w!8 masih direview, BELUM ada di sumber');
+    expect(ticketsPrompt({ service: 's', target: 'master', refs: ['r'], tickets: [], commits: [], diff: '', flags })).toContain('Feature flag yang dibuat lewat Cockpit');
+    expect(knownFlagsText([])).toBe('');
+    expect(AI_RULES_VERSION).toBeGreaterThan(1);
   });
 
   it('reads the JSON object out of a chatty or fenced reply', () => {

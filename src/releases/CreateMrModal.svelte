@@ -4,6 +4,7 @@
   import AiPicker from '../components/AiPicker.svelte';
   import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
   import { safetyOk } from '../lib/release/safety';
+  import { AI_RULES_VERSION } from '../lib/release/ai';
   import Modal from '../components/Modal.svelte';
   import DiffFile from '../mr/DiffFile.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
@@ -130,7 +131,11 @@
       }
       // The AI read of this branch: reuse the last one, else start it.
       await aiMr.load();
-      if (!(aiMr.job?.status === 'done' && aiMr.job.sourceBranch === plan.sourceBranch) && !aiMr.running && plan.files) void startAiMr();
+      // Reuse the last AI read only when it is for this branch at this commit, with today's rules
+      // (e.g. it predates the feature-flag rule, or a flag MR was merged since): else read again.
+      const last = aiMr.job;
+      const fresh = last?.status === 'done' && last.sourceBranch === plan.sourceBranch && last.rules === AI_RULES_VERSION && (!plan.headSha || last.head === plan.headSha);
+      if (!fresh && !aiMr.running && plan.files) void startAiMr();
     } catch (e) {
       error = (e as Error).message;
       plan = null;
@@ -430,7 +435,8 @@
         <div class="chips-row small">
           <span class="chip" class:good={plan.tickets.length > 0 && ticketsIn === plan.tickets.length} class:badc={ticketsMissing.length > 0}>Tiket {ticketsIn}/{plan.tickets.length} ada{aiMrDone ? ' (AI)' : aiMr.running ? ' · AI membaca…' : ''}</span>
           <span class="chip" class:badc={plan.outOfScope.length + loose.length > 0}>{plan.outOfScope.length + loose.length} di luar scope</span>
-          {#if flagged.length}<span class="chip">{flagged.length} di balik flag</span>{/if}
+          {#if flagged.length}<span class="chip good">{flagged.length} aman naik (di balik flag)</span>{/if}
+          {#if flagDone?.flag?.mr && !flagDone.flag.mr.merged}<span class="chip">flag {flagDone.flag.mr.ref} menunggu review</span>{/if}
           {#if risks.length}<span class="chip badc">{risks.length} risiko</span>{/if}
           <span class="chip">{plan.commits.length} commit · {plan.files} file</span>
           {#if onReleaseBranch}<span class="chip" class:good={safety && safetyOk(safety)} class:badc={safety && !safetyOk(safety)}>Keamanan: {aiSafety.running ? 'dicek…' : safety ? (safetyOk(safety) ? 'lolos' : 'belum') : 'belum dicek'}</span>{/if}
@@ -480,7 +486,7 @@
               <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason} <button class="link-btn small" onclick={() => flagThis(u)} title="Bungkus perubahan ini dengan feature flag (default mati) di {plan.sourceBranch}">Flag-kan</button></li>{/each}</ul>
             {/if}
             {#if flagged.length}
-              <h4>Di balik feature flag (aman ikut selama flag mati) — {flagged.length}</h4>
+              <h4>Aman naik: sudah di balik feature flag (selama flag mati) — {flagged.length}</h4>
               <ul class="small tickets">{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> — {u.reason}</li>{/each}</ul>
             {/if}
             {#if aiMrDone?.risks?.length}

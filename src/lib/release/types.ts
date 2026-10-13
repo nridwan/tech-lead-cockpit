@@ -302,8 +302,8 @@ export interface ReleaseReport {
   servicesWithoutMr: string[];
   /** The code read per service (MR diff or branch compare). */
   sources?: CodeSource[];
-  /** Set when the tickets were also read by AI. */
-  ai?: { model: string; errors: string[] };
+  /** Set when the tickets were also read by AI (with the rules version used). */
+  ai?: { model: string; errors: string[]; rules?: number };
   /** Ticket types found (before the release's type filter), with how many and whether left out. */
   types?: { type: string; count: number; excluded: boolean }[];
   /** Tickets whose title does not follow [TYPE][SERVICE][CODENAME] - Name. */
@@ -317,6 +317,8 @@ export interface ReleaseReport {
 
 /** What creating a release MR for one service would do (shown before anything is written). */
 export interface MrPlan {
+  /** Latest commit of the source in this compare: an AI result for another head is stale. */
+  headSha?: string;
   serviceId: string;
   projectPath: string;
   sourceBranch: string;
@@ -373,6 +375,9 @@ export interface ReleaseAiJob {
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */
   instruction?: string;
+  /** Rules version the AI checked with (AI_RULES_VERSION) and the source head it read. */
+  rules?: number;
+  head?: string;
   model: string;
   status: 'running' | 'done' | 'error' | 'cancelled';
   progress?: string;

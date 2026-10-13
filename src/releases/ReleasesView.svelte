@@ -4,6 +4,7 @@
   import AiPicker from '../components/AiPicker.svelte';
   import { AiJobWatch, loadReleaseAi, saveReleaseAi } from '../lib/release/ai-job.svelte';
   import { safetyOk } from '../lib/release/safety';
+  import { AI_RULES_VERSION } from '../lib/release/ai';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { estimate } from '../lib/estimate/client';
@@ -478,7 +479,10 @@
           </div>
         </div>
         <div class="actions">
-          {#if aiFind.running}
+          {#if report?.ai && report.ai.rules !== AI_RULES_VERSION && !aiCheck.running}
+          <p class="small warn-text">Hasil cek AI terakhir dibuat dengan aturan lama (mis. sebelum aturan feature flag): klik Jalankan cek lagi.</p>
+        {/if}
+        {#if aiFind.running}
             <button class="btn btn-sm" onclick={() => aiFind.cancel()}><Icon name="x" size={13} /> Batalkan pencarian</button>
           {:else}
             <button class="btn btn-sm btn-primary" onclick={startAiFind} disabled={aiCheck.running} title="AI mencari service (repo) dan MR ke branch target dari tiket rilis, daftar repo, dan MR di GitLab. Hanya menambah; service yang pernah dihapus tidak ditambah lagi."><Icon name="search" size={13} /> Cari service & MR</button>
@@ -624,7 +628,7 @@
                       {@const loose = src.aiUnrelated.filter((u) => !u.flag)}
                       {@const flagged = src.aiUnrelated.filter((u) => u.flag)}
                       {#if loose.length}<details open><summary class="warn-text">AI: {loose.length} perubahan tidak terkait tiket scope (cek apakah ikut terbawa)</summary><ul>{#each loose as u, i (i)}<li><span class="mono">{u.path}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>{/if}
-                      {#if flagged.length}<details><summary>AI: {flagged.length} perubahan tanpa tiket di balik feature flag (aman ikut selama flag mati)</summary><ul>{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>{/if}
+                      {#if flagged.length}<details open><summary>AI: {flagged.length} perubahan aman naik karena sudah di balik feature flag (selama flag mati)</summary><ul>{#each flagged as u, i (i)}<li><span class="mono">{u.path}</span> · flag <span class="mono">{u.flag}</span> <span class="muted">— {u.reason}</span></li>{/each}</ul></details>{/if}
                     {:else if src.unattributed.length}
                       <details><summary>{src.unattributed.length}{src.unattributed.length >= 30 ? '+' : ''} file tidak terkait tiket scope mana pun</summary><ul class="mono">{#each src.unattributed as f (f)}<li>{f}</li>{/each}</ul></details>
                     {/if}

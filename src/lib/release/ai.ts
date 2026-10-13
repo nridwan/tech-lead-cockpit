@@ -7,6 +7,31 @@ import type { AiPick, AiTicketVerdict, AiVerdict, PatchFile, ReleaseAiNeed, Rele
  * Every answer is JSON; anything the AI says outside it, or that does not fit, is dropped.
  */
 
+/**
+ * Version of the rules the AI checks with (prompts above). Bump it when they change: results made
+ * with older rules are then checked again instead of being reused.
+ */
+export const AI_RULES_VERSION = 2;
+
+/** Feature flags made through Cockpit for a service, for the AI to take into account. */
+export interface KnownFlag {
+  name: string;
+  summary: string;
+  files: string[];
+  /** merged = in the source already; open = still in review (not in the source yet). */
+  mr?: { ref: string; merged: boolean };
+}
+
+/** The known flags as prompt lines. */
+export function knownFlagsText(flags: KnownFlag[]): string {
+  if (!flags.length) return '';
+  return [
+    'Feature flag yang dibuat lewat Cockpit untuk service ini:',
+    ...flags.map((f) => `- ${f.name}${f.summary ? `: ${f.summary}` : ''} (file: ${f.files.join(', ') || '-'}; ${f.mr ? (f.mr.merged ? `MR ${f.mr.ref} sudah merged ke sumber` : `MR ${f.mr.ref} masih direview, BELUM ada di sumber`) : 'belum dibuat MR-nya'})`),
+    'Perubahan fitur yang dijaga flag yang sudah merged: tandai "flag" dengan namanya (aman naik). Yang flag-nya belum merged: JANGAN tandai flag; sebut di reason bahwa flag-nya masih di MR/belum dibuat.',
+  ].join('\n');
+}
+
 /** Diff text sent per AI call; files beyond it are listed by name only. */
 export const AI_DIFF_BUDGET = 180_000;
 const FILE_CAP = 20_000;
@@ -153,7 +178,7 @@ export interface AiTicketInput {
   detail?: string;
 }
 
-export function ticketsPrompt(input: { service: string; target: string; refs: string[]; tickets: AiTicketInput[]; commits: string[]; diff: string }): string {
+export function ticketsPrompt(input: { service: string; target: string; refs: string[]; tickets: AiTicketInput[]; commits: string[]; diff: string; flags?: KnownFlag[] }): string {
   return [
     `Service: ${input.service}`,
     `Kode yang akan dirilis ke ${input.target}: ${input.refs.join(', ')}`,
@@ -167,6 +192,7 @@ export function ticketsPrompt(input: { service: string; target: string; refs: st
     'Diff (baris + ditambah, - dihapus):',
     input.diff,
     '',
+    ...(input.flags?.length ? [knownFlagsText(input.flags), ''] : []),
     'Tugas: untuk SETIAP tiket di atas, nilai apakah implementasinya ada di diff.',
     '- "ada": implementasi utama tiket terlihat (endpoint/handler/model/config sesuai tiket).',
     '- "sebagian": hanya sebagian yang terlihat, atau ragu.',
