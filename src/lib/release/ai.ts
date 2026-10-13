@@ -610,7 +610,7 @@ export function parseSafetyReply(reply: string): { verdict: 'aman' | 'perlu dice
 }
 
 /** "Generate dokumen": what the server needs for one service's release MRs, from their diff. */
-export function docgenPrompt(input: { service: string; target: string; mrs: string[]; diff: string; current: { envBlock?: string; failover?: string } }): string {
+export function docgenPrompt(input: { service: string; target: string; mrs: string[]; diff: string; current: { envBlock?: string; failover?: string; imported?: { kind: string; label: string; sql?: string }[] } }): string {
   return [
     `Service: ${input.service}. MR rilis ke ${input.target}: ${input.mrs.join(', ')}.`,
     'Susun bagian dokumen deployment service ini dari ISI DIFF MR (bukan judul/commit).',
@@ -618,6 +618,13 @@ export function docgenPrompt(input: { service: string; target: string; mrs: stri
     'Blok .env di dokumen saat ini:',
     input.current.envBlock?.trim() || '(kosong)',
     `Failover saat ini: ${input.current.failover ?? '(default)'}`,
+    ...(input.current.imported?.length
+      ? [
+          '',
+          'Query/migrasi dari dokumen yang DIIMPORT (bisa sisa dokumen rilis lama). Masukkan lagi ke "needs" HANYA bila diff MR ini memang membutuhkannya (tabel/kolom/data yang dipakai kode di diff); yang tidak terkait jangan dimasukkan, nanti dibuang:',
+          ...input.current.imported.map((q) => `- [${q.kind}] ${q.label}${q.sql ? `\n${q.sql.slice(0, 3000)}` : ''}`),
+        ]
+      : []),
     '',
     'Diff MR (baris + ditambah, - dihapus):',
     input.diff,

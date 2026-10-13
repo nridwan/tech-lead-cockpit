@@ -1183,15 +1183,21 @@ export class ReleaseManager {
       }
       const changes: MrFileChange[] = [];
       for (const d of details) changes.push(...(await this.fillMissingDiffs(d.projectPath, d.targetBranch, d.sourceBranch, d.changes)));
-      const out = await this.ask(live, ai, docgenPrompt({ service: s.name, target: release.targetBranch, mrs: details.map((d) => d.ref), diff: diffText(changes).text, current: { envBlock: s.envBlock, failover: s.failover } }));
+      const mineOf = (x: ReleaseItem) => x.service !== undefined && sameService(x.service, s.name);
+      // Queries/migrations from an imported document may be left over from another release: the AI
+      // keeps them only when this MR's code needs them.
+      const imported = items.filter((x) => mineOf(x) && x.source === 'import' && x.kind !== 'env').map((x) => ({ kind: x.kind, label: x.label, ...(x.detail ? { sql: x.detail } : {}) }));
+      const out = await this.ask(live, ai, docgenPrompt({ service: s.name, target: release.targetBranch, mrs: details.map((d) => d.ref), diff: diffText(changes).text, current: { envBlock: s.envBlock, failover: s.failover, imported } }));
       const parsed = out.error ? null : parseDocgenReply(out.reply, changes.map((c) => c.newPath));
       if (!parsed) {
         notes.push(`${s.name}: ${out.error ? `AI gagal (${out.error})` : 'jawaban AI tidak terbaca'}; bagian dokumennya tidak diubah.`);
         continue;
       }
-      // Replace what an earlier generate (or check) wrote for this service; typed/imported items stay.
-      const mine = (x: ReleaseItem) => x.service !== undefined && sameService(x.service, s.name);
-      items = items.filter((x) => !(mine(x) && (x.source === 'ai' || x.source === 'check')));
+      // Replace what an earlier generate, a check or an import wrote for this service (the AI was
+      // shown the imported queries and put back the ones the code needs); typed items stay.
+      const mine = mineOf;
+      const dropped = items.filter((x) => mine(x) && x.source === 'import' && x.kind !== 'env').map((x) => x.label);
+      items = items.filter((x) => !(mine(x) && (x.source === 'ai' || x.source === 'check' || (x.source === 'import' && x.kind !== 'env'))));
       const add = (x: Omit<ReleaseItem, 'id' | 'done'>) => {
         const same = items.find((y) => y.kind === x.kind && mine(y) && (y.label.toLowerCase() === x.label.toLowerCase()));
         if (same) {
@@ -1222,6 +1228,9 @@ export class ReleaseManager {
         }
         add({ kind: n.kind, label: n.label, service: s.name, ...(n.detail && n.kind !== 'env' ? { detail: n.detail } : {}), ...(note ? { note } : {}), source: 'ai' });
       }
+      const kept = new Set(parsed.needs.map((n) => n.label.toLowerCase()));
+      const gone = dropped.filter((l) => !kept.has(l.toLowerCase()));
+      if (gone.length) notes.push(`${s.name}: query/migrasi dari dokumen import yang tidak dibutuhkan kode MR dibuang: ${gone.join(', ')}.`);
       const merged = details.find((d) => d.state === 'merged' && d.mergeCommitSha);
       updates.set(s.id, { preDeploy: addLines([], pre), postDeploy: addLines([], post), ...(parsed.failover ? { failover: parsed.failover } : {}), ...(merged ? { releaseCommit: merged.mergeCommitSha } : {}) });
     }

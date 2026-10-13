@@ -325,11 +325,15 @@ describe('ReleaseManager', () => {
     const untouched = await m.get(r.id);
     expect([untouched.items, untouched.services[0].envBlock, untouched.services[0].postDeploy]).toEqual([[], undefined, undefined]);
 
+    // A query left over from an imported old document: shown to the AI, dropped when the code does not need it.
+    await m.store.save({ ...(await m.get(r.id)), items: [{ id: 'old', kind: 'sql', label: 'Update Table', service: 'core-payment', detail: 'ALTER TABLE old_table DROP CONSTRAINT x;', source: 'import', done: false }] });
     // "Generate dokumen": from the release MR, into the document.
     replies.push(JSON.stringify({ needs: [{ kind: 'sql', when: 'pre', label: 'Buat tabel refund_logs', detail: 'CREATE TABLE refund_logs (id bigint);', files: ['api/refund.go'] }, { kind: 'env', when: 'pre', label: 'REFUND_MAX', files: [] }, { kind: 'other', when: 'post', label: 'Smoke test refund', files: [] }], failover: '' }));
     await m.aiStart(r.id, 'docgen', { ai });
     expect((await settle('docgen')).status).toBe('done');
     expect(prompts[1]).toContain('+func RefundApi()');
+    expect(prompts[1]).toContain('ALTER TABLE old_table');
+    expect((await m.aiJob(r.id, 'docgen'))?.notes?.join(' ')).toContain('dibuang: Update Table');
     const saved = await m.get(r.id);
     expect(saved.items.map((i) => [i.kind, i.label, i.source, i.detail])).toEqual([['sql', 'Buat tabel refund_logs', 'ai', 'CREATE TABLE refund_logs (id bigint);']]);
     expect(saved.services[0].envBlock?.split('\n')).toContain('REFUND_MAX=');
