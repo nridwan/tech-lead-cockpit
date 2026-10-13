@@ -326,9 +326,12 @@
   );
   const flagDone = $derived(aiFlag.job?.status === 'done' ? aiFlag.job : null);
 
-  function flagThis(u: { path: string; reason: string }) {
-    flagPaths = [...new Set([...flagPaths, u.path])];
-    flagWhat = flagWhat.trim() ? `${flagWhat.trim()}\n${u.path}: ${u.reason}` : `${u.path}: ${u.reason}`;
+  /** Adds changes to the flag panel (one, or all at once); the AI groups them per feature. */
+  function flagThis(...items: { path: string; reason: string }[]) {
+    const fresh = items.filter((u) => !flagPaths.includes(u.path));
+    flagPaths = [...new Set([...flagPaths, ...items.map((u) => u.path)])];
+    const lines = fresh.map((u) => `${u.path}: ${u.reason}`);
+    if (lines.length) flagWhat = [flagWhat.trim(), ...lines].filter(Boolean).join('\n');
     queueMicrotask(() => document.getElementById('flag-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
 
@@ -341,7 +344,7 @@
   async function makeFlagMr() {
     const f = flagDone?.flag;
     if (!f) return;
-    const ok = await confirmDialog({ title: `Buat branch & MR feature flag ke ${f.base}?`, message: `Branch dari ${f.base} berisi ${f.files.length} file yang diubah AI (flag ${f.name}, default mati), lalu MR ke ${f.base} dibuat atas nama token GitLab kamu.`, confirmText: 'Buat branch & MR' });
+    const ok = await confirmDialog({ title: `Buat branch & MR feature flag ke ${f.base}?`, message: `Branch dari ${f.base} berisi ${f.files.length} file yang diubah AI (${f.flags && f.flags.length > 1 ? `${f.flags.length} flag: ${f.name}` : `flag ${f.name}`}, default mati), lalu satu MR ke ${f.base} dibuat atas nama token GitLab kamu untuk direview.`, confirmText: 'Buat branch & MR' });
     if (!ok) return;
     flagBusy = 'mr';
     try {
@@ -459,7 +462,7 @@
               {/each}
             </ul>
             {#if loose.length}
-              <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length}</h4>
+              <h4 class="w">Perubahan tanpa tiket (AI) — {loose.length} <button class="link-btn small" onclick={() => flagThis(...loose)} title="Masukkan semua ke panel Feature flag; AI membuat satu flag per fitur dalam satu MR">Flag-kan semua ({loose.length})</button></h4>
               <ul class="small tickets">{#each loose as u, i (i)}<li class="missing"><span class="mono">{u.path}</span> — {u.reason} <button class="link-btn small" onclick={() => flagThis(u)} title="Bungkus perubahan ini dengan feature flag (default mati) di {plan.sourceBranch}">Flag-kan</button></li>{/each}</ul>
             {/if}
             {#if flagged.length}
@@ -488,7 +491,7 @@
             <h4>Feature flag</h4>
             <p class="muted small">Fitur di branch sumber yang bukan bagian rilis bisa dibungkus feature flag (default mati) lewat MR ke branch sumbernya. MR-nya direview dan di-merge di GitLab; setelah itu fiturnya boleh ikut naik tanpa aktif.</p>
             <textarea class="input pick-ins" rows="2" bind:value={flagWhat} placeholder="Fitur yang mau di-flag, mis. scheduler laporan pajak di core/scheduler/tax_transaction_scheduler.go"></textarea>
-            {#if flagPaths.length}<div class="small">File: {#each flagPaths as p (p)}<span class="tag mono">{p} <button class="link-btn" onclick={() => (flagPaths = flagPaths.filter((x) => x !== p))} aria-label="Hapus {p}">✕</button></span> {/each}</div>{/if}
+            {#if flagPaths.length}<div class="small">File ({flagPaths.length}): {#each flagPaths as p (p)}<span class="tag mono">{p} <button class="link-btn" onclick={() => (flagPaths = flagPaths.filter((x) => x !== p))} aria-label="Hapus {p}">✕</button></span> {/each} <button class="link-btn" onclick={() => ((flagPaths = []), (flagWhat = ''))}>kosongkan</button></div>{/if}
             <div class="row">
               <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiFlag.running} />
               {#if aiFlag.running}
@@ -501,7 +504,12 @@
             {#if flagDone?.flag}
               {@const fl = flagDone.flag}
               <div class="pfile">
-                <div class="small"><strong>Flag <span class="mono">{fl.name}</span></strong> (default mati) di <span class="mono">{fl.base}</span>{fl.summary ? ` — ${fl.summary}` : ''}</div>
+                {#if fl.flags && fl.flags.length > 1}
+                  <div class="small"><strong>{fl.flags.length} flag</strong> (default mati) di <span class="mono">{fl.base}</span>, dalam satu MR:</div>
+                  <ul class="small">{#each fl.flags as one (one.name)}<li><span class="mono">{one.name}</span>{one.summary ? ` — ${one.summary}` : ''}</li>{/each}</ul>
+                {:else}
+                  <div class="small"><strong>Flag <span class="mono">{fl.name}</span></strong> (default mati) di <span class="mono">{fl.base}</span>{fl.flags?.[0]?.summary ? ` — ${fl.flags[0].summary}` : fl.summary ? ` — ${fl.summary}` : ''}</div>
+                {/if}
                 {#if flagDone.notes?.length}<ul class="small ai-notes">{#each flagDone.notes as n, i (i)}<li>{n}</li>{/each}</ul>{/if}
                 {#if fl.problems.length}<ul class="small err-text">{#each fl.problems as pr, i (i)}<li>{pr}</li>{/each}</ul>{/if}
                 {#each fl.files as ff (ff.path)}

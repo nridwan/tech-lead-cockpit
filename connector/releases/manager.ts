@@ -665,7 +665,7 @@ export class ReleaseManager {
       progress: 'Menyiapkan…',
       createdAt: this.now(),
     };
-    const paths = (opts.paths ?? []).map((p) => String(p).trim()).filter((p) => p && !p.includes('..') && !p.startsWith('/')).slice(0, 8);
+    const paths = (opts.paths ?? []).map((p) => String(p).trim()).filter((p) => p && !p.includes('..') && !p.startsWith('/')).slice(0, 20);
     const live: AiLive = { job, ...(paths.length ? { paths } : {}) };
     this.aiLive.set(key, live);
     await this.saveAiJob(job);
@@ -1082,14 +1082,20 @@ export class ReleaseManager {
     if (!gitlab?.compare || !gitlab.rawFile) throw new Error('GitLab belum terhubung.');
     live.job.progress = `Membaca fitur di ${base}…`;
     const cmp = await gitlab.compare(path, release.targetBranch, base);
-    const wanted = live.paths?.length ? cmp.changes.filter((c) => live.paths!.includes(c.newPath)) : cmp.changes.filter((c) => !BINARY_PATH.test(c.newPath)).slice(0, 8);
+    const wanted = live.paths?.length ? cmp.changes.filter((c) => live.paths!.includes(c.newPath)) : cmp.changes.filter((c) => !BINARY_PATH.test(c.newPath)).slice(0, 20);
     const current = new Map<string, string | undefined>();
     const read = async (p: string) => {
       if (current.has(p)) return;
       const text = await gitlab.rawFile!(path, p, base).catch(() => undefined);
       current.set(p, text !== undefined && text.length <= 150_000 ? text : undefined);
     };
-    for (const p of [...new Set([...(live.paths ?? []), ...wanted.map((c) => c.newPath)])].slice(0, 8)) await read(p);
+    // Several features at once: up to 20 files, about 400 KB of code in the prompt.
+    let budget = 400_000;
+    for (const p of [...new Set([...(live.paths ?? []), ...wanted.map((c) => c.newPath)])].slice(0, 20)) {
+      await read(p);
+      const t = current.get(p);
+      if (t !== undefined && (budget -= t.length) < 0) current.set(p, undefined);
+    }
     // The repo's own flag style: env example files and lines that read env/flags.
     const examples = ['.env.example', '.env.sample', 'env.example', '.env.dist'];
     for (const p of examples) await read(p);
@@ -1106,7 +1112,8 @@ export class ReleaseManager {
     if (!plan) throw new Error('Jawaban AI tidak terbaca sebagai JSON.');
     for (const e of plan.edits) if (e.find) await read(e.path);
     const applied = applyFlagEdits(plan.edits, current);
-    live.job.flag = { name: plan.flag || 'FEATURE_ENABLE', base, summary: plan.summary, files: applied.files, problems: applied.problems };
+    const names = plan.flags.map((f) => f.name);
+    live.job.flag = { name: names.join(', ') || 'FEATURE_ENABLE', base, summary: plan.flags.map((f) => (f.summary ? `${f.name}: ${f.summary}` : f.name)).join('; '), flags: plan.flags, files: applied.files, problems: applied.problems };
     live.job.notes = plan.notes;
   }
 
@@ -1130,11 +1137,11 @@ export class ReleaseManager {
       const now = await gitlab.rawFile(path, f.path, flag.base).catch(() => undefined);
       if (f.baseHash && textHash(now) !== f.baseHash) throw new ReleaseInputError(`${f.path} di ${flag.base} sudah berubah sejak feature flag disusun; susun ulang supaya tidak menimpa perubahan lain.`);
     }
-    const branch = flagBranchName(flag.name);
+    const branch = flagBranchName(flag.flags?.map((f) => f.name) ?? flag.name);
     if (await gitlab.branchExists(path, branch)) throw new ReleaseInputError(`Branch ${branch} sudah ada di ${path}.`);
     await gitlab.commitFiles(path, { branch, start: flag.base, message: `Feature flag ${flag.name}${flag.summary ? `: ${flag.summary.slice(0, 200)}` : ''}`, actions: flag.files.map((f) => ({ action: f.status, path: f.path, content: f.content })) });
     const existing = await gitlab.openMrFor?.(path, branch, flag.base).catch(() => undefined);
-    const mr = existing ?? (await gitlab.createMr(path, { source: branch, target: flag.base, title: `[${flag.base.toUpperCase()}] - Feature flag ${flag.name}`, description: '' }));
+    const mr = existing ?? (await gitlab.createMr(path, { source: branch, target: flag.base, title: `[${flag.base.toUpperCase()}] - Feature flag ${flag.name}`.slice(0, 250), description: '' }));
     await this.saveAiJob({ ...job, flag: { ...flag, mr: { ref: mr.ref, webUrl: mr.webUrl, branch } } });
     return { branch, ref: mr.ref, webUrl: mr.webUrl, created: !existing };
   }

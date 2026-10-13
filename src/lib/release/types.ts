@@ -384,7 +384,7 @@ export interface ReleaseAiJob {
   /** document: proposed fixes per service, applied only when the user confirms. */
   fixes?: ReleaseDocFix[];
   /** flag: a feature flag the AI wrote for a feature outside the release, not yet written to GitLab. */
-  flag?: { name: string; base: string; summary: string; files: FlagFile[]; problems: string[]; mr?: FlagMr };
+  flag?: { name: string; base: string; summary: string; flags?: { name: string; summary: string }[]; files: FlagFile[]; problems: string[]; mr?: FlagMr };
   /** safety: the release branch's safety layers. */
   safety?: SafetyResult;
   /** patch: the changed files split in hunks, with the AI's choice per hunk. */

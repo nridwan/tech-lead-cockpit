@@ -17,8 +17,8 @@ export interface FlagEdit {
 }
 
 export interface FlagPlan {
-  flag: string;
-  summary: string;
+  /** One flag per feature (several features can be flagged at once). */
+  flags: { name: string; summary: string }[];
   edits: FlagEdit[];
   notes: string[];
 }
@@ -27,7 +27,7 @@ export function flagPrompt(input: { repo: string; base: string; target: string; 
   return [
     `Repo: ${input.repo}. Fitur berikut ada di ${input.base} tapi BUKAN bagian rilis ke ${input.target}. Bungkus fitur itu dengan feature flag supaya ${input.base} bisa naik ke ${input.target} tanpa fitur itu aktif.`,
     '',
-    `Yang harus di-flag: ${input.what}`,
+    `Yang harus di-flag (bisa beberapa fitur): ${input.what}`,
     '',
     `Perubahan fitur itu (${input.target} → ${input.base}):`,
     input.diff || '(tidak ada diff)',
@@ -39,6 +39,7 @@ export function flagPrompt(input: { repo: string; base: string; target: string; 
     ...input.files.map((f) => `### ${f.path}\n${f.content}`),
     '',
     'Aturan:',
+    '- Kelompokkan per FITUR: satu flag per fitur (perubahan yang saling terkait = satu fitur). Jangan satu flag per file bila filenya bagian fitur yang sama.',
     '- Default MATI: tanpa env/config diset, perilaku fitur sama sekali tidak jalan (route tidak terdaftar, scheduler tidak start, handler menolak, UI tidak tampil).',
     '- Perubahan sekecil mungkin: bungkus titik masuk fitur (registrasi route/cron/consumer/menu, pemanggilan utama), jangan ubah logika fitur.',
     '- Ikuti gaya kode dan bahasa file. Tambahkan nama flag ke .env.example (atau file contoh config yang ada) dengan nilai mati.',
@@ -46,14 +47,18 @@ export function flagPrompt(input: { repo: string; base: string; target: string; 
     '- Bila fitur tidak bisa di-flag dengan aman (mis. perubahan skema/kontrak data, reformat file config besar), jangan buat edit; jelaskan di notes.',
     '',
     'Skema jawaban:',
-    '{"flag":"NAMA_FLAG","summary":"...","edits":[{"path":"path/file","find":"...","replace":"..."}],"notes":["..."]}',
+    '{"flags":[{"flag":"NAMA_FLAG","summary":"fitur yang dijaga"}],"edits":[{"path":"path/file","find":"...","replace":"..."}],"notes":["..."]}',
   ].join('\n');
 }
 
 export function parseFlagReply(reply: string): FlagPlan | null {
   const json = parseJsonReply(reply);
   if (!json) return null;
-  const flag = typeof json.flag === 'string' ? json.flag.trim().slice(0, 80) : '';
+  const one = (f: unknown, summary?: unknown) => ({ name: typeof f === 'string' ? f.trim().slice(0, 80) : '', summary: typeof summary === 'string' ? summary.slice(0, 500) : '' });
+  // Several flags ("flags"), or one ("flag") from an older answer shape.
+  const flags = (Array.isArray(json.flags) ? json.flags.map((f) => one((f as Record<string, unknown>).flag ?? (f as Record<string, unknown>).name, (f as Record<string, unknown>).summary)) : [one(json.flag, json.summary)])
+    .filter((f) => f.name)
+    .slice(0, 10);
   const edits = (Array.isArray(json.edits) ? json.edits : [])
     .map((e) => {
       const r = e as Record<string, unknown>;
@@ -62,7 +67,7 @@ export function parseFlagReply(reply: string): FlagPlan | null {
     .filter((e) => e.path && !e.path.includes('..') && !e.path.startsWith('/'))
     .slice(0, 30);
   const notes = (Array.isArray(json.notes) ? json.notes : []).filter((n): n is string => typeof n === 'string').map((n) => n.slice(0, 500)).slice(0, 15);
-  return { flag, summary: typeof json.summary === 'string' ? json.summary.slice(0, 800) : '', edits, notes };
+  return { flags, edits, notes };
 }
 
 /**
@@ -113,8 +118,13 @@ export function textHash(text: string | undefined): string {
   return `${text.length}:${(h >>> 0).toString(36)}`;
 }
 
-/** A branch name for the flag: feature-flag/tax-scheduler-enable. */
-export const flagBranchName = (flag: string) =>
+/** A branch name for the flags: feature-flag/tax-scheduler-enable, or …/tax-scheduler-enable-dan-2-lainnya. */
+export const flagBranchName = (flags: string | string[]) => {
+  const list = (Array.isArray(flags) ? flags : [flags]).filter(Boolean);
+  return slugBranch(list.length > 1 ? `${list[0]}-dan-${list.length - 1}-lainnya` : (list[0] ?? ''));
+};
+
+const slugBranch = (flag: string) =>
   `feature-flag/${flag
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')

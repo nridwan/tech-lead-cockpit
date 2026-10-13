@@ -14,8 +14,7 @@ describe('feature flag', () => {
   it('applies edits only when their text is found exactly once', () => {
     const plan = parseFlagReply(
       JSON.stringify({
-        flag: 'TAX_SCHEDULER_ENABLE',
-        summary: 'scheduler pajak hanya jalan bila flag hidup',
+        flags: [{ flag: 'TAX_SCHEDULER_ENABLE', summary: 'scheduler pajak' }, { flag: 'FDS_WINDOW_ENABLE', summary: 'laporan FDS per jendela' }, { flag: '' }],
         edits: [
           { path: 'main.go', find: '\tc.AddFunc(cfg.Tax, scheduler.TaxReport)', replace: '\tif os.Getenv("TAX_SCHEDULER_ENABLE") == "true" {\n\t\tc.AddFunc(cfg.Tax, scheduler.TaxReport)\n\t}' },
           { path: '.env.example', find: 'A=1', replace: 'A=1\nTAX_SCHEDULER_ENABLE=false' },
@@ -25,6 +24,9 @@ describe('feature flag', () => {
         ],
       }),
     )!;
+    // One flag per feature; all of them in one change.
+    expect(plan.flags).toEqual([{ name: 'TAX_SCHEDULER_ENABLE', summary: 'scheduler pajak' }, { name: 'FDS_WINDOW_ENABLE', summary: 'laporan FDS per jendela' }]);
+    expect(parseFlagReply(JSON.stringify({ flag: 'OLD_ENABLE', summary: 'x', edits: [] }))!.flags).toEqual([{ name: 'OLD_ENABLE', summary: 'x' }]);
     expect(plan.edits.map((e) => e.path)).toEqual(['main.go', '.env.example', 'main.go', 'docs/flag.md']);
     const r = applyFlagEdits(plan.edits, new Map([['main.go', MAIN], ['.env.example', 'A=1']]));
     expect(r.files.map((f) => [f.path, f.status])).toEqual([
@@ -46,6 +48,7 @@ describe('feature flag', () => {
   it('names the branch after the flag', () => {
     expect(flagBranchName('TAX_SCHEDULER_ENABLE')).toBe('feature-flag/tax-scheduler-enable');
     expect(flagBranchName('***')).toBe('feature-flag/baru');
+    expect(flagBranchName(['TAX_ENABLE', 'FDS_ENABLE', 'KYC_ENABLE'])).toBe('feature-flag/tax-enable-dan-2-lainnya');
     expect(textHash('a')).not.toBe(textHash('b'));
     expect(textHash(undefined)).toBe('none');
   });
