@@ -10,7 +10,7 @@ import { RELEASE_AI_SYSTEM, diffText, discoverPrompt, fileDelta, focusTerms, hun
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { fileProblems, notFromSource, type SafetyIssue } from '../../src/lib/release/safety.ts';
-import { applyFlagEdits, flagBranchName, flagPrompt, parseFlagReply, textHash } from '../../src/lib/release/flag.ts';
+import { applyFlagEdits, flagBranchName, flagPrompt, parseFlagReply, promptPaths, rankByPrompt, textHash } from '../../src/lib/release/flag.ts';
 import { applyFileHunks, fileHunks, hunkNumber, hunkPath, jsonChanges, jsonProblem, locateRoutes, patchFile, resultDelta, type FileHunks } from '../../src/lib/release/patch.ts';
 import { FRONT_SUFFIXES, belongsTo, buildReport, codeKeys, forCurrentServices, isFrontTicket, ticketType, typeInScope, matchesCodename, sameService, ticketService, type ReleaseTicket } from '../../src/lib/release/coverage.ts';
 import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, type FileText } from '../../src/lib/release/evidence.ts';
@@ -1082,7 +1082,11 @@ export class ReleaseManager {
     if (!gitlab?.compare || !gitlab.rawFile) throw new Error('GitLab belum terhubung.');
     live.job.progress = `Membaca fitur di ${base}…`;
     const cmp = await gitlab.compare(path, release.targetBranch, base);
-    const wanted = live.paths?.length ? cmp.changes.filter((c) => live.paths!.includes(c.newPath)) : cmp.changes.filter((c) => !BINARY_PATH.test(c.newPath)).slice(0, 20);
+    // Files picked in the UI, files the prompt names (changed or not), else the changed files that
+    // match the prompt best: a prompt alone is enough.
+    const named = promptPaths(instruction);
+    const chosen = [...(live.paths ?? []), ...named];
+    const wanted = chosen.length ? cmp.changes.filter((c) => chosen.includes(c.newPath)) : rankByPrompt(cmp.changes.filter((c) => !BINARY_PATH.test(c.newPath)), instruction).slice(0, 20);
     const current = new Map<string, string | undefined>();
     const read = async (p: string) => {
       if (current.has(p)) return;
@@ -1091,7 +1095,7 @@ export class ReleaseManager {
     };
     // Several features at once: up to 20 files, about 400 KB of code in the prompt.
     let budget = 400_000;
-    for (const p of [...new Set([...(live.paths ?? []), ...wanted.map((c) => c.newPath)])].slice(0, 20)) {
+    for (const p of [...new Set([...chosen, ...wanted.map((c) => c.newPath)])].slice(0, 20)) {
       await read(p);
       const t = current.get(p);
       if (t !== undefined && (budget -= t.length) < 0) current.set(p, undefined);

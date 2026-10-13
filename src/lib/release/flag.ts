@@ -130,3 +130,28 @@ const slugBranch = (flag: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60) || 'baru'}`;
+
+/** File paths written in a prompt ("… di core/scheduler/tax.go …"). */
+export function promptPaths(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/(?:^|[\s"'`(])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z0-9]{1,8})(?=$|[\s"'`),:;])/g)) {
+    const p = m[1].replace(/^\.\//, '');
+    if (!p.includes('..') && !p.startsWith('/') && /[A-Za-z]/.test(p.split('.').pop() ?? '')) out.add(p);
+  }
+  return [...out].slice(0, 20);
+}
+
+/**
+ * Changed files ordered by how well they match a prompt: words of the prompt (4+ letters) in the
+ * path count most, in the diff less. Files with no match keep their order after the others.
+ */
+export function rankByPrompt<T extends { newPath: string; diff: string }>(changes: T[], prompt: string): T[] {
+  const words = [...new Set(prompt.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4))];
+  if (!words.length) return changes;
+  const score = (c: T) => {
+    const path = c.newPath.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const diff = c.diff.toLowerCase();
+    return words.reduce((n, w) => n + (path.includes(w) ? 3 : 0) + (diff.includes(w) ? 1 : 0), 0);
+  };
+  return changes.map((c, i) => ({ c, i, s: score(c) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.c);
+}

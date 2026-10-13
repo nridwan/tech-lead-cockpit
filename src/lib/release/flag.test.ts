@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFlagEdits, flagBranchName, flagPrompt, parseFlagReply, textHash } from './flag';
+import { applyFlagEdits, flagBranchName, flagPrompt, parseFlagReply, promptPaths, rankByPrompt, textHash } from './flag';
 
 const MAIN = ['func main() {', '\tc := cron.New()', '\tc.AddFunc(cfg.Tax, scheduler.TaxReport)', '\tc.Start()', '}'].join('\n');
 
@@ -43,6 +43,18 @@ describe('feature flag', () => {
   it('refuses an ambiguous edit and a broken JSON result', () => {
     const r = applyFlagEdits([{ path: 'a.go', find: 'x', replace: 'y' }, { path: 'c.json', find: '"a": 1', replace: '"a": 1,' }], new Map([['a.go', 'x x'], ['c.json', '{"a": 1}']]));
     expect(r.problems).toEqual(['a.go: potongan yang diganti muncul lebih dari sekali; edit dilewati.', expect.stringMatching(/c\.json bukan JSON valid/)]);
+  });
+
+  it('works from a prompt alone: named files, else the changed files that match it best', () => {
+    expect(promptPaths('flag scheduler pajak di core/scheduler/tax_scheduler.go dan main.go, juga "config/app.yaml".')).toEqual(['core/scheduler/tax_scheduler.go', 'main.go', 'config/app.yaml']);
+    expect(promptPaths('versi 1.2 dan ../etc/passwd.txt')).toEqual([]);
+    const ch = [
+      { newPath: 'go.mod', diff: '+x' },
+      { newPath: 'core/fds/report.go', diff: '+window' },
+      { newPath: 'core/scheduler/tax_scheduler.go', diff: '+func GenerateDailyTaxReport' },
+    ];
+    expect(rankByPrompt(ch, 'scheduler laporan pajak (tax) harian').map((c) => c.newPath)[0]).toBe('core/scheduler/tax_scheduler.go');
+    expect(rankByPrompt(ch, '').map((c) => c.newPath)).toEqual(['go.mod', 'core/fds/report.go', 'core/scheduler/tax_scheduler.go']);
   });
 
   it('names the branch after the flag', () => {

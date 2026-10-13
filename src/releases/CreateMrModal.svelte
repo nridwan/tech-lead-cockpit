@@ -490,7 +490,7 @@
           <section class="flag" id="flag-panel">
             <h4>Feature flag</h4>
             <p class="muted small">Fitur di branch sumber yang bukan bagian rilis bisa dibungkus feature flag (default mati) lewat MR ke branch sumbernya. MR-nya direview dan di-merge di GitLab; setelah itu fiturnya boleh ikut naik tanpa aktif.</p>
-            <textarea class="input pick-ins" rows="2" bind:value={flagWhat} placeholder="Fitur yang mau di-flag, mis. scheduler laporan pajak di core/scheduler/tax_transaction_scheduler.go"></textarea>
+            <textarea class="input pick-ins" rows="2" bind:value={flagWhat} placeholder="Tulis fitur yang mau di-flag (cukup prompt, tanpa memilih item), mis. scheduler laporan pajak dan laporan FDS per jendela waktu. Sebut path file bila tahu."></textarea>
             {#if flagPaths.length}<div class="small">File ({flagPaths.length}): {#each flagPaths as p (p)}<span class="tag mono">{p} <button class="link-btn" onclick={() => (flagPaths = flagPaths.filter((x) => x !== p))} aria-label="Hapus {p}">✕</button></span> {/each} <button class="link-btn" onclick={() => ((flagPaths = []), (flagWhat = ''))}>kosongkan</button></div>{/if}
             <div class="row">
               <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={aiFlag.running} />
