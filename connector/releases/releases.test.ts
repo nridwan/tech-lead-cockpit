@@ -172,15 +172,12 @@ describe('ReleaseManager', () => {
     expect(report.outOfScope).toEqual([{ key: 'MU-77', summary: '[WEB-FE][PORTAL][PROMO] - Banner', status: 'In Progress', codename: 'PROMO', mrs: ['payments/core-payment!12'], commits: ['MU-77 banner promo'] }]);
     expect(report.scope).toMatchObject({ tickets: 3, inCode: 3, carried: 1, matched: false });
     expect(report.mrs[0]).toMatchObject({ envAdded: ['REFUND_LIMIT'], approvals: { count: 1 } });
-    // Env found in the code goes straight into each service's .env block of the document.
+    // The check writes nothing to the document ("Generate dokumen" does).
     expect(release.items).toEqual([]);
-    expect(release.services.map((s) => [s.name, s.envBlock])).toEqual([
-      ['CORE-PAYMENT', 'REFUND_LIMIT='],
-      ['MOBILE-APP', 'REFUND_LIMIT='],
-    ]);
+    expect(release.services.map((s) => s.envBlock)).toEqual([undefined, undefined]);
     expect(await m.report(r.id)).toMatchObject({ releaseId: r.id });
 
-    // Discovering again adds nothing twice; checking again keeps a value typed in the .env block.
+    // Discovering again adds nothing twice; checking again leaves the document alone.
     expect((await m.discover(r.id)).addedMrs).toBe(0);
     await m.store.save({ ...release, services: release.services.map((s) => ({ ...s, envBlock: 'REFUND_LIMIT=5' })) });
     expect((await m.check(r.id)).release.services[0].envBlock).toBe('REFUND_LIMIT=5');
@@ -293,7 +290,7 @@ describe('ReleaseManager', () => {
     const mr = { ref: 'payments/core-payment!12', projectPath: 'payments/core-payment', iid: 12, webUrl: 'https://gitlab.example.com/payments/core-payment/-/merge_requests/12', via: 'auto' as const };
     const r = await m.store.save({ name: 'Switching', projectIds: ['p1'], services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [mr], order: 1 }] } as never);
     const ai = { provider: 'claude' as const, model: 'x' };
-    const settle = async (kind: 'tickets' | 'picks' | 'document', serviceId?: string) => {
+    const settle = async (kind: 'tickets' | 'picks' | 'document' | 'docgen', serviceId?: string) => {
       for (let i = 0; i < 50; i++) {
         const j = await m.aiJob(r.id, kind, serviceId);
         if (j && j.status !== 'running') return j;
@@ -322,22 +319,31 @@ describe('ReleaseManager', () => {
     expect(report.ai?.model).toBe('claude/x');
     expect(report.tickets.find((t) => t.key === 'MU-12')).toMatchObject({ inMrs: ['payments/core-payment!12'], ai: { verdict: 'ada' } });
     expect(report.sources?.[0].aiUnrelated).toEqual([{ path: 'api/promo.go', reason: 'promo bukan scope' }]);
+    expect(report.sources?.[0].aiRisks).toEqual([{ path: 'api/promo.go', reason: 'kredensial di kode' }]);
+    // The check only previews the deploy needs; the document is untouched.
+    expect(report.sources?.[0].aiPending?.map((n) => n.label)).toEqual(['Buat tabel refund_logs', 'REFUND_MAX', 'Smoke test refund']);
+    const untouched = await m.get(r.id);
+    expect([untouched.items, untouched.services[0].envBlock, untouched.services[0].postDeploy]).toEqual([[], undefined, undefined]);
+
+    // "Generate dokumen": from the release MR, into the document.
+    replies.push(JSON.stringify({ needs: [{ kind: 'sql', when: 'pre', label: 'Buat tabel refund_logs', detail: 'CREATE TABLE refund_logs (id bigint);', files: ['api/refund.go'] }, { kind: 'env', when: 'pre', label: 'REFUND_MAX', files: [] }, { kind: 'other', when: 'post', label: 'Smoke test refund', files: [] }], failover: '' }));
+    await m.aiStart(r.id, 'docgen', { ai });
+    expect((await settle('docgen')).status).toBe('done');
+    expect(prompts[1]).toContain('+func RefundApi()');
     const saved = await m.get(r.id);
-    // Straight into the document: the query in Pre-deploy, the env in the .env block.
     expect(saved.items.map((i) => [i.kind, i.label, i.source, i.detail])).toEqual([['sql', 'Buat tabel refund_logs', 'ai', 'CREATE TABLE refund_logs (id bigint);']]);
     expect(saved.services[0].envBlock?.split('\n')).toContain('REFUND_MAX=');
     expect(saved.services[0].postDeploy).toEqual(['Smoke test refund']);
-    expect(report.sources?.[0].aiRisks).toEqual([{ path: 'api/promo.go', reason: 'kredensial di kode' }]);
 
-    // A second check replaces what the AI wrote before instead of piling up.
-    replies.push(JSON.stringify({ tickets: [{ key: 'MU-12', verdict: 'ada', files: [], reason: 'x' }], needs: [{ kind: 'other', when: 'post', label: 'Cek log refund', files: [] }] }));
-    await m.aiStart(r.id, 'tickets', { ai });
-    await settle('tickets');
+    // Generating again replaces what the last generate wrote instead of piling up.
+    replies.push(JSON.stringify({ needs: [{ kind: 'other', when: 'post', label: 'Cek log refund', files: [] }] }));
+    await m.aiStart(r.id, 'docgen', { ai });
+    await settle('docgen');
     const again = await m.get(r.id);
     expect(again.services[0].postDeploy).toEqual(['Cek log refund']);
     expect(again.items.filter((i) => i.source === 'ai')).toEqual([]);
     expect(again.services[0].envBlock).toContain('REFUND_MAX=');
-    prompts.splice(1, 1);
+    prompts.splice(1, 2);
 
     replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));
     await m.aiStart(r.id, 'picks', { ai, serviceId: 's1', sourceBranch: 'staging' });

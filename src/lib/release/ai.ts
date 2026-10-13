@@ -349,6 +349,24 @@ const VERDICTS: AiVerdict[] = ['ada', 'sebagian', 'tidak'];
 export type AiNeed = ReleaseAiNeed;
 const NEED_KINDS: AiNeed['kind'][] = ['env', 'sql', 'migration', 'other'];
 
+/** Deploy needs in an AI answer ("needs"), files limited to those that changed. */
+export function parseNeeds(json: Record<string, unknown>, known: Set<string>): AiNeed[] {
+  const needs: AiNeed[] = [];
+  for (const n of Array.isArray(json.needs) ? json.needs : []) {
+    const r = n as Record<string, unknown>;
+    const kind = str(r.kind, 20).toLowerCase() as AiNeed['kind'];
+    let label = str(r.label, 300);
+    if (!NEED_KINDS.includes(kind) || !label) continue;
+    // An env name is the item; whatever the AI wrapped around it is not.
+    if (kind === 'env') label = label.match(/[A-Z][A-Z0-9_]{1,80}/)?.[0] ?? '';
+    if (!label || needs.some((x) => x.kind === kind && x.label === label)) continue;
+    const detail = typeof r.detail === 'string' ? r.detail.trim().slice(0, 20_000) : '';
+    const when = str(r.when, 10).toLowerCase() === 'post' ? 'post' : 'pre';
+    needs.push({ kind, when, label, ...(detail ? { detail } : {}), files: strs(r.files, 8).filter((p) => known.has(p)) });
+  }
+  return needs.slice(0, 80);
+}
+
 /** Ticket verdicts for the asked keys only; files limited to the files that changed. */
 export function parseTicketsReply(
   reply: string,
@@ -376,24 +394,12 @@ export function parseTicketsReply(
       })
       .filter((u) => known.has(u.path)),
   ).slice(0, 50);
-  const needs: AiNeed[] = [];
-  for (const n of Array.isArray(json.needs) ? json.needs : []) {
-    const r = n as Record<string, unknown>;
-    const kind = str(r.kind, 20).toLowerCase() as AiNeed['kind'];
-    let label = str(r.label, 300);
-    if (!NEED_KINDS.includes(kind) || !label) continue;
-    // An env name is the item; whatever the AI wrapped around it is not.
-    if (kind === 'env') label = label.match(/[A-Z][A-Z0-9_]{1,80}/)?.[0] ?? '';
-    if (!label || needs.some((x) => x.kind === kind && x.label === label)) continue;
-    const detail = typeof r.detail === 'string' ? r.detail.trim().slice(0, 20_000) : '';
-    const when = str(r.when, 10).toLowerCase() === 'post' ? 'post' : 'pre';
-    needs.push({ kind, when, label, ...(detail ? { detail } : {}), files: strs(r.files, 8).filter((p) => known.has(p)) });
-  }
+  const needs = parseNeeds(json, known);
   const risks = (Array.isArray(json.risks) ? json.risks : [])
     .map((u) => ({ path: str((u as Record<string, unknown>).path, 300), reason: str((u as Record<string, unknown>).reason, 800) }))
     .filter((u) => u.reason && (!u.path || known.has(u.path)))
     .slice(0, 30);
-  return { tickets, unrelated, needs: needs.slice(0, 80), risks };
+  return { tickets, unrelated, needs, risks };
 }
 
 /** One pick per known commit, in the commits' order; unknown shas are dropped. */
@@ -601,4 +607,36 @@ export function parseSafetyReply(reply: string): { verdict: 'aman' | 'perlu dice
     .filter((i) => i.reason)
     .slice(0, 30);
   return { verdict, summary: str(json.summary, 800), issues };
+}
+
+/** "Generate dokumen": what the server needs for one service's release MRs, from their diff. */
+export function docgenPrompt(input: { service: string; target: string; mrs: string[]; diff: string; current: { envBlock?: string; failover?: string } }): string {
+  return [
+    `Service: ${input.service}. MR rilis ke ${input.target}: ${input.mrs.join(', ')}.`,
+    'Susun bagian dokumen deployment service ini dari ISI DIFF MR (bukan judul/commit).',
+    '',
+    'Blok .env di dokumen saat ini:',
+    input.current.envBlock?.trim() || '(kosong)',
+    `Failover saat ini: ${input.current.failover ?? '(default)'}`,
+    '',
+    'Diff MR (baris + ditambah, - dihapus):',
+    input.diff,
+    '',
+    'Daftar SEMUA yang harus disiapkan di server sebelum/sesudah deploy:',
+    '- "env": variabel environment baru atau yang mulai dibaca kode. label = NAMA_ENV, detail = contoh nilai/keterangan (jangan mengarang rahasia).',
+    '- "sql": query manual: CREATE/ALTER/DROP TABLE, CREATE INDEX, INSERT/UPDATE data master, termasuk tabel yang dipakai model/query tapi tidak ada migrasinya. detail = SQL lengkap bila bisa disusun dari kode.',
+    '- "migration": file migrasi yang harus dijalankan. label = path file.',
+    '- "other": langkah deploy lain yang HARUS dikerjakan (config, cron, queue/topic, bucket, dependency/service, gateway, feature flag tetap mati, restart service lain, smoke test endpoint baru). label = langkah singkat.',
+    'Setiap item diberi "when": "pre" atau "post". Temuan review (bug, risiko) BUKAN langkah deploy, jangan dimasukkan.',
+    'Isi "failover" hanya bila strategi rollback khusus dibutuhkan (mis. migrasi yang tidak bisa dibalik); selain itu kosongkan.',
+    '',
+    'Skema jawaban:',
+    '{"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file"]}],"failover":""}',
+  ].join('\n');
+}
+
+export function parseDocgenReply(reply: string, paths: string[]): { needs: AiNeed[]; failover: string } | null {
+  const json = parseJsonReply(reply);
+  if (!json) return null;
+  return { needs: parseNeeds(json, new Set(paths)), failover: str(json.failover, 300) };
 }

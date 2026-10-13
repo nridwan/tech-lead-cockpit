@@ -68,6 +68,21 @@
     } else if (job.status === 'error') toasts.show(`Cek AI gagal: ${job.error}`, 'err', 6000);
   });
   const aiDoc = new AiJobWatch(() => current?.id, 'document');
+  // "Generate dokumen": the AI reads the release MRs of every service and writes the document.
+  const aiGen = new AiJobWatch(() => current?.id, 'docgen', undefined, async (job) => {
+    if (!current || job.releaseId !== current.id) return;
+    if (job.status === 'done') {
+      const fresh = await releases.get(current.id).catch(() => null);
+      if (fresh) setCurrent(fresh);
+      toasts.show(job.notes?.join(' ') || 'Dokumen disusun dari MR rilis.', 'ok', 7000);
+    } else if (job.status === 'error') toasts.show(`Generate dokumen gagal: ${job.error}`, 'err', 7000);
+  });
+
+  async function startDocgen() {
+    await flush();
+    await aiGen.start(ai);
+    if (aiGen.error) toasts.show(aiGen.error, 'err');
+  }
   // "Cari service & MR" with AI: adds services and MRs; the release comes back when it is done.
   const aiFind = new AiJobWatch(() => current?.id, 'discover', undefined, async (job) => {
     if (!current || job.releaseId !== current.id) return;
@@ -189,12 +204,15 @@
     aiCheck.stop();
     aiDoc.stop();
     aiFind.stop();
+    aiGen.stop();
+    aiGen.job = null;
     aiCheck.job = null;
     aiDoc.job = null;
     aiFind.job = null;
     void aiCheck.load();
     void aiDoc.load();
     void aiFind.load();
+    void aiGen.load();
     derivedCodenames = await releases.codenames(id).catch(() => []);
   }
 
@@ -619,7 +637,7 @@
                   <li>
                     <strong>{src.service}</strong> · <span class="mono">{src.ref}</span> · {src.error ? `gagal: ${src.error}` : `${src.files} file berubah`}
                     {#if src.aiPending?.length}
-                      <details><summary>Belum ada MR: {src.aiPending.length} kebutuhan deploy masuk dokumen setelah MR dibuat</summary><ul>{#each src.aiPending as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sql">{n.detail}</pre>{/if}</li>{/each}</ul></details>
+                      <details><summary>{src.aiPending.length} kebutuhan deploy (pratinjau){src.kind === 'mr' ? ' — masuk dokumen lewat Generate dokumen' : ' — masuk dokumen setelah MR dibuat dan Generate dokumen'}</summary><ul>{#each src.aiPending as n, i (i)}<li>{n.when === 'post' ? 'Setelah deploy: ' : ''}{n.kind === 'env' ? `env ${n.label}` : n.label}{#if n.kind === 'sql' && n.detail}<pre class="sql">{n.detail}</pre>{/if}</li>{/each}</ul></details>
                     {/if}
                     {#if src.aiRisks?.length}
                       <details open><summary class="err-text">AI: {src.aiRisks.length} risiko/temuan review</summary><ul>{#each src.aiRisks as r, i (i)}<li>{#if r.path}<span class="mono">{r.path}</span> — {/if}<span>{r.reason}</span></li>{/each}</ul></details>
@@ -708,6 +726,19 @@
             {/if}
           {/if}
         {:else}
+          <section class="docgen">
+            <div class="row">
+              <strong>Generate dokumen dari MR</strong>
+              <AiPicker value={ai} onchange={pickAi} disabled={aiGen.running} />
+              {#if aiGen.running}
+                <span class="small ai-status"><Icon name="sparkles" size={12} /> {aiGen.job?.progress ?? 'AI menyusun…'}</span>
+                <button class="btn btn-sm" onclick={() => aiGen.cancel()}><Icon name="x" size={12} /> Batalkan</button>
+              {:else}
+                <button class="btn btn-sm btn-primary" onclick={startDocgen} disabled={!current.services.some((x) => x.mrs.length)}><Icon name="sparkles" size={12} /> Generate dokumen</button>
+              {/if}
+            </div>
+            <p class="muted small">AI membaca MR rilis tiap service (terbuka atau merged ke {current.targetBranch}) dan menulis .env, query/migrasi, langkah pre/post-deploy, serta commit id bila MR sudah merged. Hasil generate sebelumnya diganti; service tanpa MR tertulis "Menunggu MR".{aiGen.job?.status === 'done' && aiGen.job.finishedAt ? ` Terakhir: ${fmt(aiGen.job.finishedAt)}.` : ''}</p>
+          </section>
           <div class="doc-bar">
             {#if current.source}
               <span class="small">Sumber: {current.source.kind === 'confluence' ? 'Confluence' : 'Markdown'} · <strong>{current.source.title}</strong>{current.source.version ? ` · versi ${current.source.version}` : ''} · diimport {fmt(current.source.importedAt)}</span>
@@ -1201,6 +1232,21 @@
   }
   .ai-verdict {
     margin-bottom: 3px;
+  }
+  .docgen {
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    margin: 10px 0;
+  }
+  .docgen .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .docgen p {
+    margin: 6px 0 0;
   }
   .ai-doc {
     border: 1px solid var(--border);

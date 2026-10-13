@@ -287,7 +287,7 @@ export function hasReleaseMr(service: ReleaseService, checks: MrCheck[]): boolea
 /** Commit id for a service: the merge commit of its merged release MR, else none (TBA). */
 export function serviceCommit(service: ReleaseService, checks: MrCheck[]): string | undefined {
   // Before the review is merged the document says TBA: an open MR's head or a typed sha goes stale.
-  return checks.find((c) => service.mrs.some((m) => m.ref === c.ref) && !c.error && c.state === 'merged' && c.commitSha)?.commitSha;
+  return checks.find((c) => service.mrs.some((m) => m.ref === c.ref) && !c.error && c.state === 'merged' && c.commitSha)?.commitSha ?? service.releaseCommit;
 }
 
 /** Change Log rows from the release itself when none were written: one row for the release. */

@@ -39,6 +39,8 @@ export interface ReleaseService {
   sourceBranch?: string;
   /** The branch a release branch was built from (cherry-pick or chosen hunks): what it is checked against. */
   releaseFrom?: string;
+  /** Merge commit of the service's merged release MR, written by "Generate dokumen". */
+  releaseCommit?: string;
   /** Deployment page fields (typed in or imported). */
   commitId?: string;
   /** The env code block of the deployment page, values included (local file only). */
@@ -370,7 +372,7 @@ export interface AiPick {
 export interface ReleaseAiJob {
   id: string;
   releaseId: string;
-  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover' | 'safety' | 'flag';
+  kind: 'tickets' | 'picks' | 'document' | 'mr' | 'patch' | 'discover' | 'safety' | 'flag' | 'docgen';
   serviceId?: string;
   sourceBranch?: string;
   /** What the Tech Lead asked (document fix, commit pick). */

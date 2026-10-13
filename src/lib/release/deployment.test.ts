@@ -206,6 +206,8 @@ describe('writing a deployment page', () => {
     expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'opened', commitSha: 'head1234' } as unknown as MrCheck])).toBeUndefined();
     expect(serviceCommit(svc, [])).toBeUndefined();
     expect(serviceCommit(svc, [{ ref: 'p/core!1', state: 'merged', commitSha: 'merge999' } as unknown as MrCheck])).toBe('merge999');
+    // Written by "Generate dokumen" from the merged MR, when no check is at hand.
+    expect(serviceCommit({ ...svc, releaseCommit: 'gen1234' }, [])).toBe('gen1234');
     const { storageToPreviewHtml } = await import('./preview');
     const html = storageToPreviewHtml(deploymentStorage(imported), new Map([['acc-sup', 'Super Visor']]));
     expect(html).toContain('<span class="lozenge lz-blue">DOCUMENT APPROVAL</span>');
