@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MrFileChange } from '../gitlab/types';
-import { AI_RULES_VERSION, compactDiff, diffText, fileDelta, focusTerms, knownFlagsText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
+import { AI_RULES_VERSION, compactDiff, rebuildEnvBlock, diffText, fileDelta, focusTerms, knownFlagsText, parseDocumentReply, parseJsonReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt } from './ai';
 
 const change = (path: string, diff: string): MrFileChange => ({ oldPath: path, newPath: path, newFile: false, renamedFile: false, deletedFile: false, diff, additions: 1, deletions: 0 });
 
@@ -58,6 +58,14 @@ describe('release AI prompts and answers', () => {
     expect(ticketsPrompt({ service: 's', target: 'master', refs: ['r'], tickets: [], commits: [], diff: '', flags })).toContain('Feature flag yang dibuat lewat Cockpit');
     expect(knownFlagsText([])).toBe('');
     expect(AI_RULES_VERSION).toBeGreaterThan(1);
+  });
+
+  it('rebuilds a .env block from the MR: kept keys keep their values, unrelated keys go', () => {
+    const current = 'DB_HOST=db.internal\nDEV_KEY=\nSTG_KEY=\nAPI_SECRET=s3cr3t';
+    // The AI keeps DB_HOST and API_SECRET (it may even write another value: the document's wins),
+    // drops the CI variables, and the code needs NEW_FLAG too.
+    expect(rebuildEnvBlock(current, 'DB_HOST=\nAPI_SECRET=changed', ['NEW_FLAG'])).toBe('DB_HOST=db.internal\nAPI_SECRET=s3cr3t\nNEW_FLAG=');
+    expect(rebuildEnvBlock(current, '', [])).toBeUndefined();
   });
 
   it('reads the JSON object out of a chatty or fenced reply', () => {

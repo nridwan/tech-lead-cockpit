@@ -346,7 +346,8 @@ describe('ReleaseManager', () => {
     const again = await m.get(r.id);
     expect(again.services[0].postDeploy).toEqual(['Cek log refund']);
     expect(again.items.filter((i) => i.source === 'ai')).toEqual([]);
-    expect(again.services[0].envBlock).toContain('REFUND_MAX=');
+    // The .env block follows the MR too: this generate found no env, so the old key is gone.
+    expect(again.services[0].envBlock).toBeUndefined();
     prompts.splice(1, 2);
 
     replies.push(JSON.stringify({ picks: [{ sha: 'c1c1c1c1aa', include: true, keys: ['MU-12'], reason: 'refund' }, { sha: 'c2c2c2c2', include: false, reason: 'promo' }], notes: [] }));

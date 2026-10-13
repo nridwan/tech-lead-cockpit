@@ -636,14 +636,37 @@ export function docgenPrompt(input: { service: string; target: string; mrs: stri
     '- "other": langkah deploy lain yang HARUS dikerjakan (config, cron, queue/topic, bucket, dependency/service, gateway, feature flag tetap mati, restart service lain, smoke test endpoint baru). label = langkah singkat.',
     'Setiap item diberi "when": "pre" atau "post". Temuan review (bug, risiko) BUKAN langkah deploy, jangan dimasukkan.',
     'Isi "failover" hanya bila strategi rollback khusus dibutuhkan (mis. migrasi yang tidak bisa dibalik); selain itu kosongkan.',
+    '"envBlock": isi LENGKAP blok .env service ini untuk MR ini (KEY=nilai per baris): hanya env yang dibaca/ditambah kode di diff MR. Pertahankan nilai yang sudah ada di blok saat ini untuk kunci yang tetap dipakai; env baru tanpa nilai yang diketahui tulis KEY=. Buang kunci yang tidak dipakai kode MR ini (mis. variabel CI/CD seperti token deploy, sisa dokumen lama). Kosongkan bila MR tidak membawa env.',
     '',
     'Skema jawaban:',
-    '{"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file"]}],"failover":""}',
+    '{"needs":[{"kind":"env|sql|migration|other","when":"pre|post","label":"...","detail":"...","files":["path/file"]}],"failover":"","envBlock":"KEY=..."}',
   ].join('\n');
 }
 
-export function parseDocgenReply(reply: string, paths: string[]): { needs: AiNeed[]; failover: string } | null {
+export function parseDocgenReply(reply: string, paths: string[]): { needs: AiNeed[]; failover: string; envBlock?: string } | null {
   const json = parseJsonReply(reply);
   if (!json) return null;
-  return { needs: parseNeeds(json, new Set(paths)), failover: str(json.failover, 300) };
+  return { needs: parseNeeds(json, new Set(paths)), failover: str(json.failover, 300), ...(typeof json.envBlock === 'string' ? { envBlock: json.envBlock.slice(0, 50_000) } : {}) };
+}
+
+const ENV_KEY = /^\s*(?:export\s+)?([A-Z][A-Z0-9_]{1,80})\s*=/;
+
+/**
+ * The .env block a generate writes: the keys the AI kept or added (plus env the code needs that it
+ * left out), each with the value it already had in the document; the AI never sets a value.
+ */
+export function rebuildEnvBlock(current: string | undefined, fromAi: string, required: string[]): string | undefined {
+  const known = new Map<string, string>();
+  for (const l of (current ?? '').split('\n')) {
+    const k = l.match(ENV_KEY)?.[1];
+    if (k && !known.has(k)) known.set(k, l.trim());
+  }
+  const keys: string[] = [];
+  for (const l of fromAi.split('\n')) {
+    const k = l.match(ENV_KEY)?.[1];
+    if (k && !keys.includes(k)) keys.push(k);
+  }
+  for (const k of required) if (!keys.includes(k)) keys.push(k);
+  const lines = keys.map((k) => known.get(k) ?? `${k}=`);
+  return lines.length ? lines.join('\n') : undefined;
 }

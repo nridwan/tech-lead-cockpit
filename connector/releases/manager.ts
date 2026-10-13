@@ -6,7 +6,7 @@ import { mrTitle, newMrFormUrl } from '../../src/lib/release/mr.ts';
 import { planReleaseBranch, releaseBranchName } from '../../src/lib/release/branch.ts';
 import type { JiraIssue } from '../../src/lib/jira/types.ts';
 import { checkMr, isEnvOrConfigFile, jiraKeysIn } from '../../src/lib/release/checks.ts';
-import { AI_RULES_VERSION, RELEASE_AI_SYSTEM, diffText, docgenPrompt, parseDocgenReply, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, parseSafetyReply, patchPrompt, safetyPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService, type KnownFlag } from '../../src/lib/release/ai.ts';
+import { AI_RULES_VERSION, RELEASE_AI_SYSTEM, diffText, docgenPrompt, parseDocgenReply, rebuildEnvBlock, discoverPrompt, fileDelta, focusTerms, hunksText, parsePatchReply, parseSafetyReply, patchPrompt, safetyPrompt, documentPrompt, parseDiscoverReply, parseDocumentReply, parsePicksReply, parseTicketsReply, picksPrompt, ticketsPrompt, type AiCommitInput, type AiDocService, type KnownFlag } from '../../src/lib/release/ai.ts';
 import { isAiSelection, type AiSelection } from '../../src/lib/ai/types.ts';
 import { foldEnvItems, serviceEnvBlock } from '../../src/lib/release/deployment.ts';
 import { fileProblems, notFromSource, type SafetyIssue } from '../../src/lib/release/safety.ts';
@@ -1207,9 +1207,10 @@ export class ReleaseManager {
         items.push({ id: newId(), done: false, ...x });
       };
       // The pattern check of the MRs (env files, migrations, SQL files), then the AI's reading.
+      const envFromCode: string[] = [];
       for (const d of details) {
         const c = checkMr(d);
-        for (const e of c.envAdded) add({ kind: 'env', label: e, service: s.name, source: 'check' });
+        envFromCode.push(...c.envAdded);
         for (const p of c.migrations) add({ kind: 'migration', label: p, service: s.name, source: 'check' });
         for (const p of c.sqlOutside) add({ kind: 'sql', label: p, service: s.name, source: 'check' });
       }
@@ -1226,13 +1227,21 @@ export class ReleaseManager {
           if (n.detail && !sqlFile.detail) sqlFile.detail = n.detail;
           continue;
         }
-        add({ kind: n.kind, label: n.label, service: s.name, ...(n.detail && n.kind !== 'env' ? { detail: n.detail } : {}), ...(note ? { note } : {}), source: 'ai' });
+        if (n.kind === 'env') {
+          envFromCode.push(n.label);
+          continue;
+        }
+        add({ kind: n.kind, label: n.label, service: s.name, ...(n.detail ? { detail: n.detail } : {}), ...(note ? { note } : {}), source: 'ai' });
       }
+      // The .env block is rebuilt from this MR: kept keys keep their values, the rest go (e.g. CI
+      // variables left from an older check). Env items of the service are folded into it.
+      items = items.filter((x) => !(mine(x) && x.kind === 'env'));
+      const envBlock = rebuildEnvBlock(s.envBlock, parsed.envBlock ?? '', [...new Set(envFromCode)]);
       const kept = new Set(parsed.needs.map((n) => n.label.toLowerCase()));
       const gone = dropped.filter((l) => !kept.has(l.toLowerCase()));
       if (gone.length) notes.push(`${s.name}: query/migrasi dari dokumen import yang tidak dibutuhkan kode MR dibuang: ${gone.join(', ')}.`);
       const merged = details.find((d) => d.state === 'merged' && d.mergeCommitSha);
-      updates.set(s.id, { preDeploy: addLines([], pre), postDeploy: addLines([], post), ...(parsed.failover ? { failover: parsed.failover } : {}), ...(merged ? { releaseCommit: merged.mergeCommitSha } : {}) });
+      updates.set(s.id, { envBlock, preDeploy: addLines([], pre), postDeploy: addLines([], post), ...(parsed.failover ? { failover: parsed.failover } : {}), ...(merged ? { releaseCommit: merged.mergeCommitSha } : {}) });
     }
     if (live.cancelled) return;
     const fresh = await this.get(release.id);
