@@ -513,7 +513,7 @@
           <span class="ai-pick" title="Model AI untuk cek rilis"><AiPicker value={ai} onchange={pickAi} disabled={aiCheck.running || aiFind.running} /></span>
           <button class="btn btn-sm" onclick={() => (importOpen = true)}><Icon name="upload" size={13} /> Import dokumen</button>
           <button class="btn btn-sm" onclick={async () => { await flush(); shareOpen = true; }} disabled={!allMrs.length}><Icon name="teams" size={13} /> Share MR ke Teams</button>
-          <button class="btn btn-sm" onclick={async () => { await flush(); publishOpen = true; }}><Icon name="confluence" size={13} /> Publish ke Confluence</button>
+          <button class="btn btn-sm" onclick={async () => { await flush(); publishOpen = true; }}><Icon name="confluence" size={13} /> {current.published || (current.source?.kind === 'confluence' && current.source.pageId) ? 'Update ke Confluence' : 'Publish ke Confluence'}</button>
           {#if report}<span class="muted small">Cek terakhir {fmt(report.checkedAt)}{report.ai ? ` · dengan AI (${report.ai.model})` : ''}</span>{/if}
         </div>
         {#if aiFind.running}
@@ -745,6 +745,7 @@
               {#if current.source.url}<a class="small" href={current.source.url} target="_blank" rel="noreferrer">Buka <Icon name="external" size={11} /></a>{/if}
             {/if}
             {#if current.published}<span class="small">Dipublish ke Confluence versi {current.published.version} {#if current.published.url}<a href={current.published.url} target="_blank" rel="noreferrer">Buka <Icon name="external" size={11} /></a>{/if}</span>{/if}
+            <button class="btn btn-sm btn-primary" onclick={async () => { await flush(); publishOpen = true; }}><Icon name="confluence" size={12} /> Update ke Confluence</button>
             <button class="btn btn-sm" onclick={copyDoc}><Icon name="copy" size={12} /> Salin Markdown</button>
             <button class="btn btn-sm btn-ghost" onclick={resetDoc} title="Kosongkan isi dokumen lama (Change Log, Release List, bukti test, status, commit id manual) supaya dokumen mengikuti data rilis"><Icon name="refresh" size={12} /> Susun ulang dari data rilis</button>
           </div>
