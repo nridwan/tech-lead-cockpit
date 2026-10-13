@@ -17,7 +17,7 @@ import { findEvidence, indexChanges, unattributedFiles, withSharedEndpoints, typ
 import { mergeReleaseDoc, parseReleaseDoc, serviceForPath, type ImportOptions } from '../../src/lib/release/import.ts';
 import { parseDeploymentStorage } from '../../src/lib/release/deployment.ts';
 import { shareMessageHtml, shareMessageText, type ShareOptions } from '../../src/lib/release/share.ts';
-import type { AiTicketVerdict, CodeEvidence, ReleaseAiNeed, CodeSource, MrCheck, MrPlan, ReleaseAiJob, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
+import type { AiTicketVerdict, CodeEvidence, FlagMr, ReleaseAiNeed, CodeSource, MrCheck, MrPlan, ReleaseAiJob, OutOfScope, Release, ReleaseItem, ReleaseReport, ReleaseService, ReleaseSource } from '../../src/lib/release/types.ts';
 import { parseTaskTitle } from '../../src/lib/tad/template.ts';
 import { parseScopeTasks, taskDetailText, taskEndpoints } from '../../src/lib/tad/task-links.ts';
 import { matchRepo } from '../roster/git-activity.ts';
@@ -42,7 +42,6 @@ export interface ReleaseGitLab {
   createBranch?(path: string, branch: string, ref: string): Promise<void>;
   cherryPick?(path: string, sha: string, branch: string): Promise<{ id: string }>;
   rawFile?(path: string, filePath: string, ref: string): Promise<string | undefined>;
-  mergeMr?(path: string, iid: number): Promise<{ state: string; mergeCommitSha?: string }>;
   latestPipeline?(path: string, ref: string): Promise<{ status: string; webUrl: string } | undefined>;
   commitFiles?(path: string, req: { branch: string; start: string; message: string; actions: { action: 'create' | 'update' | 'delete'; path: string; content?: string }[] }): Promise<{ id: string }>;
 }
@@ -1140,20 +1139,30 @@ export class ReleaseManager {
     return { branch, ref: mr.ref, webUrl: mr.webUrl, created: !existing };
   }
 
-  /** Merges the feature flag's MR into its base (the user confirmed). */
-  async mergeFlagMr(id: string, serviceId: string): Promise<{ ref: string; state: string }> {
+  /**
+   * The feature flag's MR as GitLab has it now: open/merged, approvals, pipeline. Cockpit never
+   * merges it: it is reviewed and merged in GitLab like any other MR.
+   */
+  async flagMrStatus(id: string, serviceId: string): Promise<FlagMr> {
     const release = await this.get(id);
     const service = this.service(release, serviceId);
     const job = await this.aiJob(id, 'flag', serviceId);
     const mr = job?.flag?.mr;
-    if (!job || !mr) throw new ReleaseInputError('Belum ada MR feature flag untuk di-merge.');
-    if (mr.merged) throw new ReleaseInputError(`${mr.ref} sudah di-merge.`);
+    if (!job || !mr) throw new ReleaseInputError('Belum ada MR feature flag.');
     const gitlab = await this.deps.gitlab();
-    if (!gitlab?.mergeMr) throw new ReleaseInputError('GitLab belum terhubung.');
-    const iid = Number(mr.ref.split('!').pop());
-    const r = await gitlab.mergeMr(service.gitlabPath!, iid);
-    await this.saveAiJob({ ...job, flag: { ...job.flag!, mr: { ...mr, merged: r.state === 'merged' } } });
-    return { ref: mr.ref, state: r.state };
+    if (!gitlab) throw new ReleaseInputError('GitLab belum terhubung.');
+    const d = await gitlab.mr(service.gitlabPath!, Number(mr.ref.split('!').pop()));
+    const next: FlagMr = {
+      ...mr,
+      state: d.state,
+      merged: d.state === 'merged',
+      approvals: d.approvals?.approvedBy.length ?? 0,
+      ...(d.approvals?.required !== undefined ? { approvalsRequired: d.approvals.required } : {}),
+      ...(d.pipeline?.status ? { pipeline: d.pipeline.status } : {}),
+      checkedAt: this.now(),
+    };
+    await this.saveAiJob({ ...job, flag: { ...job.flag!, mr: next } });
+    return next;
   }
 
   private async aiDocument(live: AiLive, ai: AiSelection, instruction: string) {

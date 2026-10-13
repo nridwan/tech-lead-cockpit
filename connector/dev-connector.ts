@@ -1577,16 +1577,11 @@ async function handleReleases(route: string, url: URL, req: IncomingMessage, res
       const body = await readJson<{ id?: string; kind?: string; serviceId?: string }>(req, 8 * 1024);
       return send(res, 200, { job: await rm.aiCancel(idOf(body.id), String(body.kind ?? '') as ReleaseAiJob['kind'], body.serviceId ? String(body.serviceId) : undefined) });
     }
-    if (route === 'POST /releases/flag/mr' || route === 'POST /releases/flag/merge') {
+    if (route === 'GET /releases/flag/status') return send(res, 200, await rm.flagMrStatus(idOf(url.searchParams.get('id')), String(url.searchParams.get('serviceId') ?? '')));
+    if (route === 'POST /releases/flag/mr') {
       const body = await readJson<{ id?: string; serviceId?: string }>(req, 8 * 1024);
-      const merge = route === 'POST /releases/flag/merge';
-      const base = { ts: new Date().toISOString(), action: merge ? ('gitlab.mr.merge' as const) : ('gitlab.mr.create' as const), spaceKey: 'GitLab', title: merge ? 'Merge MR feature flag' : 'Branch + MR feature flag', attachments: 0 };
+      const base = { ts: new Date().toISOString(), action: 'gitlab.mr.create' as const, spaceKey: 'GitLab', title: 'Branch + MR feature flag', attachments: 0 };
       try {
-        if (merge) {
-          const r = await rm.mergeFlagMr(idOf(body.id), String(body.serviceId ?? ''));
-          await audit({ ...base, title: `Merge ${r.ref} (${r.state})`, result: 'success' }).catch(() => {});
-          return send(res, 200, r);
-        }
         const r = await rm.createFlagMr(idOf(body.id), String(body.serviceId ?? ''));
         await audit({ ...base, title: `Branch ${r.branch} + ${r.created ? 'MR' : 'MR yang ada'} ${r.ref}`, result: 'success' }).catch(() => {});
         return send(res, 200, r);

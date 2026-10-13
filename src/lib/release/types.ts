@@ -384,7 +384,7 @@ export interface ReleaseAiJob {
   /** document: proposed fixes per service, applied only when the user confirms. */
   fixes?: ReleaseDocFix[];
   /** flag: a feature flag the AI wrote for a feature outside the release, not yet written to GitLab. */
-  flag?: { name: string; base: string; summary: string; files: FlagFile[]; problems: string[]; mr?: { ref: string; webUrl: string; branch: string; merged?: boolean } };
+  flag?: { name: string; base: string; summary: string; files: FlagFile[]; problems: string[]; mr?: FlagMr };
   /** safety: the release branch's safety layers. */
   safety?: SafetyResult;
   /** patch: the changed files split in hunks, with the AI's choice per hunk. */
@@ -444,4 +444,18 @@ export interface FlagFile {
   preview: string;
   /** Fingerprint of the file on the base when the flag was written: it must not have changed since. */
   baseHash?: string;
+}
+
+/** The feature flag's MR into its base: reviewed and merged in GitLab, never by Cockpit. */
+export interface FlagMr {
+  ref: string;
+  webUrl: string;
+  branch: string;
+  merged?: boolean;
+  /** Last read from GitLab ("Cek status"). */
+  state?: string;
+  approvals?: number;
+  approvalsRequired?: number;
+  pipeline?: string;
+  checkedAt?: string;
 }

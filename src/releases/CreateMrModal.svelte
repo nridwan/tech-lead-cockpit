@@ -311,10 +311,10 @@
   const f = $derived(plan?.findings);
 
   // Feature flag for a feature outside the release (on the source): AI writes it, the user reviews,
-  // then a branch + MR into the source branch, and a merge (each confirmed).
+  // then a branch + MR into the source branch (confirmed). The MR is reviewed and merged in GitLab.
   let flagWhat = $state('');
   let flagPaths = $state<string[]>([]);
-  let flagBusy = $state<'' | 'mr' | 'merge'>('');
+  let flagBusy = $state<'' | 'mr' | 'status'>('');
   const aiFlag = new AiJobWatch(
     () => release.id,
     'flag',
@@ -346,7 +346,7 @@
     flagBusy = 'mr';
     try {
       const r = await releases.createFlagMr(release.id, service.id);
-      toasts.show(`${r.created ? 'MR' : 'MR yang ada'} ${r.ref} ke ${f.base} siap.`, 'ok', 5000);
+      toasts.show(`${r.created ? 'MR' : 'MR yang ada'} ${r.ref} ke ${f.base} siap direview di GitLab.`, 'ok', 6000);
       await aiFlag.load();
     } catch (e) {
       toasts.show((e as Error).message, 'err', 8000);
@@ -355,18 +355,15 @@
     }
   }
 
-  async function mergeFlag() {
-    const f = flagDone?.flag;
-    if (!f?.mr) return;
-    const ok = await confirmDialog({ title: `Merge ${f.mr.ref} ke ${f.base}?`, message: `Feature flag ${f.name} masuk ke ${f.base}. Pastikan MR-nya sudah direview sesuai aturan tim.`, confirmText: 'Merge', danger: true });
-    if (!ok) return;
-    flagBusy = 'merge';
+  /** Reads the flag MR from GitLab: review, approvals, pipeline, merged (merging happens in GitLab). */
+  async function flagStatus() {
+    flagBusy = 'status';
     try {
-      const r = await releases.mergeFlagMr(release.id, service.id);
-      toasts.show(r.state === 'merged' ? `${r.ref} sudah di-merge ke ${f.base}. Klik Bandingkan, lalu cek ulang dengan AI.` : `${r.ref}: ${r.state}.`, 'ok', 7000);
+      const st = await releases.flagStatus(release.id, service.id);
+      toasts.show(st.merged ? `${st.ref} sudah di-merge. Klik Bandingkan, lalu cek ulang dengan AI.` : `${st.ref}: ${st.state ?? 'terbuka'}, ${st.approvals ?? 0}${st.approvalsRequired ? `/${st.approvalsRequired}` : ''} approval${st.pipeline ? `, pipeline ${st.pipeline}` : ''}.`, 'info', 6000);
       await aiFlag.load();
     } catch (e) {
-      toasts.show((e as Error).message, 'err', 8000);
+      toasts.show((e as Error).message, 'err', 6000);
     } finally {
       flagBusy = '';
     }
@@ -489,7 +486,7 @@
           {/if}
           <section class="flag" id="flag-panel">
             <h4>Feature flag</h4>
-            <p class="muted small">Fitur di branch sumber yang bukan bagian rilis bisa dibungkus feature flag (default mati), lalu di-merge ke branch sumbernya. Setelah itu fiturnya boleh ikut naik tanpa aktif.</p>
+            <p class="muted small">Fitur di branch sumber yang bukan bagian rilis bisa dibungkus feature flag (default mati) lewat MR ke branch sumbernya. MR-nya direview dan di-merge di GitLab; setelah itu fiturnya boleh ikut naik tanpa aktif.</p>
             <textarea class="input pick-ins" rows="2" bind:value={flagWhat} placeholder="Fitur yang mau di-flag, mis. scheduler laporan pajak di core/scheduler/tax_transaction_scheduler.go"></textarea>
             {#if flagPaths.length}<div class="small">File: {#each flagPaths as p (p)}<span class="tag mono">{p} <button class="link-btn" onclick={() => (flagPaths = flagPaths.filter((x) => x !== p))} aria-label="Hapus {p}">✕</button></span> {/each}</div>{/if}
             <div class="row">
@@ -512,8 +509,12 @@
                 {/each}
                 <div class="row">
                   {#if fl.mr}
-                    <span class="small">MR: <a href={fl.mr.webUrl} target="_blank" rel="noreferrer">{fl.mr.ref}</a> ({fl.mr.branch} → {fl.base}){fl.mr.merged ? ' · sudah di-merge' : ''}</span>
-                    {#if !fl.mr.merged}<button class="btn btn-sm btn-primary" onclick={mergeFlag} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'merge' ? 'Me-merge…' : `Merge ke ${fl.base}`}</button>{/if}
+                    <span class="small">
+                      MR <a href={fl.mr.webUrl} target="_blank" rel="noreferrer">{fl.mr.ref}</a> ({fl.mr.branch} → {fl.base}):
+                      {#if fl.mr.merged}<strong>sudah di-merge</strong> — klik Bandingkan, lalu cek ulang dengan AI.
+                      {:else}menunggu review dan merge di GitLab{fl.mr.checkedAt ? ` · ${fl.mr.approvals ?? 0}${fl.mr.approvalsRequired ? `/${fl.mr.approvalsRequired}` : ''} approval${fl.mr.pipeline ? ` · pipeline ${fl.mr.pipeline}` : ''}` : ''}{/if}
+                    </span>
+                    {#if !fl.mr.merged}<button class="btn btn-sm" onclick={flagStatus} disabled={!!flagBusy}><Icon name="refresh" size={12} /> {flagBusy === 'status' ? 'Mengecek…' : 'Cek status'}</button>{/if}
                   {:else if fl.files.length}
                     <button class="btn btn-sm btn-primary" onclick={makeFlagMr} disabled={!!flagBusy || plan.canCreate === false}><Icon name="merge" size={12} /> {flagBusy === 'mr' ? 'Membuat…' : `Buat branch & MR ke ${fl.base}`}</button>
                   {/if}

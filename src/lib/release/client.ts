@@ -1,6 +1,6 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { AiSelection } from '../ai/types';
-import type { MrPlan, Release, ReleaseAiJob, ReleaseReport, ReleaseSource } from './types';
+import type { FlagMr, MrPlan, Release, ReleaseAiJob, ReleaseReport, ReleaseSource } from './types';
 
 async function call<T>(path: string, body?: unknown): Promise<T> {
   let res: Response;
@@ -48,8 +48,8 @@ export const releases = {
     call<{ release: Release; branch: string; picked: string[]; failed?: { sha: string; title?: string; error: string } }>('/mr/branch', { id, serviceId, branch, picks, sourceBranch }),
   /** Writes the AI's feature flag: a branch from the base + MR into it (token with scope api). */
   createFlagMr: (id: string, serviceId: string) => call<{ branch: string; ref: string; webUrl: string; created: boolean }>('/flag/mr', { id, serviceId }),
-  /** Merges the feature flag's MR into its base (staging…). */
-  mergeFlagMr: (id: string, serviceId: string) => call<{ ref: string; state: string }>('/flag/merge', { id, serviceId }),
+  /** The feature flag's MR as GitLab has it (review, approvals, pipeline, merged). Cockpit never merges it. */
+  flagStatus: (id: string, serviceId: string) => call<FlagMr>(`/flag/status?id=${encodeURIComponent(id)}&serviceId=${encodeURIComponent(serviceId)}`),
   /** The chosen hunks applied without writing: result vs target per file, JSON problems. */
   previewPatch: (id: string, serviceId: string, req: { sourceBranch: string; hunks: string[] }) =>
     call<{ files: { path: string; status: string; diff: string; problem?: string; changes?: string[] }[] }>('/patch/preview', { id, serviceId, ...req }),

@@ -500,11 +500,11 @@ describe('ReleaseManager', () => {
     expect(j2?.error).toMatch(/belum memakai branch rilis/);
   });
 
-  it('writes a feature flag with AI, then a branch + MR into staging and a merge, refusing a changed base', async () => {
+  it('writes a feature flag with AI, then a branch + MR into staging (merged in GitLab, not by Cockpit), refusing a changed base', async () => {
     let main = 'func main() {\n\tc.AddFunc(cfg.Tax, TaxReport)\n}';
     const commits: { branch: string; start: string; actions: { action: string; path: string; content?: string }[] }[] = [];
     const created: { source: string; target: string; title: string }[] = [];
-    const merged: number[] = [];
+    let state = 'opened';
     const m = manager({
       runAi: () => ({
         done: Promise.resolve({ reply: JSON.stringify({ flag: 'TAX_ENABLE', summary: 'pajak di balik flag', edits: [{ path: 'main.go', find: '\tc.AddFunc(cfg.Tax, TaxReport)', replace: '\tif os.Getenv("TAX_ENABLE") == "true" {\n\t\tc.AddFunc(cfg.Tax, TaxReport)\n\t}' }], notes: [] }) }),
@@ -512,14 +512,13 @@ describe('ReleaseManager', () => {
       }),
       gitlab: async () => ({
         mrsToBranch: async () => [],
-        mr: async () => detail(summary('payments/core-payment', 12)),
         branchExists: async () => false,
         compare: async () => ({ commits: [], changes: [{ oldPath: 'main.go', newPath: 'main.go', newFile: false, renamedFile: false, deletedFile: false, diff: '+\tc.AddFunc(cfg.Tax, TaxReport)', additions: 1, deletions: 0 }], truncated: false }),
         rawFile: async (_p, f) => (f === 'main.go' ? main : undefined),
         commitFiles: async (_p, req) => (commits.push(req), { id: 'c1' }),
         openMrFor: async () => undefined,
         createMr: async (path, req) => (created.push(req), summary(path, 77, { title: req.title, sourceBranch: req.source })),
-        mergeMr: async (_p, iid) => (merged.push(iid), { state: 'merged' }),
+        mr: async (path, iid) => detail(summary(path, iid, { state: state as never })),
       }),
     });
     const r = await m.store.save({ name: 'Switching', services: [{ id: 's1', name: 'core-payment', gitlabPath: 'payments/core-payment', mrs: [], order: 1 }] } as never);
@@ -545,9 +544,12 @@ describe('ReleaseManager', () => {
     expect(commits[0]).toMatchObject({ branch: 'feature-flag/tax-enable', start: 'staging' });
     expect(created[0]).toEqual({ source: 'feature-flag/tax-enable', target: 'staging', title: '[STAGING] - Feature flag TAX_ENABLE', description: '' });
     await expect(m.createFlagMr(r.id, 's1')).rejects.toThrow(/sudah punya MR/);
-    expect(await m.mergeFlagMr(r.id, 's1')).toEqual({ ref: 'payments/core-payment!77', state: 'merged' });
-    expect(merged).toEqual([77]);
+    // Reviewed and merged in GitLab; Cockpit only reads the status.
+    expect(await m.flagMrStatus(r.id, 's1')).toMatchObject({ state: 'opened', merged: false, approvals: 1, pipeline: 'success' });
+    state = 'merged';
+    expect((await m.flagMrStatus(r.id, 's1')).merged).toBe(true);
     expect((await m.aiJob(r.id, 'flag', 's1'))?.flag?.mr?.merged).toBe(true);
+    expect('mergeFlagMr' in m).toBe(false);
   });
 
   it('creates a release branch from the target and stops at the first cherry-pick conflict', async () => {

@@ -94,7 +94,7 @@ export interface ConnectorError {
 export interface AuditEvent {
   ts: string;
   action: 'confluence.create' | 'confluence.update' | 'whatsapp.send' | 'teams.send' | 'jira.transition' | 'coder.push' | 'qa.run' | 'report.install' | 'report.send'
-    | 'remote.enable' | 'remote.disable' | 'remote.pair' | 'remote.revoke' | 'remote.connect' | 'remote.action' | 'bug.ticket' | 'jira.create' | 'gitlab.mr.create' | 'gitlab.branch.create' | 'gitlab.mr.merge';
+    | 'remote.enable' | 'remote.disable' | 'remote.pair' | 'remote.revoke' | 'remote.connect' | 'remote.action' | 'bug.ticket' | 'jira.create' | 'gitlab.mr.create' | 'gitlab.branch.create';
   result: 'success' | 'failure';
   spaceKey: string;
   title: string;
